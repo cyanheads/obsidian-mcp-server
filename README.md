@@ -13,6 +13,8 @@ The Model Context Protocol (MCP) enables AI models to interact with external too
 
 Requires the Local REST API plugin in Obsidian.
 
+<a href="https://glama.ai/mcp/servers/syuh40cxyk"><img width="380" height="200" src="https://glama.ai/mcp/servers/syuh40cxyk/badge" alt="Obsidian Server MCP server" /></a>
+
 ## Features
 
 ### File Operations
