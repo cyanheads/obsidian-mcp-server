@@ -23,7 +23,8 @@ import {
   AppendContentToolHandler,
   PatchContentToolHandler,
   ComplexSearchToolHandler,
-  GetTagsToolHandler
+  GetTagsToolHandler,
+  GetActiveFileToolHandler
 } from "./tools.js";
 import {
   GetPropertiesToolHandler,
@@ -100,7 +101,8 @@ const handlers: AnyToolHandler[] = [
   new ComplexSearchToolHandler(client),
   new GetPropertiesToolHandler(client),
   new UpdatePropertiesToolHandler(client),
-  new GetTagsToolHandler(client)
+  new GetTagsToolHandler(client),
+  new GetActiveFileToolHandler(client)
 ];
 
 handlers.forEach(handler => toolHandlers.set(handler.name, handler));
