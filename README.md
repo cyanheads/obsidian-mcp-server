@@ -104,9 +104,10 @@ npm install obsidian-mcp-server
     npm run build
     ```
     This compiles the TypeScript code to JavaScript in the `dist/` directory and makes the entry point executable.
-4.  Link project to package manager:
+4.  Install project:
     ```bash
-    npm install .
+    cd ../
+    npm install ./obsidian-mcp-server
     ```
 
 ## Configuration
