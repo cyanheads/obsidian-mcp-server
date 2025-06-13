@@ -104,6 +104,10 @@ npm install obsidian-mcp-server
     npm run build
     ```
     This compiles the TypeScript code to JavaScript in the `dist/` directory and makes the entry point executable.
+4.  Link project to package manager:
+    ```bash
+    npm install .
+    ```
 
 ## Configuration
 
@@ -173,8 +177,8 @@ Add to your MCP client settings (e.g., `cline_mcp_settings.json`):
 {
   "mcpServers": {
     "obsidian-mcp-server": {
-      "command": "node",
-      "args": ["/path/to/your/obsidian-mcp-server/dist/index.js"],
+      "command": "npx",
+      "args": ["obsidian-mcp-server"],
       "env": {
         "OBSIDIAN_API_KEY": "YOUR_OBSIDIAN_API_KEY",
         "OBSIDIAN_BASE_URL": "http://127.0.0.1:27123",
