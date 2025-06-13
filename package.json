@@ -36,7 +36,7 @@
     "inspect:http": "mcp-inspector --config mcp.json --server obsidian-mcp-server-http"
   },
   "dependencies": {
-    "@modelcontextprotocol/inspector": "^0.14.0",
+    "@modelcontextprotocol/inspector": "^0.14.1",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@hono/node-server": "^1.14.4",
     "@types/jsonwebtoken": "^9.0.9",
