@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2025-06-21 02:20:52
+Generated on: 2025-07-30 13:17:39
 
 ```
 obsidian-mcp-server
@@ -21,10 +21,12 @@ obsidian-mcp-server
 │   └── tree.ts
 ├── src
 │   ├── config
-│   │   └── index.ts
+│   │   ├── index.ts
+│   │   ├── obsidian-permissions.default.json
+│   │   └── obsidian-permissions.example.json
 │   ├── mcp-server
 │   │   ├── tools
-│   │   │   ├── obsidianDeleteFileTool
+│   │   │   ├── obsidianDeleteNoteTool
 │   │   │   │   ├── index.ts
 │   │   │   │   ├── logic.ts
 │   │   │   │   └── registration.ts
@@ -32,7 +34,7 @@ obsidian-mcp-server
 │   │   │   │   ├── index.ts
 │   │   │   │   ├── logic.ts
 │   │   │   │   └── registration.ts
-│   │   │   ├── obsidianListFilesTool
+│   │   │   ├── obsidianListNotesTool
 │   │   │   │   ├── index.ts
 │   │   │   │   ├── logic.ts
 │   │   │   │   └── registration.ts
@@ -44,7 +46,7 @@ obsidian-mcp-server
 │   │   │   │   ├── index.ts
 │   │   │   │   ├── logic.ts
 │   │   │   │   └── registration.ts
-│   │   │   ├── obsidianReadFileTool
+│   │   │   ├── obsidianReadNoteTool
 │   │   │   │   ├── index.ts
 │   │   │   │   ├── logic.ts
 │   │   │   │   └── registration.ts
@@ -58,36 +60,53 @@ obsidian-mcp-server
 │   │   │       └── registration.ts
 │   │   ├── transports
 │   │   │   ├── auth
-│   │   │   │   ├── core
-│   │   │   │   │   ├── authContext.ts
-│   │   │   │   │   ├── authTypes.ts
-│   │   │   │   │   └── authUtils.ts
+│   │   │   │   ├── lib
 │   │   │   │   ├── strategies
-│   │   │   │   │   ├── jwt
-│   │   │   │   │   │   └── jwtMiddleware.ts
-│   │   │   │   │   └── oauth
-│   │   │   │   │       └── oauthMiddleware.ts
+│   │   │   │   │   ├── authStrategy.ts
+│   │   │   │   │   ├── jwtStrategy.ts
+│   │   │   │   │   └── oauthStrategy.ts
+│   │   │   │   ├── authFactory.ts
+│   │   │   │   ├── authMiddleware.ts
 │   │   │   │   └── index.ts
-│   │   │   ├── httpErrorHandler.ts
-│   │   │   ├── httpTransport.ts
-│   │   │   └── stdioTransport.ts
+│   │   │   ├── core
+│   │   │   │   ├── baseTransportManager.ts
+│   │   │   │   ├── honoNodeBridge.ts
+│   │   │   │   ├── statefulTransportManager.ts
+│   │   │   │   ├── statelessTransportManager.ts
+│   │   │   │   └── transportTypes.ts
+│   │   │   ├── http
+│   │   │   │   ├── httpErrorHandler.ts
+│   │   │   │   ├── httpTransport.ts
+│   │   │   │   ├── httpTypes.ts
+│   │   │   │   ├── index.ts
+│   │   │   │   └── mcpTransportMiddleware.ts
+│   │   │   └── stdio
+│   │   │       ├── index.ts
+│   │   │       └── stdioTransport.ts
 │   │   └── server.ts
 │   ├── services
-│   │   └── obsidianRestAPI
-│   │       ├── methods
-│   │       │   ├── activeFileMethods.ts
-│   │       │   ├── commandMethods.ts
-│   │       │   ├── openMethods.ts
-│   │       │   ├── patchMethods.ts
-│   │       │   ├── periodicNoteMethods.ts
-│   │       │   ├── searchMethods.ts
-│   │       │   └── vaultMethods.ts
-│   │       ├── vaultCache
-│   │       │   ├── index.ts
-│   │       │   └── service.ts
-│   │       ├── index.ts
-│   │       ├── service.ts
-│   │       └── types.ts
+│   │   ├── obsidianRestAPI
+│   │   │   ├── methods
+│   │   │   │   ├── activeFileMethods.ts
+│   │   │   │   ├── commandMethods.ts
+│   │   │   │   ├── openMethods.ts
+│   │   │   │   ├── patchMethods.ts
+│   │   │   │   ├── periodicNoteMethods.ts
+│   │   │   │   ├── searchMethods.ts
+│   │   │   │   └── vaultMethods.ts
+│   │   │   ├── utils
+│   │   │   │   ├── index.ts
+│   │   │   │   ├── obsidianApiUtils.ts
+│   │   │   │   ├── obsidianStatUtils.ts
+│   │   │   │   └── requestHandler.ts
+│   │   │   ├── vaultCache
+│   │   │   │   ├── index.ts
+│   │   │   │   └── service.ts
+│   │   │   ├── index.ts
+│   │   │   ├── service.ts
+│   │   │   └── types.ts
+│   │   └── permissions
+│   │       └── service.ts
 │   ├── types-global
 │   │   └── errors.ts
 │   ├── utils
@@ -100,14 +119,16 @@ obsidian-mcp-server
 │   │   ├── metrics
 │   │   │   ├── index.ts
 │   │   │   └── tokenCounter.ts
-│   │   ├── obsidian
-│   │   │   ├── index.ts
-│   │   │   ├── obsidianApiUtils.ts
-│   │   │   └── obsidianStatUtils.ts
+│   │   ├── network
+│   │   │   ├── fetchWithTimeout.ts
+│   │   │   └── index.ts
 │   │   ├── parsing
 │   │   │   ├── dateParser.ts
 │   │   │   ├── index.ts
 │   │   │   └── jsonParser.ts
+│   │   ├── scheduling
+│   │   │   ├── index.ts
+│   │   │   └── scheduler.ts
 │   │   ├── security
 │   │   │   ├── idGenerator.ts
 │   │   │   ├── index.ts

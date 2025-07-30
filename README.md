@@ -155,7 +155,6 @@ Configure the server using environment variables. These environmental variables 
 To connect the MCP server to your Obsidian vault, you need to configure the base URL (`OBSIDIAN_BASE_URL`) and API key (`OBSIDIAN_API_KEY`). The Obsidian Local REST API plugin offers two ways to connect:
 
 1.  **Encrypted (HTTPS) - Default**:
-
     - The plugin provides a secure `https://` endpoint (e.g., `https://127.0.0.1:27124`).
     - This uses a self-signed certificate, which will cause connection errors by default.
     - **To fix this**, you must set the `OBSIDIAN_VERIFY_SSL` environment variable to `"false"`. This tells the server to trust the self-signed certificate.
