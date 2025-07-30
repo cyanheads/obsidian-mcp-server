@@ -1,11 +1,12 @@
 /**
- * @fileoverview Defines the core logic, schemas, and types for the `obsidian_update_note` tool.
- * This tool handles whole-file operations like append, prepend, and overwrite in Obsidian notes.
+ * @fileoverview Defines the core logic for the `obsidian_update_note` tool, which handles
+ * whole-file operations like appending, prepending, and overwriting content in Obsidian notes.
  * @module src/mcp-server/tools/obsidianUpdateNoteTool/logic
  */
 
 import { z } from "zod";
 import {
+  NoteJson,
   ObsidianRestApiService,
   VaultCacheService,
 } from "../../../services/obsidianRestAPI/index.js";
@@ -24,40 +25,42 @@ const BaseObsidianUpdateNoteInputSchema = z.object({
   targetType: z
     .enum(["filePath", "activeFile", "periodicNote"])
     .describe(
-      "The type of target to modify: a specific file path, the currently active file, or a periodic note (e.g., daily).",
+      "The type of note to target: a specific `filePath`, the `activeFile` in the editor, or a `periodicNote` (e.g., 'daily').",
     ),
-  content: z.string().describe("The content to add or use for overwriting."),
+  content: z.string().describe("The content to write, append, or prepend."),
   targetIdentifier: z
     .string()
     .optional()
     .describe(
-      "Identifier for the target. Required for 'filePath' (e.g., 'Notes/My Note.md') and 'periodicNote' (e.g., 'daily', 'weekly').",
+      "Identifier for the target. Required for `filePath` (e.g., 'Notes/My Note.md') and `periodicNote` (e.g., 'daily', 'weekly').",
     ),
   modificationType: z
     .literal("wholeFile")
-    .describe("The type of modification, fixed to 'wholeFile' for this tool."),
+    .describe(
+      "Defines the modification scope, fixed to `wholeFile` for this tool.",
+    ),
   wholeFileMode: z
     .enum(["append", "prepend", "overwrite"])
     .describe(
-      "The mode of operation: 'append' to add to the end, 'prepend' to add to the beginning, or 'overwrite' to replace the entire content.",
+      "The operation mode: `append` to add to the end, `prepend` to the beginning, or `overwrite` the entire note.",
     ),
   createIfNeeded: z
     .boolean()
     .default(true)
     .describe(
-      "If true, a new file will be created if the target does not exist. Defaults to true.",
+      "If true, a new note will be created if the target does not exist.",
     ),
   overwriteIfExists: z
     .boolean()
     .default(false)
     .describe(
-      "If true, allows 'overwrite' mode to proceed even if the file already exists. A safeguard to prevent accidental data loss. Defaults to false.",
+      "A safety flag. If true, allows `overwrite` mode to proceed if the note already exists.",
     ),
   returnContent: z
     .boolean()
     .default(false)
     .describe(
-      "If true, the final content of the note will be returned in the response. Defaults to false.",
+      "If true, the final content of the note is included in the response.",
     ),
 });
 
@@ -85,10 +88,15 @@ const FormattedStatSchema = z.object({
 });
 
 export const ObsidianUpdateNoteResponseSchema = z.object({
-  success: z.boolean(),
-  message: z.string(),
-  stats: FormattedStatSchema.optional(),
-  finalContent: z.string().optional(),
+  success: z.boolean().describe("True if the operation was successful."),
+  message: z.string().describe("A summary of the operation's result."),
+  stats: FormattedStatSchema.optional().describe(
+    "Optional file statistics, including timestamps and token count.",
+  ),
+  finalContent: z
+    .string()
+    .optional()
+    .describe("The full content of the note after the update."),
 });
 
 // ====================================================================================
@@ -123,33 +131,63 @@ export const obsidianUpdateNoteLogic = async (
     overwriteIfExists,
   } = params;
 
+  let effectiveFilePath: string | undefined;
   let existingContent = "";
   let fileExists = false;
 
+  // Determine file path and check existence
   try {
-    if (targetType === "filePath" && targetIdentifier) {
+    if (targetType === "filePath") {
+      if (!targetIdentifier)
+        throw new McpError(
+          BaseErrorCode.VALIDATION_ERROR,
+          "filePath is required.",
+          context,
+        );
+      effectiveFilePath = targetIdentifier;
       existingContent = (await obsidianService.getFileContent(
-        targetIdentifier,
+        effectiveFilePath,
         "markdown",
         context,
       )) as string;
       fileExists = true;
     } else if (targetType === "activeFile") {
-      existingContent = (await obsidianService.getActiveFile(
-        "markdown",
-        context,
-      )) as string;
+      const activeFile = await obsidianService.getActiveFile("json", context);
+      if (typeof activeFile === "string")
+        throw new McpError(
+          BaseErrorCode.INTERNAL_ERROR,
+          "Could not retrieve active file details.",
+          context,
+        );
+      effectiveFilePath = activeFile.path;
+      existingContent = activeFile.content ?? "";
       fileExists = true;
-    } else if (targetType === "periodicNote" && targetIdentifier) {
-      existingContent = (await obsidianService.getPeriodicNote(
+    } else if (targetType === "periodicNote") {
+      if (!targetIdentifier)
+        throw new McpError(
+          BaseErrorCode.VALIDATION_ERROR,
+          "period is required for periodicNote.",
+          context,
+        );
+      const note = await obsidianService.getPeriodicNote(
         targetIdentifier as any,
-        "markdown",
+        "json",
         context,
-      )) as string;
+      );
+      if (typeof note === "string")
+        throw new McpError(
+          BaseErrorCode.INTERNAL_ERROR,
+          "Could not retrieve periodic note details.",
+          context,
+        );
+      effectiveFilePath = note.path;
+      existingContent = note.content ?? "";
       fileExists = true;
     }
   } catch (error) {
-    if (error instanceof McpError && error.code !== BaseErrorCode.NOT_FOUND) {
+    if (
+      !(error instanceof McpError && error.code === BaseErrorCode.NOT_FOUND)
+    ) {
       throw error;
     }
   }
@@ -157,7 +195,7 @@ export const obsidianUpdateNoteLogic = async (
   if (fileExists && wholeFileMode === "overwrite" && !overwriteIfExists) {
     throw new McpError(
       BaseErrorCode.CONFLICT,
-      "File exists and overwriteIfExists is false.",
+      `Note at '${effectiveFilePath}' exists and 'overwriteIfExists' is false.`,
       context,
     );
   }
@@ -165,7 +203,7 @@ export const obsidianUpdateNoteLogic = async (
   if (!fileExists && !createIfNeeded) {
     throw new McpError(
       BaseErrorCode.NOT_FOUND,
-      "File does not exist and createIfNeeded is false.",
+      `Note not found at '${effectiveFilePath}' and 'createIfNeeded' is false.`,
       context,
     );
   }
@@ -177,44 +215,45 @@ export const obsidianUpdateNoteLogic = async (
     newContent = content + existingContent;
   }
 
-  if (targetType === "filePath" && targetIdentifier) {
-    await obsidianService.updateFileContent(
-      targetIdentifier,
-      newContent,
-      context,
-    );
-    if (vaultCacheService) {
-      await vaultCacheService.updateCacheForFile(targetIdentifier, context);
+  // Determine the final file path for saving
+  if (!effectiveFilePath) {
+    if (targetType === "filePath" && targetIdentifier) {
+      effectiveFilePath = targetIdentifier;
+    } else {
+      throw new McpError(
+        BaseErrorCode.INTERNAL_ERROR,
+        "Could not determine a file path to save the note.",
+        context,
+      );
     }
-  } else if (targetType === "activeFile") {
-    await obsidianService.updateActiveFile(newContent, context);
-  } else if (targetType === "periodicNote" && targetIdentifier) {
-    await obsidianService.updatePeriodicNote(
-      targetIdentifier as any,
-      newContent,
-      context,
-    );
   }
 
-  const finalNote =
-    targetType === "filePath" && targetIdentifier
-      ? ((await obsidianService.getFileContent(
-          targetIdentifier,
-          "json",
-          context,
-        )) as any)
-      : null;
-  const stats = finalNote
+  await obsidianService.updateFileContent(
+    effectiveFilePath,
+    newContent,
+    context,
+  );
+  if (vaultCacheService?.isReady()) {
+    await vaultCacheService.updateCacheForFile(effectiveFilePath, context);
+  }
+
+  const finalNote = (await obsidianService.getFileContent(
+    effectiveFilePath,
+    "json",
+    context,
+  )) as NoteJson;
+
+  const stats = finalNote.stat
     ? await createFormattedStatWithTokenCount(
         finalNote.stat,
-        finalNote.content,
+        finalNote.content ?? "",
         context,
       )
     : undefined;
 
   return {
     success: true,
-    message: `Successfully updated note.`,
+    message: `Successfully updated note via ${wholeFileMode} operation.`,
     stats: stats ?? undefined,
     finalContent: params.returnContent ? newContent : undefined,
   };

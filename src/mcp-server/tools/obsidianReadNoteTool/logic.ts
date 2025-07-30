@@ -1,6 +1,7 @@
 /**
- * @fileoverview Defines the core logic, schemas, and types for the `obsidian_read_note` tool.
- * This tool handles reading a file from an Obsidian vault, with case-insensitive fallback.
+ * @fileoverview Defines the core logic for the `obsidian_read_note` tool. This tool handles
+ * reading a note from an Obsidian vault, with a case-insensitive fallback, providing content
+ * in multiple formats and optional metadata.
  * @module src/mcp-server/tools/obsidianReadNoteTool/logic
  */
 
@@ -26,19 +27,19 @@ export const ObsidianReadNoteInputSchema = z.object({
     .string()
     .min(1, "filePath cannot be empty.")
     .describe(
-      'The vault-relative path to the target file (e.g., "developer/github/tips.md"). Tries case-sensitive first, then case-insensitive fallback.',
+      'The vault-relative path to the target note (e.g., "developer/github/tips.md"). Tries a case-sensitive match first, then a case-insensitive one.',
     ),
   format: z
     .enum(["markdown", "json"])
     .default("markdown")
     .describe(
-      "Format for the returned content ('markdown' or 'json'). Defaults to 'markdown'.",
+      "The desired format for the note's content: `markdown` for raw text or `json` for a structured object including frontmatter.",
     ),
   includeStat: z
     .boolean()
     .default(false)
     .describe(
-      "If true and format is 'markdown', includes file stats in the response. Defaults to false. Ignored if format is 'json'.",
+      "If true, includes detailed file stats (creation/modification times, token count) in the response. Always included for the `json` format.",
     ),
 });
 
@@ -46,24 +47,30 @@ const FormattedStatSchema = z.object({
   createdTime: z
     .string()
     .describe(
-      'Creation time formatted as a standard date-time string (e.g., "05:29:00 PM | 05-03-2025").',
+      'Creation time formatted as a human-readable string (e.g., "05:29:00 PM | 05-03-2025").',
     ),
   modifiedTime: z
     .string()
     .describe(
-      'Last modified time formatted as a standard date-time string (e.g., "05:29:00 PM | 05-03-2025").',
+      'Last modified time formatted as a human-readable string (e.g., "05:29:00 PM | 05-03-2025").',
     ),
   tokenCountEstimate: z
     .number()
     .int()
     .describe(
-      "Estimated token count of the file content (using tiktoken 'gpt-4o').",
+      "An estimated token count of the note's content, based on the 'gpt-4o' model.",
     ),
 });
 
 export const ObsidianReadNoteResponseSchema = z.object({
-  content: z.union([z.string(), z.custom<NoteJson>()]),
-  stats: FormattedStatSchema.optional(),
+  content: z
+    .union([z.string(), z.custom<NoteJson>()])
+    .describe(
+      "The content of the note, either as a markdown string or a JSON object.",
+    ),
+  stats: FormattedStatSchema.optional().describe(
+    "Optional file statistics, including timestamps and token count.",
+  ),
 });
 
 // ====================================================================================
@@ -160,8 +167,8 @@ export const obsidianReadNoteLogic = async (
     content: format === "json" ? noteJson : (noteJson.content ?? ""),
   };
 
-  if (format === "json" || includeStat) {
-    response.stats = formattedStat ?? undefined;
+  if ((format === "json" || includeStat) && formattedStat) {
+    response.stats = formattedStat;
   }
 
   return response;

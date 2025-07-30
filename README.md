@@ -1,15 +1,19 @@
+<div align="center">
+
 # Obsidian MCP Server
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-^5.8.3-blue.svg)](https://www.typescriptlang.org/)
-[![Model Context Protocol](https://img.shields.io/badge/MCP%20SDK-^1.17.0-green.svg)](https://modelcontextprotocol.io/)
-[![Version](https://img.shields.io/badge/Version-2.1.0-blue.svg)](./CHANGELOG.md)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Status](https://img.shields.io/badge/Status-Production-brightgreen.svg)](https://github.com/cyanheads/obsidian-mcp-server/issues)
+**Empower your AI agents with seamless & comprehensive Obsidian vault integration!**
+
+[![TypeScript](https://img.shields.io/badge/TypeScript-^5.8.3-blue.svg?style=flat-square)](https://www.typescriptlang.org/)
+[![Model Context Protocol](https://img.shields.io/badge/MCP%20SDK-^1.17.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![Version](https://img.shields.io/badge/Version-2.1.1-blue.svg?style=flat-square)](./CHANGELOG.md)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
+[![Status](https://img.shields.io/badge/Status-Production-brightgreen.svg?style=flat-square)](https://github.com/cyanheads/obsidian-mcp-server/issues)
 [![GitHub](https://img.shields.io/github/stars/cyanheads/obsidian-mcp-server?style=social)](https://github.com/cyanheads/obsidian-mcp-server)
 
-**Empower your AI agents and development tools with seamless Obsidian integration!**
+</div>
 
-An MCP (Model Context Protocol) server providing comprehensive access to your Obsidian vault. Enables LLMs and AI agents to read, write, search, and manage your notes and files through the [Obsidian Local REST API plugin](https://github.com/coddingtonbear/obsidian-local-rest-api).
+A Model Context Protocol (MCP) server providing comprehensive access to your Obsidian vault. Enables LLMs and AI agents to read, write, search, and manage your notes and files through the [Obsidian Local REST API plugin](https://github.com/coddingtonbear/obsidian-local-rest-api).
 
 Built on the [`cyanheads/mcp-ts-template`](https://github.com/cyanheads/mcp-ts-template), this server follows a modular architecture with robust error handling, logging, and security features.
 
@@ -26,15 +30,15 @@ This server equips your AI with specialized tools to interact with your Obsidian
 | [`obsidian_list_notes`](./src/mcp-server/tools/obsidianListNotesTool/)                 | Lists notes and subdirectories within a specified vault folder. | - Filter by file extension or name regex.<br/>- Provides a formatted tree view of the directory.                                                       |
 | [`obsidian_manage_frontmatter`](./src/mcp-server/tools/obsidianManageFrontmatterTool/) | Atomically manages a note's YAML frontmatter.                   | - `get`, `set`, or `delete` frontmatter keys.<br/>- Avoids rewriting the entire file for metadata changes.                                             |
 | [`obsidian_manage_tags`](./src/mcp-server/tools/obsidianManageTagsTool/)               | Adds, removes, or lists tags for a note.                        | - Manages tags in both YAML frontmatter and inline content.                                                                                            |
-| [`obsidian_delete_note`](./src/mcp-server/tools/obsidianDeleteNoteTool/)               | Permanently deletes a specified note from the vault.            | - Case-insensitive path fallback for safety.                                                                                                           |
+| [`obsidian_delete_note`](./src/mcp-server/tools/obsidianDeleteNoteTool/)               | Permanently deletes a specified note from the vault.            | - **Destructive**: Requires explicit `acknowledgement: 'yes'`.<br/>- Case-sensitive path matching.                                                     |
 
 ---
 
 ## Table of Contents
 
-| [Overview](#overview) | [Features](#features) | [Configuration](#configuration) |
-| [Project Structure](#project-structure) | [Vault Cache Service](#vault-cache-service) |
-| [Tools](#tools) | [Resources](#resources) | [Development](#development) | [License](#license) |
+| [Overview](#overview) | [Features](#features) | [Installation](#installation) |
+| [Configuration](#configuration) | [Project Structure](#project-structure) |
+| [Tools](#tools) | [Development & Testing](#development--testing) | [License](#license) |
 
 ## Overview
 
@@ -83,8 +87,6 @@ Leverages the robust utilities provided by `cyanheads/mcp-ts-template`:
 3.  **API Key**: Configure an API key within the Local REST API plugin settings in Obsidian. You will need this key to configure the server.
 4.  **Node.js & npm**: Ensure you have Node.js (v18 or later recommended) and npm installed.
 
-## Configuration
-
 ### MCP Client Settings
 
 Add the following to your MCP client's configuration file (e.g., `cline_mcp_settings.json`). This configuration uses `npx` to run the server, which will automatically download & install the package if not already present:
@@ -128,6 +130,8 @@ If you installed from source, change `command` and `args` to point to your local
   }
 }
 ```
+
+## Configuration
 
 ### Environment Variables
 
@@ -246,42 +250,62 @@ The Obsidian MCP Server provides a suite of tools for interacting with your vaul
 | `obsidian_list_notes`         | Lists notes and subdirectories in a folder.               | `dirPath`, `fileExtensionFilter?`, `nameRegexFilter?`         |
 | `obsidian_manage_frontmatter` | Gets, sets, or deletes keys in a note's frontmatter.      | `filePath`, `operation`, `key`, `value?`                      |
 | `obsidian_manage_tags`        | Adds, removes, or lists tags in a note.                   | `filePath`, `operation`, `tags`                               |
-| `obsidian_delete_note`        | Permanently deletes a note from the vault.                | `filePath`                                                    |
+| `obsidian_delete_note`        | Permanently deletes a note from the vault.                | `filePath`, `acknowledgement`                                 |
 
 _Note: All tools support comprehensive error handling and return structured JSON responses._
 
-## Resources
+## Development & Testing
 
-**MCP Resources are not implemented in this version.**
-
-This server currently focuses on providing interactive tools for vault manipulation. Future development may introduce resource capabilities (e.g., exposing notes or search results as readable resources).
-
-## Development
-
-### Build and Test
-
-To get started with development, clone the repository, install dependencies, and use the following scripts:
+### Development Scripts
 
 ```bash
-# Install dependencies
-npm install
-
 # Build the project (compile TS to JS in dist/ and make executable)
+npm run build
+
+# Clean build artifacts
+npm run clean
+
+# Clean build artifacts and then rebuild the project
 npm run rebuild
 
-# Start the server locally using stdio transport
-npm start:stdio
-
-# Start the server using http transport
-npm run start:http
-
-# Format code using Prettier
+# Format code with Prettier
 npm run format
 
-# Inspect the server's capabilities using the MCP Inspector tool
-npm run inspect:stdio
-# or for the http transport:
-npm run inspect:http
+# Generate a file tree representation for documentation
+npm run tree
+```
+
+### Testing
+
+This project uses [Vitest](https://vitest.dev/) for unit and integration testing.
+
+```bash
+# Run all tests once
+npm test
+
+# Run tests in watch mode
+npm run test:watch
+
+# Run tests and generate a coverage report
+npm run test:coverage
+```
+
+### Running the Server
+
+```bash
+# Start the server using stdio (default)
+npm start
+# Or explicitly:
+npm run start:stdio
+
+# Start the server using HTTP transport
+npm run start:http
+
+# Test the server locally using the MCP inspector tool (stdio transport)
+npm run inspector
+
+# Test the server locally using the MCP inspector tool (http transport)
+npm run inspector:http
 ```
 
 ## License

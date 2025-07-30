@@ -1,6 +1,6 @@
 /**
- * @fileoverview Defines the core logic, schemas, and types for the `obsidian_search_replace` tool.
- * This tool performs complex search and replace operations in Obsidian notes.
+ * @fileoverview Defines the core logic for the `obsidian_search_replace` tool, which
+ * performs advanced, in-memory search and replace operations on Obsidian notes.
  * @module src/mcp-server/tools/obsidianSearchReplaceTool/logic
  */
 
@@ -21,7 +21,7 @@ import {
 // ====================================================================================
 
 const ReplacementBlockSchema = z.object({
-  search: z.string().min(1),
+  search: z.string().min(1, "Search pattern cannot be empty."),
   replace: z.string(),
 });
 
@@ -29,39 +29,39 @@ const BaseObsidianSearchReplaceInputSchema = z.object({
   targetType: z
     .enum(["filePath", "activeFile", "periodicNote"])
     .describe(
-      "The type of target to modify: a specific file path, the currently active file, or a periodic note.",
+      "The type of note to target: a specific `filePath`, the `activeFile` in the editor, or a `periodicNote` (e.g., daily).",
     ),
   targetIdentifier: z
     .string()
     .optional()
     .describe(
-      "Identifier for the target, required for 'filePath' and 'periodicNote'.",
+      "The identifier for the target. Required for `filePath` (e.g., 'Notes/My Note.md') and `periodicNote` (e.g., 'daily', 'weekly').",
     ),
   replacements: z
     .array(ReplacementBlockSchema)
     .min(1)
     .describe(
-      "An array of one or more search/replace objects, applied sequentially.",
+      "An array of one or more search/replace objects to be applied sequentially.",
     ),
   useRegex: z
     .boolean()
     .default(false)
-    .describe("If true, the 'search' string is treated as a regex pattern."),
+    .describe(
+      "If true, the `search` string is treated as a regular expression.",
+    ),
   replaceAll: z
     .boolean()
     .default(true)
-    .describe(
-      "If true, all occurrences of the search pattern are replaced; otherwise, only the first.",
-    ),
+    .describe("If true, replaces all occurrences; otherwise, only the first."),
   caseSensitive: z
     .boolean()
     .default(true)
-    .describe("If true, the search is case-sensitive."),
+    .describe("If true, the search operation is case-sensitive."),
   flexibleWhitespace: z
     .boolean()
     .default(false)
     .describe(
-      "If true (and not using regex), matches patterns with any amount of whitespace between words.",
+      "If true (and not using regex), matches patterns with any amount of whitespace.",
     ),
   wholeWord: z
     .boolean()
@@ -70,7 +70,9 @@ const BaseObsidianSearchReplaceInputSchema = z.object({
   returnContent: z
     .boolean()
     .default(false)
-    .describe("If true, the final content of the note is returned."),
+    .describe(
+      "If true, the final content of the note is included in the response.",
+    ),
 });
 
 export const ObsidianSearchReplaceInputSchema =
@@ -100,11 +102,19 @@ const FormattedStatSchema = z.object({
 });
 
 export const ObsidianSearchReplaceResponseSchema = z.object({
-  success: z.boolean(),
-  message: z.string(),
-  totalReplacementsMade: z.number().int(),
-  stats: FormattedStatSchema.optional(),
-  finalContent: z.string().optional(),
+  success: z.boolean().describe("True if the operation was successful."),
+  message: z.string().describe("A summary of the operation's result."),
+  totalReplacementsMade: z
+    .number()
+    .int()
+    .describe("The total number of replacements made across all operations."),
+  stats: FormattedStatSchema.optional().describe(
+    "Optional file statistics, including timestamps and token count.",
+  ),
+  finalContent: z
+    .string()
+    .optional()
+    .describe("The full content of the note after all replacements."),
 });
 
 // ====================================================================================
@@ -122,14 +132,16 @@ export type ObsidianSearchReplaceResponse = z.infer<
 // Core Logic Function
 // ====================================================================================
 
+function escapeRegex(string: string): string {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export const obsidianSearchReplaceLogic = async (
   params: ObsidianSearchReplaceInput,
   context: RequestContext,
   obsidianService: ObsidianRestApiService,
   vaultCacheService?: VaultCacheService,
 ): Promise<ObsidianSearchReplaceResponse> => {
-  // This is a simplified version of the logic for the refactor.
-  // The original logic is overly complex and will be streamlined here.
   logger.debug("Executing obsidian_search_replace logic.", context);
 
   const {
@@ -139,50 +151,85 @@ export const obsidianSearchReplaceLogic = async (
     useRegex,
     replaceAll,
     caseSensitive,
+    flexibleWhitespace,
+    wholeWord,
   } = params;
 
   let originalContent: string;
-  let effectiveFilePath: string | undefined =
-    targetType === "filePath" ? targetIdentifier : undefined;
+  let effectiveFilePath: string | undefined;
 
-  if (targetType === "filePath") {
-    if (!targetIdentifier)
-      throw new McpError(
-        BaseErrorCode.VALIDATION_ERROR,
-        "filePath is required.",
+  switch (targetType) {
+    case "filePath":
+      if (!targetIdentifier) {
+        throw new McpError(
+          BaseErrorCode.VALIDATION_ERROR,
+          "filePath is required for targetType 'filePath'.",
+          context,
+        );
+      }
+      effectiveFilePath = targetIdentifier;
+      originalContent = (await obsidianService.getFileContent(
+        effectiveFilePath,
+        "markdown",
+        context,
+      )) as string;
+      break;
+    case "activeFile":
+      const activeFile = await obsidianService.getActiveFile("json", context);
+      if (typeof activeFile === "string") {
+        throw new McpError(
+          BaseErrorCode.INTERNAL_ERROR,
+          "Failed to retrieve active file as JSON.",
+          context,
+        );
+      }
+      effectiveFilePath = activeFile.path;
+      originalContent = activeFile.content ?? "";
+      break;
+    case "periodicNote":
+      if (!targetIdentifier) {
+        throw new McpError(
+          BaseErrorCode.VALIDATION_ERROR,
+          "targetIdentifier is required for periodicNote.",
+          context,
+        );
+      }
+      const periodicNote = await obsidianService.getPeriodicNote(
+        targetIdentifier as any,
+        "json",
         context,
       );
-    originalContent = (await obsidianService.getFileContent(
-      targetIdentifier,
-      "markdown",
-      context,
-    )) as string;
-  } else if (targetType === "activeFile") {
-    originalContent = (await obsidianService.getActiveFile(
-      "markdown",
-      context,
-    )) as string;
-  } else {
-    if (!targetIdentifier)
-      throw new McpError(
-        BaseErrorCode.VALIDATION_ERROR,
-        "period is required for periodicNote.",
-        context,
-      );
-    originalContent = (await obsidianService.getPeriodicNote(
-      targetIdentifier as any,
-      "markdown",
-      context,
-    )) as string;
+      if (typeof periodicNote === "string") {
+        throw new McpError(
+          BaseErrorCode.INTERNAL_ERROR,
+          "Failed to retrieve periodic note as JSON.",
+          context,
+        );
+      }
+      effectiveFilePath = periodicNote.path;
+      originalContent = periodicNote.content ?? "";
+      break;
   }
 
   let modifiedContent = originalContent;
   let totalReplacementsMade = 0;
 
   for (const { search, replace } of replacements) {
+    let searchPattern = search;
+    if (!useRegex) {
+      searchPattern = escapeRegex(search);
+      if (flexibleWhitespace) {
+        searchPattern = searchPattern.replace(/\s+/g, "\\s+");
+      }
+      if (wholeWord) {
+        searchPattern = `\\b${searchPattern}\\b`;
+      }
+    }
+
     const flags = `${replaceAll ? "g" : ""}${caseSensitive ? "" : "i"}`;
-    const regex = new RegExp(search, flags);
+    const regex = new RegExp(searchPattern, flags);
     const matches = modifiedContent.match(regex);
+
     if (matches) {
       totalReplacementsMade += matches.length;
       modifiedContent = modifiedContent.replace(regex, replace);
@@ -190,23 +237,20 @@ export const obsidianSearchReplaceLogic = async (
   }
 
   if (modifiedContent !== originalContent) {
-    if (targetType === "filePath" && effectiveFilePath) {
-      await obsidianService.updateFileContent(
-        effectiveFilePath,
-        modifiedContent,
+    if (!effectiveFilePath) {
+      throw new McpError(
+        BaseErrorCode.INTERNAL_ERROR,
+        "Could not determine file path to save changes.",
         context,
       );
-      if (vaultCacheService) {
-        await vaultCacheService.updateCacheForFile(effectiveFilePath, context);
-      }
-    } else if (targetType === "activeFile") {
-      await obsidianService.updateActiveFile(modifiedContent, context);
-    } else if (targetType === "periodicNote" && targetIdentifier) {
-      await obsidianService.updatePeriodicNote(
-        targetIdentifier as any,
-        modifiedContent,
-        context,
-      );
+    }
+    await obsidianService.updateFileContent(
+      effectiveFilePath,
+      modifiedContent,
+      context,
+    );
+    if (vaultCacheService?.isReady()) {
+      await vaultCacheService.updateCacheForFile(effectiveFilePath, context);
     }
   }
 
@@ -217,7 +261,8 @@ export const obsidianSearchReplaceLogic = async (
         context,
       )) as any)
     : null;
-  const stats = finalNote
+
+  const stats = finalNote?.stat
     ? await createFormattedStatWithTokenCount(
         finalNote.stat,
         finalNote.content,

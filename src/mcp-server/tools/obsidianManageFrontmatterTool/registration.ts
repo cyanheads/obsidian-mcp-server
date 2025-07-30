@@ -1,5 +1,6 @@
 /**
- * @fileoverview Handles the registration of the `obsidian_manage_frontmatter` tool.
+ * @fileoverview Registers the `obsidian_manage_frontmatter` tool, providing atomic
+ * operations for managing a note's YAML frontmatter.
  * @module src/mcp-server/tools/obsidianManageFrontmatterTool/registration
  */
 
@@ -16,9 +17,9 @@ import {
   requestContextService,
 } from "../../../utils/index.js";
 import {
-  obsidianManageFrontmatterLogic,
   ObsidianManageFrontmatterInputSchema,
   ObsidianManageFrontmatterInputSchemaShape,
+  obsidianManageFrontmatterLogic,
   ObsidianManageFrontmatterResponseSchema,
   type ObsidianManageFrontmatterInput,
 } from "./logic.js";
@@ -37,7 +38,7 @@ export const registerObsidianManageFrontmatterTool = async (
 ): Promise<void> => {
   const toolName = "obsidian_manage_frontmatter";
   const toolDescription =
-    "Atomically manages a note's YAML frontmatter. Supports getting, setting (creating/updating), and deleting specific keys without rewriting the entire file. Ideal for efficient metadata operations on primitive or structured Obsidian frontmatter data.";
+    "Atomically manages an Obsidian note's YAML frontmatter. Supports getting, setting, and deleting keys, making it ideal for efficient metadata operations on both simple and structured data without rewriting the entire note.";
 
   const registrationContext: RequestContext =
     requestContextService.createRequestContext({
@@ -56,6 +57,9 @@ export const registerObsidianManageFrontmatterTool = async (
           description: toolDescription,
           inputSchema: ObsidianManageFrontmatterInputSchemaShape,
           outputSchema: ObsidianManageFrontmatterResponseSchema.shape,
+          annotations: {
+            destructiveHint: false,
+          },
         },
         async (params: ObsidianManageFrontmatterInput) => {
           const handlerContext: RequestContext =

@@ -20,42 +20,44 @@ export const ObsidianListNotesInputSchema = z
     dirPath: z
       .string()
       .describe(
-        'The vault-relative path to the directory to list (e.g., "developer/atlas-mcp-server", "/" for root). Case-sensitive.',
+        'The vault-relative path to the directory to list (e.g., "Meetings/2024/Q3" or "/" for the vault root).',
       ),
     fileExtensionFilter: z
       .array(z.string().startsWith(".", "Extension must start with a dot '.'"))
       .optional()
       .describe(
-        'Optional array of file extensions (e.g., [".md"]) to filter files. Directories are always included.',
+        "An array of file extensions to include (e.g., `['.md', '.canvas']`). Directories are always included.",
       ),
     nameRegexFilter: z
       .string()
       .nullable()
       .optional()
       .describe(
-        "Optional regex pattern (JavaScript syntax) to filter results by name.",
+        "A JavaScript regex pattern to filter entries by name. (e.g., `^Project-` to find all notes starting with 'Project-').",
       ),
     recursionDepth: z
       .number()
       .int()
       .default(-1)
       .describe(
-        "Maximum recursion depth. 0 for no recursion, -1 for infinite (default).",
+        "The maximum depth for recursive listing. Use 0 for no recursion or -1 for infinite depth (default).",
       ),
   })
   .describe(
-    "Input parameters for listing files and subdirectories within a specified Obsidian vault directory, with optional filtering and recursion.",
+    "Lists notes and directories within a specified Obsidian vault path, offering advanced filtering and recursion.",
   );
 
 export const ObsidianListNotesResponseSchema = z.object({
   directoryPath: z
     .string()
-    .describe("The vault-relative path of the directory that was listed."),
-  tree: z.string().describe("A formatted string representing the file tree."),
+    .describe("The absolute vault path of the directory that was listed."),
+  tree: z
+    .string()
+    .describe("A formatted string visualizing the directory structure."),
   totalEntries: z
     .number()
     .int()
-    .describe("The total number of files and directories found."),
+    .describe("The total count of all notes and directories found."),
 });
 
 // ====================================================================================

@@ -1,6 +1,6 @@
 {
   "name": "obsidian-mcp-server",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Obsidian Knowledge-Management MCP (Model Context Protocol) server that enables AI agents and development tools to interact with an Obsidian vault. It provides a comprehensive suite of tools for reading, writing, searching, and managing notes, tags, and frontmatter, acting as a bridge to the Obsidian Local REST API plugin.",
   "main": "dist/index.js",
   "files": [

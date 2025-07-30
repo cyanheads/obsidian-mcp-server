@@ -28,25 +28,27 @@ export const ObsidianManageTagsInputSchema = z.object({
   operation: z
     .enum(["add", "remove", "list"])
     .describe(
-      "The tag operation to perform: 'add' to include new tags, 'remove' to delete existing tags, or 'list' to view all current tags.",
+      "The operation to perform: `add` new tags, `remove` existing tags, or `list` all current tags.",
     ),
   tags: z
     .array(z.string())
     .describe(
-      "An array of tag names to be processed. The '#' prefix should be omitted (e.g., use 'project/active', not '#project/active').",
+      "An array of tag names to process. Omit the '#' prefix (e.g., use 'project/active', not '#project/active').",
     ),
 });
 
 export const ObsidianManageTagsResponseSchema = z.object({
-  success: z.boolean().describe("Indicates if the operation was successful."),
-  message: z.string().describe("A summary of the operation outcome."),
+  success: z.boolean().describe("True if the operation was successful."),
+  message: z.string().describe("A summary of the operation's result."),
   currentTags: z
     .array(z.string())
-    .describe("The final list of tags in the note after the operation."),
+    .describe(
+      "The final, complete list of tags on the note after the operation.",
+    ),
   timestamp: z
     .string()
     .datetime()
-    .describe("ISO 8601 timestamp of when the operation was completed."),
+    .describe("The ISO 8601 timestamp of when the operation completed."),
 });
 
 // ====================================================================================
@@ -131,12 +133,80 @@ async function removeTags(
   obsidianService: ObsidianRestApiService,
   vaultCacheService?: VaultCacheService,
 ): Promise<ObsidianManageTagsResponse> {
-  // This function would contain the logic to remove tags.
-  // For brevity, it is simplified in this refactor.
+  const { filePath, tags: tagsToRemove } = params;
+  const sanitizedTagsToRemove = new Set(
+    tagsToRemove.map((t) => sanitization.sanitizeTagName(t)),
+  );
+
+  const note = await obsidianService.getFileContent(filePath, "json", context);
+  if (typeof note === "string") {
+    throw new McpError(
+      BaseErrorCode.INTERNAL_ERROR,
+      "Failed to parse note content as JSON.",
+      context,
+    );
+  }
+
+  const originalTags = new Set(note.tags);
+  const tagsActuallyRemoved = Array.from(sanitizedTagsToRemove).filter((t) =>
+    originalTags.has(t),
+  );
+
+  if (tagsActuallyRemoved.length === 0) {
+    return {
+      success: true,
+      message:
+        "No tags removed; the specified tags were not found in the note.",
+      currentTags: Array.from(originalTags),
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  // Remove from frontmatter
+  const frontmatter = note.frontmatter ?? {};
+  if (Array.isArray(frontmatter.tags)) {
+    frontmatter.tags = frontmatter.tags.filter(
+      (t: string) => !sanitizedTagsToRemove.has(t),
+    );
+    if (frontmatter.tags.length === 0) {
+      delete frontmatter.tags;
+    }
+  }
+
+  // Remove from inline content
+  let noteContent = (await obsidianService.getFileContent(
+    filePath,
+    "markdown",
+    context,
+  )) as string;
+
+  const inlineTagRegex = /(?<=^|\s)#([^\s#]+)/g;
+  noteContent = noteContent.replace(inlineTagRegex, (match, tagName) => {
+    return sanitizedTagsToRemove.has(tagName) ? "" : match;
+  });
+
+  const frontmatterRegex = /^---\n([\s\S]*?)\n---\n/;
+  const newFrontmatterString =
+    Object.keys(frontmatter).length > 0 ? dump(frontmatter) : "";
+
+  const newContent = noteContent.match(frontmatterRegex)
+    ? noteContent.replace(frontmatterRegex, `---\n${newFrontmatterString}---\n`)
+    : `---\n${newFrontmatterString}---\n\n${noteContent}`;
+
+  await obsidianService.updateFileContent(filePath, newContent.trim(), context);
+
+  if (vaultCacheService) {
+    await vaultCacheService.updateCacheForFile(filePath, context);
+  }
+
+  const finalTags = Array.from(originalTags).filter(
+    (t) => !sanitizedTagsToRemove.has(t),
+  );
+
   return {
     success: true,
-    message: "Tag removal logic not fully implemented in this refactor.",
-    currentTags: [],
+    message: `Successfully removed tags: ${tagsActuallyRemoved.join(", ")}.`,
+    currentTags: finalTags,
     timestamp: new Date().toISOString(),
   };
 }

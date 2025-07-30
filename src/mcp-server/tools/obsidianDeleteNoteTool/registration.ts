@@ -1,6 +1,6 @@
 /**
- * @fileoverview Handles the registration of the `obsidian_delete_note` tool with the MCP server.
- * This tool provides functionality to permanently delete a file from an Obsidian vault.
+ * @fileoverview Registers the `obsidian_delete_note` tool, which enables the permanent,
+ * case-sensitive deletion of notes from an Obsidian vault after explicit user acknowledgement.
  * @module src/mcp-server/tools/obsidianDeleteNoteTool/registration
  */
 
@@ -17,8 +17,8 @@ import {
   requestContextService,
 } from "../../../utils/index.js";
 import {
-  obsidianDeleteNoteLogic,
   ObsidianDeleteNoteInputSchema,
+  obsidianDeleteNoteLogic,
   ObsidianDeleteNoteResponseSchema,
   type ObsidianDeleteNoteInput,
 } from "./logic.js";
@@ -37,7 +37,7 @@ export const registerObsidianDeleteNoteTool = async (
 ): Promise<void> => {
   const toolName = "obsidian_delete_note";
   const toolDescription =
-    "Permanently deletes a specified file from the Obsidian vault. Tries the exact path first, then attempts a case-insensitive fallback if the file is not found. Requires the vault-relative path including the file extension.";
+    "Permanently deletes a specified note from the Obsidian vault. This is a destructive, case-sensitive operation that requires explicit acknowledgement by passing 'yes' to the acknowledgement parameter. Only use this tool if you have permission to delete this note.";
 
   const registrationContext: RequestContext =
     requestContextService.createRequestContext({
@@ -56,6 +56,9 @@ export const registerObsidianDeleteNoteTool = async (
           description: toolDescription,
           inputSchema: ObsidianDeleteNoteInputSchema.shape,
           outputSchema: ObsidianDeleteNoteResponseSchema.shape,
+          annotations: {
+            destructiveHint: true,
+          },
         },
         async (params: ObsidianDeleteNoteInput) => {
           const handlerContext: RequestContext =

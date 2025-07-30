@@ -1,5 +1,6 @@
 /**
- * @fileoverview Handles the registration of the `obsidian_manage_tags` tool.
+ * @fileoverview Registers the `obsidian_manage_tags` tool, which provides comprehensive
+ * functionality for adding, removing, and listing tags on Obsidian notes.
  * @module src/mcp-server/tools/obsidianManageTagsTool/registration
  */
 
@@ -36,7 +37,7 @@ export const registerObsidianManageTagsTool = async (
 ): Promise<void> => {
   const toolName = "obsidian_manage_tags";
   const toolDescription =
-    "Manages tags for a specified note, handling them in both the YAML frontmatter and inline content. Supports adding, removing, and listing tags to provide a comprehensive tag management solution.";
+    "Manages tags for a specified Obsidian note by adding, removing, or listing them. The tool intelligently handles tags in both the YAML frontmatter and inline content, providing a complete solution for tag management.";
 
   const registrationContext: RequestContext =
     requestContextService.createRequestContext({
@@ -55,6 +56,9 @@ export const registerObsidianManageTagsTool = async (
           description: toolDescription,
           inputSchema: ObsidianManageTagsInputSchema.shape,
           outputSchema: ObsidianManageTagsResponseSchema.shape,
+          annotations: {
+            destructiveHint: false,
+          },
         },
         async (params: ObsidianManageTagsInput) => {
           const handlerContext: RequestContext =

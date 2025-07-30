@@ -16,8 +16,8 @@ import {
   requestContextService,
 } from "../../../utils/index.js";
 import {
-  obsidianGlobalSearchLogic,
   ObsidianGlobalSearchInputSchema,
+  obsidianGlobalSearchLogic,
   ObsidianGlobalSearchResponseSchema,
   type ObsidianGlobalSearchInput,
 } from "./logic.js";
@@ -35,7 +35,7 @@ export const registerObsidianGlobalSearchTool = async (
   vaultCacheService?: VaultCacheService,
 ): Promise<void> => {
   const toolName = "obsidian_global_search";
-  const toolDescription = `Performs search across the Obsidian vault using text or regex, primarily relying on the Obsidian REST API's simple search. Supports filtering by modification date, optionally restricting search to a specific directory path (recursively), pagination (page, pageSize), and limiting matches shown per file (maxMatchesPerFile). Returns a JSON object containing success status, a message, pagination details (currentPage, pageSize, totalPages), total file/match counts (before pagination), and an array of results. Each result includes the file path, filename, creation timestamp (ctime), modification timestamp (mtime), and an array of match context snippets (limited by maxMatchesPerFile). If there are multiple pages of results, it also includes an 'alsoFoundInFiles' array listing filenames found on other pages.`;
+  const toolDescription = `Performs a powerful, Obsidian vault-wide search using text or regular expressions. It supports advanced filtering by modification date and specific folder paths, includes  pagination, and allows for fine-tuning of match context. The tool returns a detailed, paginated list of matching notes, complete with metadata and match snippets.`;
 
   const registrationContext: RequestContext =
     requestContextService.createRequestContext({
@@ -54,6 +54,9 @@ export const registerObsidianGlobalSearchTool = async (
           description: toolDescription,
           inputSchema: ObsidianGlobalSearchInputSchema.shape,
           outputSchema: ObsidianGlobalSearchResponseSchema.shape,
+          annotations: {
+            readOnlyHint: true,
+          },
         },
         async (params: ObsidianGlobalSearchInput) => {
           const handlerContext: RequestContext =

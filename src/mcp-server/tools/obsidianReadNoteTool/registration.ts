@@ -1,5 +1,7 @@
 /**
- * @fileoverview Registers the 'obsidian_read_note' tool with the MCP server.
+ * @fileoverview Registers the `obsidian_read_note` tool, which enables the retrieval
+ * of content and metadata from notes in an Obsidian vault, featuring a case-insensitive
+ * fallback for convenience.
  * @module src/mcp-server/tools/obsidianReadNoteTool/registration
  */
 
@@ -31,7 +33,7 @@ export const registerObsidianReadNoteTool = async (
 ): Promise<void> => {
   const toolName = "obsidian_read_note";
   const toolDescription =
-    "Retrieves the content and metadata of a specified file within the Obsidian vault. Tries the exact path first, then attempts a case-insensitive fallback. Returns an object containing the content (markdown string or full NoteJson object based on 'format'), and optionally formatted file stats ('stats' object with creationTime, modifiedTime, tokenCountEstimate). Use 'includeStat: true' with 'format: markdown' to include stats; stats are always included with 'format: json'.";
+    "Retrieves the content and metadata of a specified Obsidian note. It first attempts a case-sensitive match and, if not found, performs a case-insensitive search. The tool can return content as raw markdown or a structured JSON object and can optionally include file statistics.";
 
   const registrationContext: RequestContext =
     requestContextService.createRequestContext({
@@ -50,6 +52,9 @@ export const registerObsidianReadNoteTool = async (
           description: toolDescription,
           inputSchema: ObsidianReadNoteInputSchema.shape,
           outputSchema: ObsidianReadNoteResponseSchema.shape,
+          annotations: {
+            readOnlyHint: true,
+          },
         },
         async (params: ObsidianReadNoteInput) => {
           const handlerContext: RequestContext =

@@ -1,5 +1,6 @@
 /**
- * @fileoverview Registers the 'obsidian_search_replace' tool with the MCP server.
+ * @fileoverview Registers the `obsidian_search_replace` tool, providing advanced,
+ * in-memory search and replace capabilities for Obsidian notes.
  * @module src/mcp-server/tools/obsidianSearchReplaceTool/registration
  */
 
@@ -37,7 +38,7 @@ export const registerObsidianSearchReplaceTool = async (
 ): Promise<void> => {
   const toolName = "obsidian_search_replace";
   const toolDescription =
-    "Performs one or more search-and-replace operations within a target Obsidian note (file path, active, or periodic). Reads the file, applies replacements sequentially in memory, and writes the modified content back, overwriting the original. Supports string/regex search, case sensitivity toggle, replacing first/all occurrences, flexible whitespace matching (non-regex), and whole word matching. Returns success status, message, replacement count, a formatted timestamp string, file stats (stats), and optionally the final file content.";
+    "Performs one or more search-and-replace operations on a specified Obsidian note. It supports string or regex patterns, case sensitivity, whole word matching, and flexible whitespace. Changes are applied sequentially and overwrite the original note.";
 
   const registrationContext: RequestContext =
     requestContextService.createRequestContext({
@@ -56,6 +57,9 @@ export const registerObsidianSearchReplaceTool = async (
           description: toolDescription,
           inputSchema: ObsidianSearchReplaceInputSchemaShape,
           outputSchema: ObsidianSearchReplaceResponseSchema.shape,
+          annotations: {
+            destructiveHint: false,
+          },
         },
         async (params: ObsidianSearchReplaceInput) => {
           const handlerContext: RequestContext =

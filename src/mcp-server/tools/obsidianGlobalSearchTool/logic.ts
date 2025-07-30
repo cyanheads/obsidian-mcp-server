@@ -28,113 +28,119 @@ export const ObsidianGlobalSearchInputSchema = z
     query: z
       .string()
       .min(1, "Query cannot be empty.")
-      .describe("The search query (text or regex pattern)."),
+      .describe("The search query, which can be a string or a regex pattern."),
     searchInPath: z
       .string()
       .optional()
       .describe(
-        "Optional vault-relative path to recursively search within (e.g., 'Notes/Projects'). If omitted, searches the entire vault.",
+        "Recursively search within a specific vault-relative path (e.g., 'Notes/Projects'). Searches the entire vault if omitted.",
       ),
     contextLength: z
       .number()
       .int()
       .positive()
-      .default(100)
-      .describe("Characters of context around matches."),
+      .default(250)
+      .describe(
+        "The number of characters to include on either side of a match for context. (Default: 250)",
+      ),
     modified_since: z
       .string()
       .optional()
       .describe(
-        "Filter files modified *since* this date/time (e.g., '2 weeks ago', '2024-01-15').",
+        "Filter notes modified since a specific date/time (e.g., '2 weeks ago', '2024-01-15').",
       ),
     modified_until: z
       .string()
       .optional()
       .describe(
-        "Filter files modified *until* this date/time (e.g., 'today', '2024-03-20 17:00').",
+        "Filter notes modified until a specific date/time (e.g., 'today', '2024-03-20 17:00').",
       ),
     useRegex: z
       .boolean()
       .default(false)
-      .describe("Treat 'query' as regex. Defaults to false."),
+      .describe("If true, the 'query' is treated as a regular expression."),
     caseSensitive: z
       .boolean()
       .default(false)
-      .describe("Perform case-sensitive search. Defaults to false."),
+      .describe("If true, the search is case-sensitive."),
     pageSize: z
       .number()
       .int()
       .positive()
       .default(50)
-      .describe("Maximum number of result files per page. Defaults to 50."),
+      .describe("The maximum number of notes to return per page."),
     page: z
       .number()
       .int()
       .positive()
       .default(1)
-      .describe("Page number of results to return. Defaults to 1."),
+      .describe("The page number of results to retrieve."),
     maxMatchesPerFile: z
       .number()
       .int()
       .positive()
       .default(5)
-      .describe("Maximum number of matches to show per file. Defaults to 5."),
+      .describe("The maximum number of match contexts to return per note."),
   })
   .describe(
-    "Performs search across vault content using text or regex. Supports filtering by modification date, directory path, pagination, and limiting matches per file.",
+    "Performs a comprehensive search across the Obsidian vault. Supports text/regex queries, path and date filtering, and pagination.",
   );
 
 const MatchContextSchema = z.object({
-  context: z.string().describe("The text snippet surrounding the match."),
+  context: z
+    .string()
+    .describe("The text snippet providing context for a match."),
 });
 
 const GlobalSearchResultSchema = z.object({
-  path: z.string().describe("The full vault-relative path to the file."),
-  filename: z.string().describe("The name of the file."),
+  path: z.string().describe("The full vault-relative path to the note."),
+  filename: z.string().describe("The filename of the note."),
   matches: z
     .array(MatchContextSchema)
-    .describe("An array of context snippets for each match found in the file."),
+    .describe("An array of context snippets for each match within the note."),
   modifiedTime: z
     .string()
     .datetime()
-    .describe("ISO 8601 timestamp of when the file was last modified."),
+    .describe("The ISO 8601 timestamp of the last modification."),
   createdTime: z
     .string()
     .datetime()
-    .describe("ISO 8601 timestamp of when the file was created."),
+    .describe("The ISO 8601 timestamp of the note's creation."),
   numericMtime: z
     .number()
     .describe(
-      "The numeric timestamp (milliseconds since epoch) of the last modification, used for sorting.",
+      "The numeric timestamp (in milliseconds) of the last modification, used for internal sorting.",
     ),
 });
 
 export const ObsidianGlobalSearchResponseSchema = z.object({
-  success: z.boolean().describe("Indicates if the operation was successful."),
-  message: z.string().describe("A summary of the search strategy and results."),
+  success: z.boolean().describe("True if the search executed successfully."),
+  message: z
+    .string()
+    .describe("A summary of the search execution and outcome."),
   results: z
     .array(GlobalSearchResultSchema)
-    .describe("The paginated list of search results."),
+    .describe("The paginated list of matching notes."),
   totalFilesFound: z
     .number()
     .int()
-    .describe("Total number of files matching the query before pagination."),
+    .describe("The total number of notes that matched the query."),
   totalMatchesFound: z
     .number()
     .int()
-    .describe(
-      "Total number of matches across all found files before pagination.",
-    ),
-  currentPage: z
+    .describe("The total number of individual matches found across all notes."),
+  currentPage: z.number().int().describe("The current page of the result set."),
+  pageSize: z.number().int().describe("The number of results per page."),
+  totalPages: z
     .number()
     .int()
-    .describe("The current page number of the results."),
-  pageSize: z.number().int().describe("The number of results per page."),
-  totalPages: z.number().int().describe("The total number of pages available."),
+    .describe("The total number of pages available for the query."),
   alsoFoundInFiles: z
     .array(z.string())
     .optional()
-    .describe("A list of filenames found on other pages."),
+    .describe(
+      "A list of additional filenames with matches found on other pages.",
+    ),
 });
 
 // ====================================================================================

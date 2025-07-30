@@ -1,7 +1,6 @@
 /**
- * @fileoverview Registers the 'obsidian_list_notes' tool with the MCP server.
- * This file defines the tool's metadata and sets up the handler that links
- * the tool call to its core processing logic.
+ * @fileoverview Registers the `obsidian_list_notes` tool, which provides functionality
+ * to explore the directory structure of an Obsidian vault.
  * @module src/mcp-server/tools/obsidianListNotesTool/registration
  */
 
@@ -33,7 +32,7 @@ export const registerObsidianListNotesTool = async (
 ): Promise<void> => {
   const toolName = "obsidian_list_notes";
   const toolDescription =
-    "Lists files and subdirectories within a specified Obsidian vault folder. Supports optional filtering by extension or name regex, and recursive listing to a specified depth (-1 for infinite). Returns an object containing the listed directory path, a formatted tree string of its contents, and the total entry count. Use an empty string or '/' for dirPath to list the vault root.";
+    "Lists notes and directories within a specified Obsidian vault path. This tool supports advanced filtering by file extension and name (using regex) and allows for recursive exploration to a defined depth. It returns a formatted tree structure, perfect for visualizing folder contents.";
 
   const registrationContext: RequestContext =
     requestContextService.createRequestContext({
@@ -52,6 +51,9 @@ export const registerObsidianListNotesTool = async (
           description: toolDescription,
           inputSchema: ObsidianListNotesInputSchema.shape,
           outputSchema: ObsidianListNotesResponseSchema.shape,
+          annotations: {
+            readOnlyHint: true,
+          },
         },
         async (params: ObsidianListNotesInput) => {
           const handlerContext: RequestContext =

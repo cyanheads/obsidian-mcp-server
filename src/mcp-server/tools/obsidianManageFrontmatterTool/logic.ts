@@ -27,19 +27,19 @@ const BaseObsidianManageFrontmatterInputSchema = z.object({
   operation: z
     .enum(["get", "set", "delete"])
     .describe(
-      "The operation to perform on the frontmatter: 'get' to read a key, 'set' to create or update a key, or 'delete' to remove a key.",
+      "The atomic operation to perform: `get` to read a key, `set` to create/update a key, or `delete` to remove a key.",
     ),
   key: z
     .string()
     .min(1, "key cannot be empty.")
     .describe(
-      "The name of the frontmatter key to target, such as 'status', 'tags', or 'aliases'.",
+      "The frontmatter key to target (e.g., 'status', 'tags', 'aliases').",
     ),
   value: z
     .any()
     .optional()
     .describe(
-      'The value to assign when using the "set" operation. Can be a string, number, boolean, array, or a JSON object.',
+      "The value to assign for a `set` operation. Can be any valid JSON type: string, number, boolean, array, or object.",
     ),
 });
 
@@ -56,13 +56,16 @@ export const ObsidianManageFrontmatterInputSchemaShape =
   BaseObsidianManageFrontmatterInputSchema.shape;
 
 export const ObsidianManageFrontmatterResponseSchema = z.object({
-  success: z.boolean().describe("Indicates if the operation was successful."),
-  message: z.string().describe("A summary of the operation outcome."),
-  value: z.any().optional().describe("The value that was retrieved or set."),
+  success: z.boolean().describe("True if the operation was successful."),
+  message: z.string().describe("A summary of the operation's result."),
+  value: z
+    .any()
+    .optional()
+    .describe("The value that was retrieved or set. Omitted on failure."),
   timestamp: z
     .string()
     .datetime()
-    .describe("ISO 8601 timestamp of when the operation was completed."),
+    .describe("The ISO 8601 timestamp of when the operation completed."),
 });
 
 // ====================================================================================

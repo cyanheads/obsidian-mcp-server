@@ -1,5 +1,6 @@
 /**
- * @fileoverview Registers the 'obsidian_update_note' tool with the MCP server.
+ * @fileoverview Registers the `obsidian_update_note` tool, which provides robust
+ * whole-file modification capabilities for Obsidian notes.
  * @module src/mcp-server/tools/obsidianUpdateNoteTool/registration
  */
 
@@ -37,7 +38,7 @@ export const registerObsidianUpdateNoteTool = async (
 ): Promise<void> => {
   const toolName = "obsidian_update_note";
   const toolDescription =
-    "Tool to modify Obsidian notes (specified by file path, the active file, or a periodic note) using whole-file operations: 'append', 'prepend', or 'overwrite'. Options allow creating missing files/targets and controlling overwrite behavior. Returns success status, message, a formatted timestamp string, file stats (stats), and optionally the final file content.";
+    "Modifies an Obsidian note using whole-file operations: `append`, `prepend`, or `overwrite`. It can target notes by file path, or periodic notes (e.g., daily). The tool includes safety checks for overwriting and can create notes that don't exist.";
 
   const registrationContext: RequestContext =
     requestContextService.createRequestContext({
@@ -56,6 +57,9 @@ export const registerObsidianUpdateNoteTool = async (
           description: toolDescription,
           inputSchema: ObsidianUpdateNoteInputSchemaShape,
           outputSchema: ObsidianUpdateNoteResponseSchema.shape,
+          annotations: {
+            destructiveHint: false,
+          },
         },
         async (params: ObsidianUpdateNoteInput) => {
           const handlerContext: RequestContext =

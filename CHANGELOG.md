@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2025-07-30
+
+### Changed
+
+- **Tool Refinements**: Improved the descriptions and logic for all Obsidian tools to enhance clarity, robustness, and the developer experience. The Zod schemas now have more descriptive and user-friendly messages.
+- **`obsidianDeleteNoteTool`**: This tool is now strictly case-sensitive and requires an `acknowledgement` parameter to prevent accidental deletions. The case-insensitive fallback has been removed.
+- **`obsidianManageTagsTool`**: The logic for removing tags has been fully implemented.
+- **`obsidianSearchReplaceTool`**: Added `flexibleWhitespace` and `wholeWord` options for more precise non-regex searches.
+- **Documentation**: Updated `docs/tree.md` with the latest project structure.
+
+### Fixed
+
+- **Dependencies**: Updated `package.json` to version `2.1.1`.
+
 ## [2.1.0] - 2025-07-30
 
 ### Alignment with `cyanheads/mcp-ts-template@v1.7.7`
