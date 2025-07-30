@@ -1,6 +1,6 @@
 {
   "name": "obsidian-mcp-server",
-  "version": "2.0.7",
+  "version": "2.1.0",
   "description": "Obsidian Knowledge-Management MCP (Model Context Protocol) server that enables AI agents and development tools to interact with an Obsidian vault. It provides a comprehensive suite of tools for reading, writing, searching, and managing notes, tags, and frontmatter, acting as a bridge to the Obsidian Local REST API plugin.",
   "main": "dist/index.js",
   "files": [
@@ -36,20 +36,21 @@
     "inspect:http": "mcp-inspector --config mcp.json --server obsidian-mcp-server-http"
   },
   "dependencies": {
-    "@hono/node-server": "^1.14.4",
-    "@modelcontextprotocol/inspector": "^0.14.3",
-    "@modelcontextprotocol/sdk": "^1.13.0",
+    "@hono/node-server": "^1.17.1",
+    "@modelcontextprotocol/inspector": "^0.16.2",
+    "@modelcontextprotocol/sdk": "^1.17.0",
     "@types/sanitize-html": "^2.16.0",
     "@types/validator": "13.15.2",
-    "axios": "^1.10.0",
+    "axios": "^1.11.0",
     "chrono-node": "2.8.0",
     "date-fns": "^4.1.0",
     "dotenv": "^16.5.0",
-    "hono": "^4.8.2",
+    "hono": "^4.8.10",
     "ignore": "^7.0.5",
-    "jose": "^6.0.11",
+    "jose": "^6.0.12",
     "js-yaml": "^4.1.0",
-    "openai": "^5.6.0",
+    "node-cron": "^4.2.1",
+    "openai": "^5.10.2",
     "partial-json": "^0.1.7",
     "sanitize-html": "^2.17.0",
     "tiktoken": "^1.0.21",
@@ -84,8 +85,8 @@
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^24.0.3",
-    "prettier": "^3.5.3",
-    "typedoc": "^0.28.5"
+    "@types/node": "^24.1.0",
+    "prettier": "^3.6.2",
+    "typedoc": "^0.28.8"
   }
 }
