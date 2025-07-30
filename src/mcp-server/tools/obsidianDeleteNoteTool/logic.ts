@@ -1,283 +1,182 @@
-import path from "node:path"; // node:path provides OS-specific path functions; using path.posix for vault path manipulation.
+/**
+ * @fileoverview Defines the core logic, schemas, and types for the `obsidian_delete_note` tool.
+ * This tool handles the permanent deletion of a file within an Obsidian vault, including a
+ * case-insensitive fallback mechanism.
+ * @module src/mcp-server/tools/obsidianDeleteNoteTool/logic
+ */
+
+import path from "node:path";
 import { z } from "zod";
 import {
   ObsidianRestApiService,
   VaultCacheService,
 } from "../../../services/obsidianRestAPI/index.js";
 import { BaseErrorCode, McpError } from "../../../types-global/errors.js";
-import {
-  logger,
-  RequestContext,
-  retryWithDelay,
-} from "../../../utils/index.js";
-
-// ====================================================================================
-// Schema Definitions for Input Validation
-// ====================================================================================
+import { logger, type RequestContext } from "../../../utils/index.js";
 
 /**
- * Zod schema for validating the input parameters of the 'obsidian_delete_note' tool.
+ * Zod schema for validating the input arguments for the `obsidian_delete_note` tool.
  */
 export const ObsidianDeleteNoteInputSchema = z
   .object({
-    /**
-     * The vault-relative path to the file to be permanently deleted.
-     * Must include the file extension (e.g., "Old Notes/Obsolete File.md").
-     * The tool first attempts a case-sensitive match. If not found, it attempts
-     * a case-insensitive fallback search within the same directory.
-     */
     filePath: z
       .string()
-      .min(1, "filePath cannot be empty")
+      .min(1, "filePath cannot be empty.")
       .describe(
         'The vault-relative path to the file to be deleted (e.g., "archive/old-file.md"). Tries case-sensitive first, then case-insensitive fallback.',
       ),
   })
   .describe(
-    "Input parameters for permanently deleting a specific file within the connected Obsidian vault. Includes a case-insensitive path fallback.",
+    "Permanently deletes a specified file from the Obsidian vault. Tries the exact path first, then attempts a case-insensitive fallback.",
   );
 
 /**
- * TypeScript type inferred from the input schema (`ObsidianDeleteNoteInputSchema`).
- * Represents the validated input parameters used within the core processing logic.
+ * TypeScript type inferred from `ObsidianDeleteNoteInputSchema`.
  */
 export type ObsidianDeleteNoteInput = z.infer<
   typeof ObsidianDeleteNoteInputSchema
 >;
 
-// ====================================================================================
-// Response Type Definition
-// ====================================================================================
+/**
+ * Zod schema for the successful response of the `obsidian_delete_note` tool.
+ */
+export const ObsidianDeleteNoteResponseSchema = z.object({
+  success: z
+    .boolean()
+    .describe("Indicates whether the deletion was successful."),
+  message: z.string().describe("A confirmation message detailing the outcome."),
+  deletedPath: z
+    .string()
+    .describe("The exact vault-relative path of the file that was deleted."),
+  timestamp: z
+    .string()
+    .datetime()
+    .describe("ISO 8601 timestamp of when the operation was completed."),
+});
 
 /**
- * Defines the structure of the successful response returned by the `processObsidianDeleteNote` function.
- * This object is typically serialized to JSON and sent back to the client.
+ * TypeScript type inferred from `ObsidianDeleteNoteResponseSchema`.
  */
-export interface ObsidianDeleteNoteResponse {
-  /** Indicates whether the deletion operation was successful. */
-  success: boolean;
-  /** A human-readable message confirming the deletion and specifying the path used. */
-  message: string;
-}
+export type ObsidianDeleteNoteResponse = z.infer<
+  typeof ObsidianDeleteNoteResponseSchema
+>;
 
-// ====================================================================================
-// Core Logic Function
-// ====================================================================================
+/**
+ * Finds a unique, case-insensitive file match in a directory.
+ * @param obsidianService - The Obsidian REST API service instance.
+ * @param originalFilePath - The user-provided file path.
+ * @param context - The request context.
+ * @returns The corrected, case-sensitive file path if a unique match is found.
+ * @throws {McpError} If no match is found or the match is ambiguous.
+ */
+async function findCaseInsensitiveMatch(
+  obsidianService: ObsidianRestApiService,
+  originalFilePath: string,
+  context: RequestContext,
+): Promise<string> {
+  const dirname = path.posix.dirname(originalFilePath);
+  const filenameLower = path.posix.basename(originalFilePath).toLowerCase();
+  const dirToList = dirname === "." ? "/" : dirname;
+
+  logger.debug(
+    `Listing directory for fallback deletion: ${dirToList}`,
+    context,
+  );
+  const filesInDir = await obsidianService.listFiles(dirToList, context);
+
+  const matches = filesInDir.filter(
+    (f: string) =>
+      !f.endsWith("/") &&
+      path.posix.basename(f).toLowerCase() === filenameLower,
+  );
+
+  if (matches.length === 1) {
+    const correctFilename = path.posix.basename(matches[0]);
+    return path.posix.join(dirname, correctFilename);
+  }
+
+  if (matches.length > 1) {
+    throw new McpError(
+      BaseErrorCode.CONFLICT,
+      `Deletion failed: Ambiguous case-insensitive matches for '${originalFilePath}'. Found: [${matches.join(", ")}].`,
+      context,
+    );
+  }
+
+  throw new McpError(
+    BaseErrorCode.NOT_FOUND,
+    `Deletion failed: File not found for '${originalFilePath}' (case-insensitive fallback also failed).`,
+    context,
+  );
+}
 
 /**
  * Processes the core logic for deleting a file from the Obsidian vault.
+ * It attempts a case-sensitive deletion first. If that fails with a 'NOT_FOUND' error,
+ * it performs a case-insensitive fallback search to find and delete the file.
  *
- * It attempts to delete the file using the provided path (case-sensitive first).
- * If that fails with a 'NOT_FOUND' error, it attempts a case-insensitive fallback:
- * it lists the directory, finds a unique case-insensitive match for the filename,
- * and retries the deletion with the corrected path.
- *
- * @param {ObsidianDeleteNoteInput} params - The validated input parameters.
- * @param {RequestContext} context - The request context for logging and correlation.
- * @param {ObsidianRestApiService} obsidianService - An instance of the Obsidian REST API service.
- * @returns {Promise<ObsidianDeleteNoteResponse>} A promise resolving to the structured success response
- *   containing a confirmation message.
- * @throws {McpError} Throws an McpError if the file cannot be found (even with fallback),
- *   if there's an ambiguous fallback match, or if any other API interaction fails.
+ * @param params - The validated input parameters for the tool.
+ * @param context - The request context for logging and tracing.
+ * @param obsidianService - An instance of the Obsidian REST API service.
+ * @param vaultCacheService - An instance of the vault cache service.
+ * @returns A promise that resolves to the structured success response.
+ * @throws {McpError} If the file cannot be found, the match is ambiguous, or the API call fails.
  */
-export const processObsidianDeleteNote = async (
+export async function obsidianDeleteNoteLogic(
   params: ObsidianDeleteNoteInput,
   context: RequestContext,
   obsidianService: ObsidianRestApiService,
-  vaultCacheService: VaultCacheService | undefined,
-): Promise<ObsidianDeleteNoteResponse> => {
-  const { filePath: originalFilePath } = params;
-  let effectiveFilePath = originalFilePath; // Track the path actually used for deletion
+  vaultCacheService?: VaultCacheService,
+): Promise<ObsidianDeleteNoteResponse> {
+  const { filePath } = params;
+  let effectiveFilePath = filePath;
 
   logger.debug(
-    `Processing obsidian_delete_note request for path: ${originalFilePath}`,
+    `Executing obsidian_delete_note logic for: ${filePath}`,
     context,
   );
 
-  const shouldRetryNotFound = (err: unknown) =>
-    err instanceof McpError && err.code === BaseErrorCode.NOT_FOUND;
-
   try {
-    // --- Attempt 1: Delete using the provided path (case-sensitive) ---
-    const deleteContext = {
-      ...context,
-      operation: "deleteFileAttempt",
-      caseSensitive: true,
-    };
-    logger.debug(
-      `Attempting to delete file (case-sensitive): ${originalFilePath}`,
-      deleteContext,
-    );
-    await retryWithDelay(
-      () => obsidianService.deleteFile(originalFilePath, deleteContext),
-      {
-        operationName: "deleteFile",
-        context: deleteContext,
-        maxRetries: 3,
-        delayMs: 300,
-        shouldRetry: shouldRetryNotFound,
-      },
-    );
-
-    // If the above call succeeds, the file was deleted using the exact path.
-    logger.debug(
-      `Successfully deleted file using exact path: ${originalFilePath}`,
-      deleteContext,
-    );
-    if (vaultCacheService) {
-      await vaultCacheService.updateCacheForFile(
-        originalFilePath,
-        deleteContext,
-      );
-    }
-    return {
-      success: true,
-      message: `File '${originalFilePath}' deleted successfully.`,
-    };
+    // Attempt 1: Case-sensitive deletion
+    logger.debug(`Attempting to delete (case-sensitive): ${filePath}`, context);
+    await obsidianService.deleteFile(filePath, context);
+    logger.info(`Successfully deleted file: ${filePath}`, context);
   } catch (error) {
-    // --- Attempt 2: Case-insensitive fallback if initial delete failed with NOT_FOUND ---
+    // Attempt 2: Case-insensitive fallback on NOT_FOUND error
     if (error instanceof McpError && error.code === BaseErrorCode.NOT_FOUND) {
       logger.info(
-        `File not found with exact path: ${originalFilePath}. Attempting case-insensitive fallback for deletion.`,
+        `File not found at '${filePath}'. Attempting case-insensitive fallback.`,
         context,
       );
-      const fallbackContext = { ...context, operation: "deleteFileFallback" };
-
-      try {
-        // Use POSIX path functions for vault path manipulation
-        const dirname = path.posix.dirname(originalFilePath);
-        const filenameLower = path.posix
-          .basename(originalFilePath)
-          .toLowerCase();
-        // Handle case where the file is in the vault root (dirname is '.')
-        const dirToList = dirname === "." ? "/" : dirname;
-
-        logger.debug(
-          `Listing directory for fallback deletion: ${dirToList}`,
-          fallbackContext,
-        );
-        const filesInDir = await retryWithDelay(
-          () => obsidianService.listFiles(dirToList, fallbackContext),
-          {
-            operationName: "listFilesForDeleteFallback",
-            context: fallbackContext,
-            maxRetries: 3,
-            delayMs: 300,
-            shouldRetry: shouldRetryNotFound,
-          },
-        );
-
-        // Filter directory listing for files matching the lowercase filename
-        const matches = filesInDir.filter(
-          (f) =>
-            !f.endsWith("/") && // Ensure it's a file
-            path.posix.basename(f).toLowerCase() === filenameLower,
-        );
-
-        if (matches.length === 1) {
-          // Found exactly one case-insensitive match
-          const correctFilename = path.posix.basename(matches[0]);
-          effectiveFilePath = path.posix.join(dirname, correctFilename); // Update the path to use
-          logger.info(
-            `Found case-insensitive match: ${effectiveFilePath}. Retrying delete.`,
-            fallbackContext,
-          );
-
-          // Retry deleting with the correctly cased path
-          const retryContext = {
-            ...fallbackContext,
-            subOperation: "retryDelete",
-            effectiveFilePath,
-          };
-          await retryWithDelay(
-            () => obsidianService.deleteFile(effectiveFilePath, retryContext),
-            {
-              operationName: "deleteFileFallback",
-              context: retryContext,
-              maxRetries: 3,
-              delayMs: 300,
-              shouldRetry: shouldRetryNotFound,
-            },
-          );
-
-          logger.debug(
-            `Successfully deleted file using fallback path: ${effectiveFilePath}`,
-            retryContext,
-          );
-          if (vaultCacheService) {
-            await vaultCacheService.updateCacheForFile(
-              effectiveFilePath,
-              retryContext,
-            );
-          }
-          return {
-            success: true,
-            message: `File '${effectiveFilePath}' (found via case-insensitive match for '${originalFilePath}') deleted successfully.`,
-          };
-        } else if (matches.length > 1) {
-          // Ambiguous match: Multiple files match case-insensitively
-          const errorMsg = `Deletion failed: Ambiguous case-insensitive matches for '${originalFilePath}'. Found: [${matches.join(", ")}]. Cannot determine which file to delete.`;
-          logger.error(errorMsg, { ...fallbackContext, matches });
-          // Use CONFLICT code for ambiguity, as NOT_FOUND isn't quite right anymore.
-          throw new McpError(BaseErrorCode.CONFLICT, errorMsg, fallbackContext);
-        } else {
-          // No match found even with fallback
-          const errorMsg = `Deletion failed: File not found for '${originalFilePath}' (case-insensitive fallback also failed).`;
-          logger.error(errorMsg, fallbackContext);
-          // Stick with NOT_FOUND as the original error reason holds.
-          throw new McpError(
-            BaseErrorCode.NOT_FOUND,
-            errorMsg,
-            fallbackContext,
-          );
-        }
-      } catch (fallbackError) {
-        // Catch errors specifically from the fallback logic (e.g., listFiles error, retry delete error)
-        if (fallbackError instanceof McpError) {
-          // Log and re-throw known errors from fallback
-          logger.error(
-            `McpError during fallback deletion for ${originalFilePath}: ${fallbackError.message}`,
-            fallbackError,
-            fallbackContext,
-          );
-          throw fallbackError;
-        } else {
-          // Wrap unexpected fallback errors
-          const errorMessage = `Unexpected error during case-insensitive fallback deletion for ${originalFilePath}`;
-          logger.error(
-            errorMessage,
-            fallbackError instanceof Error ? fallbackError : undefined,
-            fallbackContext,
-          );
-          throw new McpError(
-            BaseErrorCode.INTERNAL_ERROR,
-            `${errorMessage}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
-            fallbackContext,
-          );
-        }
-      }
+      effectiveFilePath = await findCaseInsensitiveMatch(
+        obsidianService,
+        filePath,
+        context,
+      );
+      logger.debug(
+        `Found case-insensitive match: ${effectiveFilePath}. Retrying delete.`,
+        context,
+      );
+      await obsidianService.deleteFile(effectiveFilePath, context);
+      logger.info(
+        `Successfully deleted file via fallback: ${effectiveFilePath}`,
+        context,
+      );
     } else {
-      // Re-throw errors from the initial delete attempt that were not NOT_FOUND or McpError
-      if (error instanceof McpError) {
-        logger.error(
-          `McpError during initial delete attempt for ${originalFilePath}: ${error.message}`,
-          error,
-          context,
-        );
-        throw error;
-      } else {
-        const errorMessage = `Unexpected error deleting Obsidian file ${originalFilePath}`;
-        logger.error(
-          errorMessage,
-          error instanceof Error ? error : undefined,
-          context,
-        );
-        throw new McpError(
-          BaseErrorCode.INTERNAL_ERROR,
-          `${errorMessage}: ${error instanceof Error ? error.message : String(error)}`,
-          context,
-        );
-      }
+      // Re-throw any other errors
+      throw error;
     }
   }
-};
+
+  // Update cache if available
+  if (vaultCacheService) {
+    await vaultCacheService.updateCacheForFile(effectiveFilePath, context);
+  }
+
+  return {
+    success: true,
+    message: `File '${effectiveFilePath}' was successfully deleted.`,
+    deletedPath: effectiveFilePath,
+    timestamp: new Date().toISOString(),
+  };
+}

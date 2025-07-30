@@ -1,6 +1,8 @@
 export {
+  ObsidianManageFrontmatterInputSchema,
   ObsidianManageFrontmatterInputSchemaShape,
-  processObsidianManageFrontmatter,
+  ObsidianManageFrontmatterResponseSchema,
+  obsidianManageFrontmatterLogic,
 } from "./logic.js";
 export type {
   ObsidianManageFrontmatterInput,

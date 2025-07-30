@@ -5,7 +5,7 @@
  * @module src/mcp-server/tools/obsidianListNotesTool/registration
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ObsidianRestApiService } from "../../../services/obsidianRestAPI/index.js";
 import { BaseErrorCode, McpError } from "../../../types-global/errors.js";
 import {
@@ -14,145 +14,96 @@ import {
   RequestContext,
   requestContextService,
 } from "../../../utils/index.js";
-// Import necessary types, schema, and logic function from the logic file
-import type {
-  ObsidianListNotesInput,
-  ObsidianListNotesResponse,
-} from "./logic.js";
 import {
+  obsidianListNotesLogic,
   ObsidianListNotesInputSchema,
-  processObsidianListNotes,
+  ObsidianListNotesResponseSchema,
+  type ObsidianListNotesInput,
 } from "./logic.js";
 
 /**
  * Registers the 'obsidian_list_notes' tool with the MCP server.
  *
- * This tool lists the files and subdirectories within a specified directory
- * in the user's Obsidian vault. It supports optional filtering by file extension,
- * by a regular expression matching the entry name, and recursive listing up to a
- * specified depth.
- *
- * @param {McpServer} server - The MCP server instance to register the tool with.
- * @param {ObsidianRestApiService} obsidianService - An instance of the Obsidian REST API service
- *   used to interact with the user's Obsidian vault.
- * @returns {Promise<void>} A promise that resolves when the tool registration is complete or rejects on error.
- * @throws {McpError} Throws an McpError if registration fails critically.
+ * @param server - The MCP server instance to register the tool with.
+ * @param obsidianService - An instance of the Obsidian REST API service.
  */
 export const registerObsidianListNotesTool = async (
   server: McpServer,
-  obsidianService: ObsidianRestApiService, // Dependency injection for the Obsidian service
+  obsidianService: ObsidianRestApiService,
 ): Promise<void> => {
   const toolName = "obsidian_list_notes";
   const toolDescription =
     "Lists files and subdirectories within a specified Obsidian vault folder. Supports optional filtering by extension or name regex, and recursive listing to a specified depth (-1 for infinite). Returns an object containing the listed directory path, a formatted tree string of its contents, and the total entry count. Use an empty string or '/' for dirPath to list the vault root.";
 
-  // Create a context specifically for the registration process.
   const registrationContext: RequestContext =
     requestContextService.createRequestContext({
-      operation: "RegisterObsidianListNotesTool",
+      operation: "RegisterTool",
       toolName: toolName,
-      module: "ObsidianListNotesRegistration", // Identify the module
     });
 
-  logger.info(`Attempting to register tool: ${toolName}`, registrationContext);
+  logger.info(`Registering tool: '${toolName}'`, registrationContext);
 
-  // Wrap the registration logic in a tryCatch block for robust error handling during server setup.
   await ErrorHandler.tryCatch(
     async () => {
-      // Use the high-level SDK method `server.tool` for registration.
-      server.tool(
+      server.registerTool(
         toolName,
-        toolDescription,
-        ObsidianListNotesInputSchema.shape, // Provide the Zod schema shape for input definition.
-        /**
-         * The handler function executed when the 'obsidian_list_notes' tool is called by the client.
-         *
-         * @param {ObsidianListNotesInput} params - The input parameters received from the client,
-         *   validated against the ObsidianListNotesInputSchema shape.
-         * @returns {Promise<CallToolResult>} A promise resolving to the structured result for the MCP client,
-         *   containing either the successful response data (serialized JSON) or an error indication.
-         */
+        {
+          title: "List Obsidian Notes",
+          description: toolDescription,
+          inputSchema: ObsidianListNotesInputSchema.shape,
+          outputSchema: ObsidianListNotesResponseSchema.shape,
+        },
         async (params: ObsidianListNotesInput) => {
-          // Type matches the inferred input schema
-          // Create a specific context for this handler invocation.
           const handlerContext: RequestContext =
             requestContextService.createRequestContext({
-              parentContext: registrationContext, // Link to registration context
-              operation: "HandleObsidianListNotesRequest",
+              parentRequestId: registrationContext.requestId,
+              operation: "HandleToolRequest",
               toolName: toolName,
-              params: {
-                // Log all relevant parameters for debugging
-                dirPath: params.dirPath,
-                fileExtensionFilter: params.fileExtensionFilter,
-                nameRegexFilter: params.nameRegexFilter,
-                recursionDepth: params.recursionDepth,
-              },
+              input: params,
             });
-          logger.debug(`Handling '${toolName}' request`, handlerContext);
 
-          // Wrap the core logic execution in a tryCatch block.
-          return await ErrorHandler.tryCatch(
-            async () => {
-              // Delegate the actual file listing and filtering logic to the processing function.
-              const response: ObsidianListNotesResponse =
-                await processObsidianListNotes(
-                  params,
-                  handlerContext,
-                  obsidianService,
-                );
-              logger.debug(
-                `'${toolName}' processed successfully`,
-                handlerContext,
-              );
-
-              // Format the successful response object from the logic function into the required MCP CallToolResult structure.
-              return {
-                content: [
-                  {
-                    type: "text", // Standard content type for structured JSON data
-                    text: JSON.stringify(response, null, 2), // Pretty-print JSON
-                  },
-                ],
-                isError: false, // Indicate successful execution
-              };
-            },
-            {
-              // Configuration for the inner error handler (processing logic).
-              operation: `processing ${toolName} handler`,
+          try {
+            const result = await obsidianListNotesLogic(
+              params,
+              handlerContext,
+              obsidianService,
+            );
+            return {
+              structuredContent: result,
+              content: [
+                { type: "text", text: JSON.stringify(result, null, 2) },
+              ],
+            };
+          } catch (error) {
+            const mcpError = ErrorHandler.handleError(error, {
+              operation: "obsidianListNotesToolHandler",
               context: handlerContext,
-              input: params, // Log the full input parameters if an error occurs.
-              // Custom error mapping for consistent error reporting.
-              errorMapper: (error: unknown) =>
-                new McpError(
-                  error instanceof McpError
-                    ? error.code
-                    : BaseErrorCode.INTERNAL_ERROR,
-                  `Error processing ${toolName} tool: ${error instanceof Error ? error.message : "Unknown error"}`,
-                  { ...handlerContext }, // Include context
-                ),
-            },
-          ); // End of inner ErrorHandler.tryCatch
+              input: params,
+            }) as McpError;
+
+            return {
+              isError: true,
+              content: [{ type: "text", text: `Error: ${mcpError.message}` }],
+              structuredContent: {
+                code: mcpError.code,
+                message: mcpError.message,
+                details: mcpError.details,
+              },
+            };
+          }
         },
-      ); // End of server.tool call
+      );
 
       logger.info(
-        `Tool registered successfully: ${toolName}`,
+        `Tool '${toolName}' registered successfully.`,
         registrationContext,
       );
     },
     {
-      // Configuration for the outer error handler (registration process).
-      operation: `registering tool ${toolName}`,
+      operation: `RegisteringTool_${toolName}`,
       context: registrationContext,
-      errorCode: BaseErrorCode.INTERNAL_ERROR, // Default error code for registration failure.
-      // Custom error mapping for registration failures.
-      errorMapper: (error: unknown) =>
-        new McpError(
-          error instanceof McpError ? error.code : BaseErrorCode.INTERNAL_ERROR,
-          `Failed to register tool '${toolName}': ${error instanceof Error ? error.message : "Unknown error"}`,
-          { ...registrationContext }, // Include context
-        ),
-      critical: true, // Treat registration failure as critical.
+      errorCode: BaseErrorCode.INITIALIZATION_FAILED,
+      critical: true,
     },
-  ); // End of outer ErrorHandler.tryCatch
+  );
 };

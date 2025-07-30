@@ -1,4 +1,9 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+/**
+ * @fileoverview Handles the registration of the `obsidian_manage_tags` tool.
+ * @module src/mcp-server/tools/obsidianManageTagsTool/registration
+ */
+
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   ObsidianRestApiService,
   VaultCacheService,
@@ -10,20 +15,24 @@ import {
   RequestContext,
   requestContextService,
 } from "../../../utils/index.js";
-import type {
-  ObsidianManageTagsInput,
-  ObsidianManageTagsResponse,
-} from "./logic.js";
 import {
-  ManageTagsInputSchema,
-  ObsidianManageTagsInputSchemaShape,
-  processObsidianManageTags,
+  obsidianManageTagsLogic,
+  ObsidianManageTagsInputSchema,
+  ObsidianManageTagsResponseSchema,
+  type ObsidianManageTagsInput,
 } from "./logic.js";
 
+/**
+ * Registers the `obsidian_manage_tags` tool with the MCP server.
+ *
+ * @param server - The MCP server instance.
+ * @param obsidianService - The instance of the Obsidian REST API service.
+ * @param vaultCacheService - The instance of the Vault Cache service.
+ */
 export const registerObsidianManageTagsTool = async (
   server: McpServer,
   obsidianService: ObsidianRestApiService,
-  vaultCacheService: VaultCacheService | undefined,
+  vaultCacheService?: VaultCacheService,
 ): Promise<void> => {
   const toolName = "obsidian_manage_tags";
   const toolDescription =
@@ -31,87 +40,73 @@ export const registerObsidianManageTagsTool = async (
 
   const registrationContext: RequestContext =
     requestContextService.createRequestContext({
-      operation: "RegisterObsidianManageTagsTool",
+      operation: "RegisterTool",
       toolName: toolName,
-      module: "ObsidianManageTagsRegistration",
     });
 
-  logger.info(`Attempting to register tool: ${toolName}`, registrationContext);
+  logger.info(`Registering tool: '${toolName}'`, registrationContext);
 
   await ErrorHandler.tryCatch(
     async () => {
-      server.tool(
+      server.registerTool(
         toolName,
-        toolDescription,
-        ObsidianManageTagsInputSchemaShape,
+        {
+          title: "Manage Obsidian Tags",
+          description: toolDescription,
+          inputSchema: ObsidianManageTagsInputSchema.shape,
+          outputSchema: ObsidianManageTagsResponseSchema.shape,
+        },
         async (params: ObsidianManageTagsInput) => {
           const handlerContext: RequestContext =
             requestContextService.createRequestContext({
-              parentContext: registrationContext,
-              operation: "HandleObsidianManageTagsRequest",
+              parentRequestId: registrationContext.requestId,
+              operation: "HandleToolRequest",
               toolName: toolName,
-              params: params,
+              input: params,
             });
-          logger.debug(`Handling '${toolName}' request`, handlerContext);
 
-          return await ErrorHandler.tryCatch(
-            async () => {
-              const validatedParams = ManageTagsInputSchema.parse(params);
-
-              const response: ObsidianManageTagsResponse =
-                await processObsidianManageTags(
-                  validatedParams,
-                  handlerContext,
-                  obsidianService,
-                  vaultCacheService,
-                );
-              logger.debug(
-                `'${toolName}' processed successfully`,
-                handlerContext,
-              );
-
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: JSON.stringify(response, null, 2),
-                  },
-                ],
-                isError: false,
-              };
-            },
-            {
-              operation: `processing ${toolName} handler`,
+          try {
+            const result = await obsidianManageTagsLogic(
+              params,
+              handlerContext,
+              obsidianService,
+              vaultCacheService,
+            );
+            return {
+              structuredContent: result,
+              content: [
+                { type: "text", text: JSON.stringify(result, null, 2) },
+              ],
+            };
+          } catch (error) {
+            const mcpError = ErrorHandler.handleError(error, {
+              operation: "obsidianManageTagsToolHandler",
               context: handlerContext,
               input: params,
-              errorMapper: (error: unknown) =>
-                new McpError(
-                  error instanceof McpError
-                    ? error.code
-                    : BaseErrorCode.INTERNAL_ERROR,
-                  `Error processing ${toolName} tool: ${error instanceof Error ? error.message : "Unknown error"}`,
-                  { ...handlerContext },
-                ),
-            },
-          );
+            }) as McpError;
+
+            return {
+              isError: true,
+              content: [{ type: "text", text: `Error: ${mcpError.message}` }],
+              structuredContent: {
+                code: mcpError.code,
+                message: mcpError.message,
+                details: mcpError.details,
+              },
+            };
+          }
         },
       );
 
       logger.info(
-        `Tool registered successfully: ${toolName}`,
+        `Tool '${toolName}' registered successfully.`,
         registrationContext,
       );
     },
     {
-      operation: `registering tool ${toolName}`,
+      operation: `RegisteringTool_${toolName}`,
       context: registrationContext,
-      errorCode: BaseErrorCode.INTERNAL_ERROR,
-      errorMapper: (error: unknown) =>
-        new McpError(
-          error instanceof McpError ? error.code : BaseErrorCode.INTERNAL_ERROR,
-          `Failed to register tool '${toolName}': ${error instanceof Error ? error.message : "Unknown error"}`,
-          { ...registrationContext },
-        ),
+      errorCode: BaseErrorCode.INITIALIZATION_FAILED,
       critical: true,
     },
   );

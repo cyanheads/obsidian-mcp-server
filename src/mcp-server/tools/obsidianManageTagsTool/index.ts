@@ -1,6 +1,7 @@
 export {
-  ObsidianManageTagsInputSchemaShape,
-  processObsidianManageTags,
+  ObsidianManageTagsInputSchema,
+  ObsidianManageTagsResponseSchema,
+  obsidianManageTagsLogic,
 } from "./logic.js";
 export type {
   ObsidianManageTagsInput,

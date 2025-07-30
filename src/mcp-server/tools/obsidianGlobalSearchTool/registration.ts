@@ -1,12 +1,13 @@
 /**
- * @module ObsidianGlobalSearchToolRegistration
- * @description Registers the 'obsidian_global_search' tool with the MCP server.
- * This tool allows searching the Obsidian vault using text/regex queries with optional date filters.
+ * @fileoverview Handles the registration of the `obsidian_global_search` tool with the MCP server.
+ * @module src/mcp-server/tools/obsidianGlobalSearchTool/registration
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ObsidianRestApiService } from "../../../services/obsidianRestAPI/index.js";
-import type { VaultCacheService } from "../../../services/obsidianRestAPI/vaultCache/index.js"; // Import VaultCacheService type
+import {
+  ObsidianRestApiService,
+  VaultCacheService,
+} from "../../../services/obsidianRestAPI/index.js";
 import { BaseErrorCode, McpError } from "../../../types-global/errors.js";
 import {
   ErrorHandler,
@@ -14,119 +15,98 @@ import {
   RequestContext,
   requestContextService,
 } from "../../../utils/index.js";
-// Import types, schema shape, and the core processing logic from logic.ts
-import type {
-  ObsidianGlobalSearchInput,
-  ObsidianGlobalSearchResponse,
-} from "./logic.js"; // Ensure '.js' extension
 import {
-  ObsidianGlobalSearchInputSchemaShape,
-  processObsidianGlobalSearch,
-} from "./logic.js"; // Ensure '.js' extension
+  obsidianGlobalSearchLogic,
+  ObsidianGlobalSearchInputSchema,
+  ObsidianGlobalSearchResponseSchema,
+  type ObsidianGlobalSearchInput,
+} from "./logic.js";
 
 /**
- * Registers the 'obsidian_global_search' tool with the MCP server instance.
+ * Registers the `obsidian_global_search` tool with the MCP server.
  *
- * @param {McpServer} server - The MCP server instance.
- * @param {ObsidianRestApiService} obsidianService - The instance of the Obsidian REST API service.
- * @param {VaultCacheService} vaultCacheService - The instance of the Vault Cache service.
- * @returns {Promise<void>} A promise that resolves when the tool is registered.
- * @throws {McpError} If registration fails critically.
+ * @param server - The MCP server instance.
+ * @param obsidianService - The instance of the Obsidian REST API service.
+ * @param vaultCacheService - The instance of the Vault Cache service.
  */
-export async function registerObsidianGlobalSearchTool(
+export const registerObsidianGlobalSearchTool = async (
   server: McpServer,
   obsidianService: ObsidianRestApiService,
-  vaultCacheService: VaultCacheService, // Now required
-): Promise<void> {
+  vaultCacheService?: VaultCacheService,
+): Promise<void> => {
   const toolName = "obsidian_global_search";
   const toolDescription = `Performs search across the Obsidian vault using text or regex, primarily relying on the Obsidian REST API's simple search. Supports filtering by modification date, optionally restricting search to a specific directory path (recursively), pagination (page, pageSize), and limiting matches shown per file (maxMatchesPerFile). Returns a JSON object containing success status, a message, pagination details (currentPage, pageSize, totalPages), total file/match counts (before pagination), and an array of results. Each result includes the file path, filename, creation timestamp (ctime), modification timestamp (mtime), and an array of match context snippets (limited by maxMatchesPerFile). If there are multiple pages of results, it also includes an 'alsoFoundInFiles' array listing filenames found on other pages.`;
 
   const registrationContext: RequestContext =
     requestContextService.createRequestContext({
-      operation: "RegisterObsidianGlobalSearchTool",
+      operation: "RegisterTool",
       toolName: toolName,
-      module: "ObsidianGlobalSearchRegistration",
     });
 
-  logger.info(`Attempting to register tool: ${toolName}`, registrationContext);
+  logger.info(`Registering tool: '${toolName}'`, registrationContext);
 
   await ErrorHandler.tryCatch(
     async () => {
-      server.tool(
+      server.registerTool(
         toolName,
-        toolDescription,
-        ObsidianGlobalSearchInputSchemaShape,
-        async (
-          params: ObsidianGlobalSearchInput,
-          handlerInvocationContext: any,
-        ): Promise<any> => {
+        {
+          title: "Obsidian Global Search",
+          description: toolDescription,
+          inputSchema: ObsidianGlobalSearchInputSchema.shape,
+          outputSchema: ObsidianGlobalSearchResponseSchema.shape,
+        },
+        async (params: ObsidianGlobalSearchInput) => {
           const handlerContext: RequestContext =
             requestContextService.createRequestContext({
-              operation: "HandleObsidianGlobalSearchRequest",
+              parentRequestId: registrationContext.requestId,
+              operation: "HandleToolRequest",
               toolName: toolName,
-              paramsSummary: {
-                useRegex: params.useRegex,
-                caseSensitive: params.caseSensitive,
-                pageSize: params.pageSize,
-                page: params.page,
-                maxMatchesPerFile: params.maxMatchesPerFile,
-                searchInPath: params.searchInPath,
-                hasDateFilter: !!(
-                  params.modified_since || params.modified_until
-                ),
-              },
+              input: params,
             });
-          logger.debug(`Handling '${toolName}' request`, handlerContext);
 
-          return await ErrorHandler.tryCatch(
-            async () => {
-              const response: ObsidianGlobalSearchResponse =
-                await processObsidianGlobalSearch(
-                  params,
-                  handlerContext,
-                  obsidianService,
-                  vaultCacheService,
-                );
-              logger.debug(
-                `'${toolName}' processed successfully`,
-                handlerContext,
-              );
-
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: JSON.stringify(response, null, 2),
-                  },
-                ],
-                isError: false,
-              };
-            },
-            {
-              operation: `executing tool ${toolName}`,
+          try {
+            const result = await obsidianGlobalSearchLogic(
+              params,
+              handlerContext,
+              obsidianService,
+              vaultCacheService,
+            );
+            return {
+              structuredContent: result,
+              content: [
+                { type: "text", text: JSON.stringify(result, null, 2) },
+              ],
+            };
+          } catch (error) {
+            const mcpError = ErrorHandler.handleError(error, {
+              operation: "obsidianGlobalSearchToolHandler",
               context: handlerContext,
-              errorCode: BaseErrorCode.INTERNAL_ERROR,
-            },
-          );
+              input: params,
+            }) as McpError;
+
+            return {
+              isError: true,
+              content: [{ type: "text", text: `Error: ${mcpError.message}` }],
+              structuredContent: {
+                code: mcpError.code,
+                message: mcpError.message,
+                details: mcpError.details,
+              },
+            };
+          }
         },
       );
 
       logger.info(
-        `Tool registered successfully: ${toolName}`,
+        `Tool '${toolName}' registered successfully.`,
         registrationContext,
       );
     },
     {
-      operation: `registering tool ${toolName}`,
+      operation: `RegisteringTool_${toolName}`,
       context: registrationContext,
-      errorCode: BaseErrorCode.INTERNAL_ERROR,
-      errorMapper: (error: unknown) =>
-        new McpError(
-          error instanceof McpError ? error.code : BaseErrorCode.INTERNAL_ERROR,
-          `Failed to register tool '${toolName}': ${error instanceof Error ? error.message : "Unknown error"}`,
-          { ...registrationContext },
-        ),
+      errorCode: BaseErrorCode.INITIALIZATION_FAILED,
       critical: true,
     },
   );
-}
+};
