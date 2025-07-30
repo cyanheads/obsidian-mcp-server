@@ -4,9 +4,12 @@
  * @module src/mcp-server/transports/auth/index
  */
 
-export { authContext } from "./core/authContext.js";
-export { withRequiredScopes } from "./core/authUtils.js";
-export type { AuthInfo } from "./core/authTypes.js";
+export { authContext } from "./lib/authContext.js";
+export { withRequiredScopes } from "./lib/authUtils.js";
+export type { AuthInfo } from "./lib/authTypes.js";
 
-export { mcpAuthMiddleware as jwtAuthMiddleware } from "./strategies/jwt/jwtMiddleware.js";
-export { oauthMiddleware } from "./strategies/oauth/oauthMiddleware.js";
+export { createAuthStrategy } from "./authFactory.js";
+export { createAuthMiddleware } from "./authMiddleware.js";
+export { AuthStrategy } from "./strategies/authStrategy.js";
+export { JwtStrategy } from "./strategies/jwtStrategy.js";
+export { OauthStrategy } from "./strategies/oauthStrategy.js";

@@ -20,7 +20,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ErrorHandler, logger, RequestContext } from "../../utils/index.js";
+import { ErrorHandler, logger, RequestContext } from "../../../utils/index.js";
 
 /**
  * Connects a given `McpServer` instance to the Stdio transport.
@@ -42,7 +42,7 @@ import { ErrorHandler, logger, RequestContext } from "../../utils/index.js";
  * @returns A promise that resolves when the Stdio transport is successfully connected.
  * @throws {Error} If the connection fails during setup.
  */
-export async function connectStdioTransport(
+export async function startStdioTransport(
   server: McpServer,
   parentContext: RequestContext,
 ): Promise<void> {
@@ -51,7 +51,7 @@ export async function connectStdioTransport(
     operation: "connectStdioTransport",
     transportType: "Stdio",
   };
-  logger.debug("Attempting to connect stdio transport...", operationContext);
+  logger.info("Attempting to connect stdio transport...", operationContext);
 
   try {
     logger.debug("Creating StdioServerTransport instance...", operationContext);
@@ -73,7 +73,12 @@ export async function connectStdioTransport(
       );
     }
   } catch (err) {
-    ErrorHandler.handleError(err, { ...operationContext, critical: true });
-    throw err; // Re-throw after handling to allow caller to react if necessary
+    // Let the ErrorHandler log the error with all context, then rethrow.
+    throw ErrorHandler.handleError(err, {
+      operation: "connectStdioTransport",
+      context: operationContext,
+      critical: true,
+      rethrow: true,
+    });
   }
 }
