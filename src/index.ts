@@ -10,6 +10,7 @@ import { logger, McpLogLevel } from "./utils/internal/logger.js"; // Import logg
 // Import Services
 import { ObsidianRestApiService } from "./services/obsidianRestAPI/index.js";
 import { VaultCacheService } from "./services/obsidianRestAPI/vaultCache/index.js"; // Import VaultCacheService
+import { PermissionsService } from "./services/permissions/service.js";
 
 /**
  * The main MCP server instance (only stored globally for stdio shutdown).
@@ -175,7 +176,9 @@ const start = async () => {
   try {
     // --- Instantiate Shared Services ---
     logger.debug("Instantiating shared services...", startupContext);
-    obsidianService = new ObsidianRestApiService(); // Instantiate Obsidian Service
+    // Instantiate PermissionsService first as it's a dependency
+    const permissionsService = new PermissionsService();
+    obsidianService = new ObsidianRestApiService(permissionsService); // Inject dependency
 
     // --- Perform Initial Obsidian API Status Check ---
     try {

@@ -16,46 +16,29 @@
 
 import { ServerType } from "@hono/node-server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-// Import validated configuration and environment details.
 import { config, environment } from "../config/index.js";
-// Import core utilities: ErrorHandler, logger, requestContextService.
-import { ErrorHandler, logger, requestContextService } from "../utils/index.js";
-// Import the Obsidian service
 import { ObsidianRestApiService } from "../services/obsidianRestAPI/index.js";
-// Import the Vault Cache service
 import { VaultCacheService } from "../services/obsidianRestAPI/vaultCache/index.js";
-// Import registration functions for specific resources and tools.
+import { BaseErrorCode } from "../types-global/errors.js";
+import { ErrorHandler, logger, requestContextService } from "../utils/index.js";
 import { registerObsidianDeleteNoteTool } from "./tools/obsidianDeleteNoteTool/index.js";
 import { registerObsidianGlobalSearchTool } from "./tools/obsidianGlobalSearchTool/index.js";
 import { registerObsidianListNotesTool } from "./tools/obsidianListNotesTool/index.js";
+import { registerObsidianManageFrontmatterTool } from "./tools/obsidianManageFrontmatterTool/index.js";
+import { registerObsidianManageTagsTool } from "./tools/obsidianManageTagsTool/index.js";
 import { registerObsidianReadNoteTool } from "./tools/obsidianReadNoteTool/index.js";
 import { registerObsidianSearchReplaceTool } from "./tools/obsidianSearchReplaceTool/index.js";
 import { registerObsidianUpdateNoteTool } from "./tools/obsidianUpdateNoteTool/index.js";
-import { registerObsidianManageFrontmatterTool } from "./tools/obsidianManageFrontmatterTool/index.js";
-import { registerObsidianManageTagsTool } from "./tools/obsidianManageTagsTool/index.js";
-// Import transport setup functions.
-import { startHttpTransport } from "./transports/httpTransport.js";
-import { connectStdioTransport } from "./transports/stdioTransport.js";
+import { startHttpTransport } from "./transports/http/index.js";
+import { startStdioTransport } from "./transports/stdio/index.js";
 
 /**
  * Creates and configures a new instance of the `McpServer`.
  *
- * This function is central to defining the server's identity and functionality
- * as presented to connecting clients during the MCP initialization phase.
- * It uses pre-instantiated shared services like Obsidian API and Vault Cache.
- *
- * MCP Spec Relevance:
- * - Server Identity (`serverInfo`): The `name` and `version` provided here are part
- *   of the `ServerInformation` object returned in the `InitializeResult` message.
- * - Capabilities Declaration: Declares supported features (logging, dynamic resources/tools).
- * - Resource/Tool Registration: Calls registration functions, passing necessary service instances.
- *
- * Design Note: This factory is called once for 'stdio' transport and per session for 'http' transport.
- *
  * @param {ObsidianRestApiService} obsidianService - The shared Obsidian REST API service instance.
- * @param {VaultCacheService | undefined} vaultCacheService - The shared Vault Cache service instance, which may be undefined if disabled.
+ * @param {VaultCacheService | undefined} vaultCacheService - The shared Vault Cache service instance.
  * @returns {Promise<McpServer>} A promise resolving with the configured `McpServer` instance.
- * @throws {Error} If any resource or tool registration fails.
+ * @throws {McpError} If any resource or tool registration fails.
  * @private
  */
 async function createMcpServerInstance(
@@ -67,131 +50,100 @@ async function createMcpServerInstance(
   });
   logger.info("Initializing MCP server instance with shared services", context);
 
-  requestContextService.configure({
-    appName: config.mcpServerName,
-    appVersion: config.mcpServerVersion,
-    environment,
-  });
-
-  logger.debug("Instantiating McpServer with capabilities", {
-    ...context,
-    serverInfo: {
-      name: config.mcpServerName,
-      version: config.mcpServerVersion,
-    },
-    capabilities: {
-      logging: {},
-      resources: { listChanged: true },
-      tools: { listChanged: true },
-    },
-  });
   const server = new McpServer(
     { name: config.mcpServerName, version: config.mcpServerVersion },
     {
       capabilities: {
-        logging: {}, // Server can receive logging/setLevel and send notifications/message
-        resources: { listChanged: true }, // Server supports dynamic resource lists
-        tools: { listChanged: true }, // Server supports dynamic tool lists
+        logging: {},
+        resources: { listChanged: true },
+        tools: { listChanged: true },
       },
     },
   );
 
-  try {
-    logger.debug(
-      "Registering resources and tools using shared services...",
-      context,
-    );
-    // Register all tools, passing the vaultCacheService which may be undefined
-    await registerObsidianListNotesTool(server, obsidianService);
-    await registerObsidianReadNoteTool(server, obsidianService);
-    await registerObsidianDeleteNoteTool(
-      server,
-      obsidianService,
-      vaultCacheService,
-    );
-    if (vaultCacheService) {
-      await registerObsidianGlobalSearchTool(
+  await ErrorHandler.tryCatch(
+    async () => {
+      logger.debug(
+        "Registering resources and tools using shared services...",
+        context,
+      );
+      await registerObsidianListNotesTool(server, obsidianService);
+      await registerObsidianReadNoteTool(server, obsidianService);
+      await registerObsidianDeleteNoteTool(
         server,
         obsidianService,
         vaultCacheService,
       );
-    } else {
-      logger.warning(
-        "Skipping registration of 'obsidian_global_search' because the Vault Cache Service is disabled.",
-        context,
+      if (vaultCacheService) {
+        await registerObsidianGlobalSearchTool(
+          server,
+          obsidianService,
+          vaultCacheService,
+        );
+      } else {
+        logger.warning(
+          "Skipping registration of 'obsidian_global_search' because the Vault Cache Service is disabled.",
+          context,
+        );
+      }
+      await registerObsidianSearchReplaceTool(
+        server,
+        obsidianService,
+        vaultCacheService,
       );
-    }
-    await registerObsidianSearchReplaceTool(
-      server,
-      obsidianService,
-      vaultCacheService,
-    );
-    await registerObsidianUpdateNoteTool(
-      server,
-      obsidianService,
-      vaultCacheService,
-    );
-    await registerObsidianManageFrontmatterTool(
-      server,
-      obsidianService,
-      vaultCacheService,
-    );
-    await registerObsidianManageTagsTool(
-      server,
-      obsidianService,
-      vaultCacheService,
-    );
-
-    logger.info("Resources and tools registered successfully", context);
-
-    if (vaultCacheService) {
-      logger.info(
-        "Triggering background vault cache build (if not already built/building)...",
-        context,
+      await registerObsidianUpdateNoteTool(
+        server,
+        obsidianService,
+        vaultCacheService,
       );
-      // Intentionally not awaiting this promise to allow server startup to proceed.
-      // Errors are logged within the catch block.
-      vaultCacheService.buildVaultCache().catch((cacheBuildError) => {
-        logger.error("Error occurred during background vault cache build", {
-          ...context, // Use the initial context for correlation
-          subOperation: "BackgroundVaultCacheBuild", // Add sub-operation for clarity
-          error:
-            cacheBuildError instanceof Error
-              ? cacheBuildError.message
-              : String(cacheBuildError),
-          stack:
-            cacheBuildError instanceof Error
-              ? cacheBuildError.stack
-              : undefined,
+      await registerObsidianManageFrontmatterTool(
+        server,
+        obsidianService,
+        vaultCacheService,
+      );
+      await registerObsidianManageTagsTool(
+        server,
+        obsidianService,
+        vaultCacheService,
+      );
+
+      logger.info("Resources and tools registered successfully", context);
+
+      if (vaultCacheService) {
+        logger.info(
+          "Triggering background vault cache build (if not already built/building)...",
+          context,
+        );
+        vaultCacheService.buildVaultCache().catch((cacheBuildError) => {
+          logger.error(
+            "Error occurred during background vault cache build",
+            cacheBuildError,
+            {
+              ...context,
+              subOperation: "BackgroundVaultCacheBuild",
+            },
+          );
         });
-      });
-    }
-  } catch (err) {
-    logger.error("Failed to register resources/tools", {
-      ...context,
-      error: err instanceof Error ? err.message : String(err),
-      stack: err instanceof Error ? err.stack : undefined,
-    });
-    throw err; // Re-throw to be caught by the caller (e.g., startTransport)
-  }
+      }
+    },
+    {
+      operation: "registerAllCapabilities",
+      context,
+      errorCode: BaseErrorCode.INITIALIZATION_FAILED,
+      critical: true,
+    },
+  );
 
   return server;
 }
 
 /**
  * Selects, sets up, and starts the appropriate MCP transport layer based on configuration.
- * This function acts as the bridge between the core server logic and the communication channel.
- * It now accepts shared service instances to pass them down the chain.
- *
- * MCP Spec Relevance:
- * - Transport Selection: Uses `config.mcpTransportType` ('stdio' or 'http').
- * - Transport Connection: Calls dedicated functions for chosen transport.
- * - Server Instance Lifecycle: Single instance for 'stdio', per-session for 'http'.
  *
  * @param {ObsidianRestApiService} obsidianService - The shared Obsidian REST API service instance.
  * @param {VaultCacheService | undefined} vaultCacheService - The shared Vault Cache service instance.
- * @returns {Promise<McpServer | void>} Resolves with the `McpServer` instance for 'stdio', or `void` for 'http'.
- * @throws {Error} If the configured transport type is unsupported or if transport setup fails.
+ * @returns {Promise<McpServer | ServerType | void>} Resolves with the server instance or void.
+ * @throws {Error} If transport type is unsupported or setup fails.
  * @private
  */
 async function startTransport(
@@ -205,41 +157,20 @@ async function startTransport(
   });
   logger.info(`Starting transport: ${transportType}`, context);
 
+  const serverFactory = () =>
+    createMcpServerInstance(obsidianService, vaultCacheService);
+
   if (transportType === "http") {
-    logger.debug(
-      "Delegating to startHttpTransport with a factory for McpServer instances...",
-      context,
-    );
-    // For HTTP, startHttpTransport manages its own lifecycle and server instances per session.
-    // It needs a factory function to create new McpServer instances, passing along the shared services.
-    const mcpServerFactory = async () =>
-      createMcpServerInstance(obsidianService, vaultCacheService);
-    const httpServerInstance = await startHttpTransport(
-      mcpServerFactory,
-      context,
-    );
-    return httpServerInstance; // Return the http.Server instance.
+    const { server } = await startHttpTransport(serverFactory, context);
+    return server;
   }
 
   if (transportType === "stdio") {
-    logger.debug(
-      "Creating single McpServer instance for stdio transport using shared services...",
-      context,
-    );
-    const server = await createMcpServerInstance(
-      obsidianService,
-      vaultCacheService,
-    );
-    logger.debug("Delegating to connectStdioTransport...", context);
-    await connectStdioTransport(server, context);
-    return server; // Return the single server instance for stdio.
+    const server = await serverFactory();
+    await startStdioTransport(server, context);
+    return server;
   }
 
-  // Should not be reached if config validation is effective.
-  logger.fatal(
-    `Unsupported transport type configured: ${transportType}`,
-    context,
-  );
   throw new Error(
     `Unsupported transport type: ${transportType}. Must be 'stdio' or 'http'.`,
   );
@@ -247,16 +178,10 @@ async function startTransport(
 
 /**
  * Main application entry point. Initializes services and starts the MCP server.
- * Orchestrates server startup, transport selection, and top-level error handling.
  *
- * MCP Spec Relevance:
- * - Manages server startup, leading to a server ready for MCP messages.
- * - Handles critical startup failures, ensuring appropriate process exit.
- *
- * @param {ObsidianRestApiService} obsidianService - The shared Obsidian REST API service instance, instantiated by the caller (e.g., index.ts).
- * @param {VaultCacheService | undefined} vaultCacheService - The shared Vault Cache service instance, instantiated by the caller (e.g., index.ts).
- * @returns {Promise<void | McpServer>} For 'stdio', resolves with `McpServer`. For 'http', runs indefinitely.
- *   Rejects on critical failure, leading to process exit.
+ * @param {ObsidianRestApiService} obsidianService - The shared Obsidian REST API service instance.
+ * @param {VaultCacheService | undefined} vaultCacheService - The shared Vault Cache service instance.
+ * @returns {Promise<void | McpServer | ServerType>} Resolves with the server instance or void.
  */
 export async function initializeAndStartServer(
   obsidianService: ObsidianRestApiService,
@@ -270,14 +195,13 @@ export async function initializeAndStartServer(
     context,
   );
 
-  try {
-    // Services are now provided by the caller (e.g., index.ts)
-    logger.debug(
-      "Using provided shared services (ObsidianRestApiService, VaultCacheService).",
-      context,
-    );
+  requestContextService.configure({
+    appName: config.mcpServerName,
+    appVersion: config.mcpServerVersion,
+    environment,
+  });
 
-    // Initiate the transport setup based on configuration, passing shared services.
+  try {
     const result = await startTransport(obsidianService, vaultCacheService);
     logger.info(
       "MCP Server initialization sequence completed successfully.",
@@ -285,21 +209,16 @@ export async function initializeAndStartServer(
     );
     return result;
   } catch (err) {
-    logger.fatal("Critical error during MCP server initialization.", {
-      ...context,
-      error: err instanceof Error ? err.message : String(err),
-      stack: err instanceof Error ? err.stack : undefined,
-    });
-    // Ensure the error is handled by our centralized handler, which might log more details or perform cleanup.
     ErrorHandler.handleError(err, {
-      operation: "initializeAndStartServer", // More specific operation
-      context: context, // Pass the existing context
-      critical: true, // This is a critical failure
+      operation: "initializeAndStartServer",
+      context: context,
+      critical: true,
+      rethrow: false,
     });
     logger.info(
       "Exiting process due to critical initialization error.",
       context,
     );
-    process.exit(1); // Exit with a non-zero code to indicate failure.
+    process.exit(1);
   }
 }
