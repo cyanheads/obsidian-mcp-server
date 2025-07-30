@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.8] - 2025-07-30
+## [2.1.0] - 2025-07-30
 
 ### Alignment with `cyanheads/mcp-ts-template@v1.7.7`
 
@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Service & Utility Structure**: Reorganized the `utils` directory into more granular submodules (`network`, `scheduling`, `security`). Moved all Obsidian-specific utilities into `src/services/obsidianRestAPI/utils` to improve cohesion.
   - **Tool Standardization**: Aligned all tools with the new architecture. They now consistently use `RequestContext` for end-to-end traceability and a standardized `McpError` for predictable error handling.
 - **Dependency Updates**: Updated all project dependencies to their latest stable versions, including `package.json` and `package-lock.json`.
-- **Documentation**: Updated `.clinerules`, `README.md`, and `docs/tree.md` to reflect the new architectural standards and project structure.
+- **Documentation**: Updated `.clinerules`, `README.md`, and `docs/tree.md` to reflect the new architectural standards, permissions feature, and project structure.
 
 ### Added
 
