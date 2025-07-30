@@ -6,7 +6,8 @@
 
 import { RequestContext } from "../../../utils/index.js";
 import { PatchOptions, Period, RequestFunction } from "../types.js";
-import { encodeVaultPath } from "../../../utils/obsidian/obsidianApiUtils.js";
+import { encodeVaultPath } from "../utils/obsidianApiUtils.js";
+import { handleRequest } from "../utils/requestHandler.js";
 
 /**
  * Helper to construct headers for PATCH requests.
@@ -59,15 +60,17 @@ export async function patchFile(
   const encodedPath = encodeVaultPath(filePath);
 
   // PATCH returns 200 OK according to spec
-  await _request<void>(
-    {
-      method: "PATCH",
-      url: `/vault${encodedPath}`, // Use the encoded path
-      headers: headers,
-      data: requestData,
-    },
-    context,
-    "patchFile",
+  await handleRequest(
+    _request<void>(
+      {
+        method: "PATCH",
+        url: `/vault${encodedPath}`, // Use the encoded path
+        headers: headers,
+        data: requestData,
+      },
+      context,
+      "patchFile",
+    ),
   );
 }
 
@@ -89,15 +92,17 @@ export async function patchActiveFile(
   const requestData =
     typeof content === "object" ? JSON.stringify(content) : content;
 
-  await _request<void>(
-    {
-      method: "PATCH",
-      url: `/active/`,
-      headers: headers,
-      data: requestData,
-    },
-    context,
-    "patchActiveFile",
+  await handleRequest(
+    _request<void>(
+      {
+        method: "PATCH",
+        url: `/active/`,
+        headers: headers,
+        data: requestData,
+      },
+      context,
+      "patchActiveFile",
+    ),
   );
 }
 
@@ -121,14 +126,16 @@ export async function patchPeriodicNote(
   const requestData =
     typeof content === "object" ? JSON.stringify(content) : content;
 
-  await _request<void>(
-    {
-      method: "PATCH",
-      url: `/periodic/${period}/`,
-      headers: headers,
-      data: requestData,
-    },
-    context,
-    "patchPeriodicNote",
+  await handleRequest(
+    _request<void>(
+      {
+        method: "PATCH",
+        url: `/periodic/${period}/`,
+        headers: headers,
+        data: requestData,
+      },
+      context,
+      "patchPeriodicNote",
+    ),
   );
 }

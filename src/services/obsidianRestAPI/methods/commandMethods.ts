@@ -6,10 +6,11 @@
 
 import { RequestContext } from "../../../utils/index.js";
 import {
-  ObsidianCommand,
   CommandListResponse,
+  ObsidianCommand,
   RequestFunction,
 } from "../types.js";
+import { handleRequest } from "../utils/requestHandler.js";
 
 /**
  * Executes a registered Obsidian command by its ID.
@@ -23,13 +24,15 @@ export async function executeCommand(
   commandId: string,
   context: RequestContext,
 ): Promise<void> {
-  await _request<void>(
-    {
-      method: "POST",
-      url: `/commands/${encodeURIComponent(commandId)}/`,
-    },
-    context,
-    "executeCommand",
+  await handleRequest(
+    _request<void>(
+      {
+        method: "POST",
+        url: `/commands/${encodeURIComponent(commandId)}/`,
+      },
+      context,
+      "executeCommand",
+    ),
   );
 }
 
@@ -43,13 +46,15 @@ export async function listCommands(
   _request: RequestFunction,
   context: RequestContext,
 ): Promise<ObsidianCommand[]> {
-  const response = await _request<CommandListResponse>(
-    {
-      method: "GET",
-      url: "/commands/",
-    },
-    context,
-    "listCommands",
+  const response = await handleRequest(
+    _request<CommandListResponse>(
+      {
+        method: "GET",
+        url: "/commands/",
+      },
+      context,
+      "listCommands",
+    ),
   );
   return response.commands;
 }

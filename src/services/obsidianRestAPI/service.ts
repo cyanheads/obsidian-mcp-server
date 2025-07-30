@@ -15,6 +15,7 @@ import {
   RequestContext,
   requestContextService,
 } from "../../utils/index.js"; // Added requestContextService
+import { PermissionsService } from "../permissions/service.js";
 import * as activeFileMethods from "./methods/activeFileMethods.js";
 import * as commandMethods from "./methods/commandMethods.js";
 import * as openMethods from "./methods/openMethods.js";
@@ -30,15 +31,22 @@ import {
   ObsidianCommand,
   PatchOptions,
   Period,
+  Permission,
   SimpleSearchResult,
 } from "./types.js"; // Import types from the new file
 
 export class ObsidianRestApiService {
   private axiosInstance: AxiosInstance;
   private apiKey: string;
+  private permissionsService: PermissionsService;
 
-  constructor() {
+  constructor(
+    // Injected for testability and adherence to Dependency Inversion Principle
+    permissionsService: PermissionsService,
+  ) {
     this.apiKey = config.obsidianApiKey; // Get from central config
+    this.permissionsService = permissionsService;
+
     if (!this.apiKey) {
       // Config validation should prevent this, but double-check
       throw new McpError(
@@ -75,14 +83,15 @@ export class ObsidianRestApiService {
    * @param config - Axios request configuration.
    * @param context - Request context for logging.
    * @param operationName - Name of the operation for logging context.
-   * @returns The response data.
-   * @throws {McpError} If the request fails.
+   * @param throwOnError - If false, returns an McpError instead of throwing.
+   * @returns The response data or an McpError if throwOnError is false.
    */
   private async _request<T = any>(
     requestConfig: AxiosRequestConfig,
     context: RequestContext,
     operationName: string,
-  ): Promise<T> {
+    throwOnError = true,
+  ): Promise<T | McpError> {
     const operationContext = {
       ...context,
       operation: `ObsidianAPI_${operationName}`,
@@ -100,8 +109,6 @@ export class ObsidianRestApiService {
             `Obsidian API request successful: ${requestConfig.method} ${requestConfig.url}`,
             { ...operationContext, status: response.status },
           );
-          // For HEAD requests, we need the headers, so return the whole response.
-          // For other requests, returning response.data is fine.
           if (requestConfig.method === "HEAD") {
             return response as T;
           }
@@ -118,7 +125,6 @@ export class ObsidianRestApiService {
           };
 
           if (axiosError.response) {
-            // Handle specific HTTP status codes
             switch (axiosError.response.status) {
               case 400:
                 errorCode = BaseErrorCode.VALIDATION_ERROR;
@@ -135,15 +141,9 @@ export class ObsidianRestApiService {
               case 404:
                 errorCode = BaseErrorCode.NOT_FOUND;
                 errorMessage = `Obsidian API Not Found: ${requestConfig.url}`;
-                // Log 404s at debug level, as they might be expected (e.g., checking existence)
-                logger.debug(errorMessage, {
-                  ...operationContext,
-                  ...errorDetails,
-                });
-                throw new McpError(errorCode, errorMessage, operationContext);
-              // NOTE: We throw immediately after logging debug for 404, skipping the general error log below.
+                break;
               case 405:
-                errorCode = BaseErrorCode.VALIDATION_ERROR; // Method not allowed often implies incorrect usage
+                errorCode = BaseErrorCode.VALIDATION_ERROR;
                 errorMessage = `Obsidian API Method Not Allowed: ${requestConfig.method} on ${requestConfig.url}`;
                 break;
               case 503:
@@ -151,57 +151,47 @@ export class ObsidianRestApiService {
                 errorMessage = "Obsidian API Service Unavailable.";
                 break;
             }
-            // General error logging for non-404 client/server errors handled above
-            logger.error(errorMessage, {
-              ...operationContext,
-              ...errorDetails,
-            });
-            throw new McpError(errorCode, errorMessage, operationContext);
           } else if (axiosError.request) {
-            // Network error (no response received)
             errorCode = BaseErrorCode.SERVICE_UNAVAILABLE;
             errorMessage = `Obsidian API Network Error: No response received from ${requestConfig.url}. This may be due to Obsidian not running, the Local REST API plugin being disabled, or a network issue.`;
+          }
+
+          const mcpError = new McpError(
+            errorCode,
+            errorMessage,
+            operationContext,
+          );
+
+          if (throwOnError) {
             logger.error(errorMessage, {
               ...operationContext,
               ...errorDetails,
             });
-            throw new McpError(errorCode, errorMessage, operationContext);
+            throw mcpError;
           } else {
-            // Other errors (e.g., setup issues)
-            // Pass error object correctly if it's an Error instance
-            logger.error(
-              errorMessage,
-              error instanceof Error ? error : undefined,
+            logger.debug(
+              `Obsidian API request failed but not throwing: ${errorMessage}`,
               {
                 ...operationContext,
                 ...errorDetails,
-                originalError: String(error),
               },
             );
-            throw new McpError(errorCode, errorMessage, operationContext);
+            return mcpError;
           }
         }
       },
       {
         operation: `ObsidianAPI_${operationName}_Wrapper`,
         context: context,
-        input: requestConfig, // Log request config (sanitized by ErrorHandler)
-        errorCode: BaseErrorCode.INTERNAL_ERROR, // Default if wrapper itself fails
+        input: requestConfig,
+        errorCode: BaseErrorCode.INTERNAL_ERROR,
       },
     );
   }
 
   // --- API Methods ---
 
-  /**
-   * Checks the status and authentication of the Obsidian Local REST API.
-   * @param context - The request context for logging and correlation.
-   * @returns {Promise<ApiStatusResponse>} - The status object from the API.
-   */
   async checkStatus(context: RequestContext): Promise<ApiStatusResponse> {
-    // Note: This is the only endpoint that doesn't strictly require auth,
-    // but sending the key helps check if it's valid.
-    // This one is simple enough to keep inline or could be extracted too.
     return this._request<ApiStatusResponse>(
       {
         method: "GET",
@@ -209,23 +199,23 @@ export class ObsidianRestApiService {
       },
       context,
       "checkStatus",
-    );
+    ) as Promise<ApiStatusResponse>;
   }
 
   // --- Vault Methods ---
 
-  /**
-   * Gets the content of a specific file in the vault.
-   * @param filePath - Vault-relative path to the file.
-   * @param format - 'markdown' or 'json' (for NoteJson).
-   * @param context - Request context.
-   * @returns The file content (string) or NoteJson object.
-   */
   async getFileContent(
     filePath: string,
     format: "markdown" | "json" = "markdown",
     context: RequestContext,
   ): Promise<string | NoteJson> {
+    if (!this.permissionsService.isAllowed(filePath, "read", context)) {
+      throw new McpError(
+        BaseErrorCode.FORBIDDEN,
+        `Read access denied for path: ${filePath}`,
+        context,
+      );
+    }
     return vaultMethods.getFileContent(
       this._request.bind(this),
       filePath,
@@ -234,18 +224,22 @@ export class ObsidianRestApiService {
     );
   }
 
-  /**
-   * Updates (overwrites) the content of a file or creates it if it doesn't exist.
-   * @param filePath - Vault-relative path to the file.
-   * @param content - The new content for the file.
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (204 No Content).
-   */
   async updateFileContent(
     filePath: string,
     content: string,
     context: RequestContext,
   ): Promise<void> {
+    const fileExists = (await this.getFileMetadata(filePath, context)) !== null;
+    const requiredPermission = fileExists ? "write" : "create";
+
+    if (!this.permissionsService.isAllowed(filePath, requiredPermission, context)) {
+      throw new McpError(
+        BaseErrorCode.FORBIDDEN,
+        `${requiredPermission.charAt(0).toUpperCase() + requiredPermission.slice(1)} access denied for path: ${filePath}`,
+        context,
+      );
+    }
+
     return vaultMethods.updateFileContent(
       this._request.bind(this),
       filePath,
@@ -254,18 +248,22 @@ export class ObsidianRestApiService {
     );
   }
 
-  /**
-   * Appends content to the end of a file. Creates the file if it doesn't exist.
-   * @param filePath - Vault-relative path to the file.
-   * @param content - The content to append.
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (204 No Content).
-   */
   async appendFileContent(
     filePath: string,
     content: string,
     context: RequestContext,
   ): Promise<void> {
+    const fileExists = (await this.getFileMetadata(filePath, context)) !== null;
+    const requiredPermission = fileExists ? "write" : "create";
+
+    if (!this.permissionsService.isAllowed(filePath, requiredPermission, context)) {
+      throw new McpError(
+        BaseErrorCode.FORBIDDEN,
+        `${requiredPermission.charAt(0).toUpperCase() + requiredPermission.slice(1)} access denied for path: ${filePath}`,
+        context,
+      );
+    }
+
     return vaultMethods.appendFileContent(
       this._request.bind(this),
       filePath,
@@ -274,72 +272,80 @@ export class ObsidianRestApiService {
     );
   }
 
-  /**
-   * Deletes a specific file in the vault.
-   * @param filePath - Vault-relative path to the file.
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (204 No Content).
-   */
   async deleteFile(filePath: string, context: RequestContext): Promise<void> {
+    if (!this.permissionsService.isAllowed(filePath, "delete", context)) {
+      throw new McpError(
+        BaseErrorCode.FORBIDDEN,
+        `Delete access denied for path: ${filePath}`,
+        context,
+      );
+    }
     return vaultMethods.deleteFile(this._request.bind(this), filePath, context);
   }
 
-  /**
-   * Lists files within a specified directory in the vault.
-   * @param dirPath - Vault-relative path to the directory. Use empty string "" or "/" for the root.
-   * @param context - Request context.
-   * @returns A list of file and directory names.
-   */
   async listFiles(dirPath: string, context: RequestContext): Promise<string[]> {
+    if (!this.permissionsService.isAllowed(dirPath, "read", context)) {
+      throw new McpError(
+        BaseErrorCode.FORBIDDEN,
+        `Read access denied for path: ${dirPath}`,
+        context,
+      );
+    }
     return vaultMethods.listFiles(this._request.bind(this), dirPath, context);
   }
 
-  /**
-   * Gets the metadata (stat) of a specific file using a lightweight HEAD request.
-   * @param filePath - Vault-relative path to the file.
-   * @param context - Request context.
-   * @returns The file's metadata.
-   */
   async getFileMetadata(
     filePath: string,
     context: RequestContext,
   ): Promise<NoteStat | null> {
-    return vaultMethods.getFileMetadata(
-      this._request.bind(this),
+    if (!this.permissionsService.isAllowed(filePath, "read", context)) {
+      throw new McpError(
+        BaseErrorCode.FORBIDDEN,
+        `Read access denied for path: ${filePath}`,
+        context,
+      );
+    }
+
+    const requestFn = <T = any>(
+      config: AxiosRequestConfig,
+      ctx: RequestContext,
+      opName: string,
+      throwErr = true,
+    ) => this._request<T>(config, ctx, opName, throwErr);
+
+    const result = await vaultMethods.getFileMetadata(
+      requestFn,
       filePath,
       context,
     );
+
+    if (result instanceof McpError) {
+      if (result.code === BaseErrorCode.NOT_FOUND) {
+        return null; // Explicitly return null only for 404 errors
+      }
+      throw result; // Re-throw other errors
+    }
+    return result;
   }
 
   // --- Search Methods ---
 
-  /**
-   * Performs a simple text search across the vault.
-   * @param query - The text query string.
-   * @param contextLength - Number of characters surrounding each match (default 100).
-   * @param context - Request context.
-   * @returns An array of search results.
-   */
   async searchSimple(
     query: string,
     contextLength: number = 100,
     context: RequestContext,
   ): Promise<SimpleSearchResult[]> {
-    return searchMethods.searchSimple(
+    const results = await searchMethods.searchSimple(
       this._request.bind(this),
       query,
       contextLength,
       context,
     );
+    return results.filter((result) =>
+      this.permissionsService.isAllowed(result.filePath, "read", context),
+    );
   }
 
-  /**
-   * Performs a complex search using Dataview DQL or JsonLogic.
-   * @param query - The query string (DQL) or JSON object (JsonLogic).
-   * @param contentType - The content type header indicating the query format.
-   * @param context - Request context.
-   * @returns An array of search results.
-   */
   async searchComplex(
     query: string | object,
     contentType:
@@ -347,22 +353,19 @@ export class ObsidianRestApiService {
       | "application/vnd.olrapi.jsonlogic+json",
     context: RequestContext,
   ): Promise<ComplexSearchResult[]> {
-    return searchMethods.searchComplex(
+    const results = await searchMethods.searchComplex(
       this._request.bind(this),
       query,
       contentType,
       context,
     );
+    return results.filter((result) =>
+      this.permissionsService.isAllowed(result.filePath, "read", context),
+    );
   }
 
   // --- Command Methods ---
 
-  /**
-   * Executes a registered Obsidian command by its ID.
-   * @param commandId - The ID of the command (e.g., "app:go-back").
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (204 No Content).
-   */
   async executeCommand(
     commandId: string,
     context: RequestContext,
@@ -374,29 +377,27 @@ export class ObsidianRestApiService {
     );
   }
 
-  /**
-   * Lists all available Obsidian commands.
-   * @param context - Request context.
-   * @returns A list of available commands.
-   */
   async listCommands(context: RequestContext): Promise<ObsidianCommand[]> {
     return commandMethods.listCommands(this._request.bind(this), context);
   }
 
   // --- Open Methods ---
 
-  /**
-   * Opens a specific file in Obsidian. Creates the file if it doesn't exist.
-   * @param filePath - Vault-relative path to the file.
-   * @param newLeaf - Whether to open the file in a new editor tab (leaf).
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (200 OK, but no body expected).
-   */
   async openFile(
     filePath: string,
     newLeaf: boolean = false,
     context: RequestContext,
   ): Promise<void> {
+    if (
+      !this.permissionsService.isAllowed(filePath, "read", context) &&
+      !this.permissionsService.isAllowed(filePath, "create", context)
+    ) {
+      throw new McpError(
+        BaseErrorCode.FORBIDDEN,
+        `Open access denied for path: ${filePath}`,
+        context,
+      );
+    }
     return openMethods.openFile(
       this._request.bind(this),
       filePath,
@@ -407,33 +408,28 @@ export class ObsidianRestApiService {
 
   // --- Active File Methods ---
 
-  /**
-   * Gets the content of the currently active file in Obsidian.
-   * @param format - 'markdown' or 'json' (for NoteJson).
-   * @param context - Request context.
-   * @returns The file content (string) or NoteJson object.
-   */
   async getActiveFile(
     format: "markdown" | "json" = "markdown",
     context: RequestContext,
   ): Promise<string | NoteJson> {
-    return activeFileMethods.getActiveFile(
-      this._request.bind(this),
-      format,
-      context,
-    );
+    const note = await this._getVerifiedActiveNote("read", context);
+    return format === "markdown" ? note.content : note;
   }
 
-  /**
-   * Updates (overwrites) the content of the currently active file.
-   * @param content - The new content.
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (204 No Content).
-   */
   async updateActiveFile(
     content: string,
     context: RequestContext,
   ): Promise<void> {
+    const note = await this._getVerifiedActiveNote("write", context);
+    if (!this.permissionsService.isAllowed(note.path, "create", context)) {
+      if (!this.permissionsService.isAllowed(note.path, "write", context)) {
+        throw new McpError(
+          BaseErrorCode.FORBIDDEN,
+          `Write access denied for active file: ${note.path}`,
+          context,
+        );
+      }
+    }
     return activeFileMethods.updateActiveFile(
       this._request.bind(this),
       content,
@@ -441,16 +437,20 @@ export class ObsidianRestApiService {
     );
   }
 
-  /**
-   * Appends content to the end of the currently active file.
-   * @param content - The content to append.
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (204 No Content).
-   */
   async appendActiveFile(
     content: string,
     context: RequestContext,
   ): Promise<void> {
+    const note = await this._getVerifiedActiveNote("write", context);
+    if (!this.permissionsService.isAllowed(note.path, "create", context)) {
+      if (!this.permissionsService.isAllowed(note.path, "write", context)) {
+        throw new McpError(
+          BaseErrorCode.FORBIDDEN,
+          `Write access denied for active file: ${note.path}`,
+          context,
+        );
+      }
+    }
     return activeFileMethods.appendActiveFile(
       this._request.bind(this),
       content,
@@ -458,12 +458,8 @@ export class ObsidianRestApiService {
     );
   }
 
-  /**
-   * Deletes the currently active file.
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (204 No Content).
-   */
   async deleteActiveFile(context: RequestContext): Promise<void> {
+    const note = await this._getVerifiedActiveNote("delete", context);
     return activeFileMethods.deleteActiveFile(
       this._request.bind(this),
       context,
@@ -471,40 +467,31 @@ export class ObsidianRestApiService {
   }
 
   // --- Periodic Notes Methods ---
-  // PATCH methods for periodic notes are complex and omitted for brevity
 
-  /**
-   * Gets the content of a periodic note (daily, weekly, etc.).
-   * @param period - The period type ('daily', 'weekly', 'monthly', 'quarterly', 'yearly').
-   * @param format - 'markdown' or 'json'.
-   * @param context - Request context.
-   * @returns The note content or NoteJson.
-   */
   async getPeriodicNote(
     period: Period,
     format: "markdown" | "json" = "markdown",
     context: RequestContext,
   ): Promise<string | NoteJson> {
-    return periodicNoteMethods.getPeriodicNote(
-      this._request.bind(this),
-      period,
-      format,
-      context,
-    );
+    const note = await this._getVerifiedPeriodicNote(period, "read", context);
+    return format === "markdown" ? note.content : note;
   }
 
-  /**
-   * Updates (overwrites) the content of a periodic note. Creates if needed.
-   * @param period - The period type.
-   * @param content - The new content.
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (204 No Content).
-   */
   async updatePeriodicNote(
     period: Period,
     content: string,
     context: RequestContext,
   ): Promise<void> {
+    const note = await this._getVerifiedPeriodicNote(period, "write", context);
+    if (!this.permissionsService.isAllowed(note.path, "create", context)) {
+      if (!this.permissionsService.isAllowed(note.path, "write", context)) {
+        throw new McpError(
+          BaseErrorCode.FORBIDDEN,
+          `Write access denied for periodic note: ${note.path}`,
+          context,
+        );
+      }
+    }
     return periodicNoteMethods.updatePeriodicNote(
       this._request.bind(this),
       period,
@@ -513,18 +500,21 @@ export class ObsidianRestApiService {
     );
   }
 
-  /**
-   * Appends content to a periodic note. Creates if needed.
-   * @param period - The period type.
-   * @param content - The content to append.
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (204 No Content).
-   */
   async appendPeriodicNote(
     period: Period,
     content: string,
     context: RequestContext,
   ): Promise<void> {
+    const note = await this._getVerifiedPeriodicNote(period, "write", context);
+    if (!this.permissionsService.isAllowed(note.path, "create", context)) {
+      if (!this.permissionsService.isAllowed(note.path, "write", context)) {
+        throw new McpError(
+          BaseErrorCode.FORBIDDEN,
+          `Write access denied for periodic note: ${note.path}`,
+          context,
+        );
+      }
+    }
     return periodicNoteMethods.appendPeriodicNote(
       this._request.bind(this),
       period,
@@ -533,16 +523,11 @@ export class ObsidianRestApiService {
     );
   }
 
-  /**
-   * Deletes a periodic note.
-   * @param period - The period type.
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (204 No Content).
-   */
   async deletePeriodicNote(
     period: Period,
     context: RequestContext,
   ): Promise<void> {
+    const note = await this._getVerifiedPeriodicNote(period, "delete", context);
     return periodicNoteMethods.deletePeriodicNote(
       this._request.bind(this),
       period,
@@ -552,20 +537,19 @@ export class ObsidianRestApiService {
 
   // --- Patch Methods ---
 
-  /**
-   * Patches a specific file in the vault using granular controls.
-   * @param filePath - Vault-relative path to the file.
-   * @param content - The content to insert/replace (string or JSON for tables/frontmatter).
-   * @param options - Patch operation details (operation, targetType, target, etc.).
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (200 OK).
-   */
   async patchFile(
     filePath: string,
     content: string | object,
     options: PatchOptions,
     context: RequestContext,
   ): Promise<void> {
+    if (!this.permissionsService.isAllowed(filePath, "write", context)) {
+      throw new McpError(
+        BaseErrorCode.FORBIDDEN,
+        `Write access denied for path: ${filePath}`,
+        context,
+      );
+    }
     return patchMethods.patchFile(
       this._request.bind(this),
       filePath,
@@ -575,18 +559,12 @@ export class ObsidianRestApiService {
     );
   }
 
-  /**
-   * Patches the currently active file in Obsidian using granular controls.
-   * @param content - The content to insert/replace.
-   * @param options - Patch operation details.
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (200 OK).
-   */
   async patchActiveFile(
     content: string | object,
     options: PatchOptions,
     context: RequestContext,
   ): Promise<void> {
+    const note = await this._getVerifiedActiveNote("write", context);
     return patchMethods.patchActiveFile(
       this._request.bind(this),
       content,
@@ -595,20 +573,13 @@ export class ObsidianRestApiService {
     );
   }
 
-  /**
-   * Patches a periodic note using granular controls.
-   * @param period - The period type ('daily', 'weekly', etc.).
-   * @param content - The content to insert/replace.
-   * @param options - Patch operation details.
-   * @param context - Request context.
-   * @returns {Promise<void>} Resolves on success (200 OK).
-   */
   async patchPeriodicNote(
     period: Period,
     content: string | object,
     options: PatchOptions,
     context: RequestContext,
   ): Promise<void> {
+    const note = await this._getVerifiedPeriodicNote(period, "write", context);
     return patchMethods.patchPeriodicNote(
       this._request.bind(this),
       period,
@@ -616,5 +587,49 @@ export class ObsidianRestApiService {
       options,
       context,
     );
+  }
+
+  // --- Private Helper Methods for Permission Checking ---
+
+  private async _getVerifiedActiveNote(
+    permission: Permission,
+    context: RequestContext,
+  ): Promise<NoteJson> {
+    const note = (await activeFileMethods.getActiveFile(
+      this._request.bind(this),
+      "json",
+      context,
+    )) as NoteJson;
+
+    if (!this.permissionsService.isAllowed(note.path, permission, context)) {
+      throw new McpError(
+        BaseErrorCode.FORBIDDEN,
+        `Access denied for active file: ${note.path}`,
+        context,
+      );
+    }
+    return note;
+  }
+
+  private async _getVerifiedPeriodicNote(
+    period: Period,
+    permission: Permission,
+    context: RequestContext,
+  ): Promise<NoteJson> {
+    const note = (await periodicNoteMethods.getPeriodicNote(
+      this._request.bind(this),
+      period,
+      "json",
+      context,
+    )) as NoteJson;
+
+    if (!this.permissionsService.isAllowed(note.path, permission, context)) {
+      throw new McpError(
+        BaseErrorCode.FORBIDDEN,
+        `Access denied for periodic note: ${note.path}`,
+        context,
+      );
+    }
+    return note;
   }
 }

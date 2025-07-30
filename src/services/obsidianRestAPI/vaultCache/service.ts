@@ -37,6 +37,8 @@ export class VaultCacheService {
   private isBuilding: boolean = false;
   private obsidianService: ObsidianRestApiService;
   private refreshIntervalId: NodeJS.Timeout | null = null;
+  // Promise-based lock to prevent race conditions
+  private buildLock: Promise<void> | null = null;
 
   constructor(obsidianService: ObsidianRestApiService) {
     this.obsidianService = obsidianService;
@@ -139,6 +141,16 @@ export class VaultCacheService {
     context: RequestContext,
   ): Promise<void> {
     const opContext = { ...context, operation: "updateCacheForFile", filePath };
+
+    // Mitigate race condition: If a full build is running, defer to it.
+    if (this.isBuilding) {
+      logger.notice(
+        `Cache build in progress. Deferring proactive update for: ${filePath}`,
+        opContext,
+      );
+      return;
+    }
+
     logger.debug(`Proactively updating cache for file: ${filePath}`, opContext);
     try {
       const noteJson = await retryWithDelay(
@@ -225,11 +237,48 @@ export class VaultCacheService {
       isInitialBuild,
     });
 
-    if (this.isBuilding) {
-      logger.warning("Cache refresh already in progress. Skipping.", context);
-      return;
+    // If a build is already locked, wait for it to complete.
+    if (this.buildLock) {
+      logger.notice(
+        "Cache build already in progress. Awaiting completion.",
+        context,
+      );
+      await this.buildLock;
+      logger.info(
+        "Previous cache build completed. Proceeding with check.",
+        context,
+      );
+      // After waiting, if the cache is now ready and this was an initial build request,
+      // we can skip, as the work is done.
+      if (isInitialBuild && this.isCacheReady) {
+        logger.info(
+          "Cache was built by another process. Skipping initial build.",
+          context,
+        );
+        return;
+      }
     }
 
+    // Create a new lock and execute the core logic.
+    this.buildLock = this._executeRefresh(isInitialBuild, context);
+    try {
+      await this.buildLock;
+    } finally {
+      // Once the operation is complete (success or failure), release the lock.
+      this.buildLock = null;
+    }
+  }
+
+  /**
+   * Core logic for refreshing the cache, wrapped by the public `refreshCache` method
+   * to handle locking and prevent race conditions.
+   * @param isInitialBuild - If true, forces a full build and sets the cache readiness flag.
+   * @param context - The request context for logging.
+   */
+  private async _executeRefresh(
+    isInitialBuild: boolean,
+    context: RequestContext,
+  ): Promise<void> {
     this.isBuilding = true;
     if (isInitialBuild) {
       this.isCacheReady = false;
@@ -239,7 +288,31 @@ export class VaultCacheService {
 
     try {
       const startTime = Date.now();
-      const remoteFiles = await this.listAllMarkdownFiles("/", context);
+
+      // Use include/exclude paths from config
+      const includePaths = config.obsidianCacheIncludePaths;
+      const excludePaths = config.obsidianCacheExcludePaths;
+
+      logger.debug(
+        `Cache refresh using include paths: [${includePaths.join(", ")}] and exclude paths: [${excludePaths.join(", ")}]`,
+        context,
+      );
+
+      let allFiles: string[] = [];
+      for (const startPath of includePaths) {
+        const filesFromPath = await this.listAllMarkdownFiles(
+          startPath,
+          context,
+        );
+        allFiles.push(...filesFromPath);
+      }
+
+      // Deduplicate and filter excluded paths
+      const uniqueFiles = [...new Set(allFiles)];
+      const remoteFiles = uniqueFiles.filter(
+        (file) => !excludePaths.some((p) => file.startsWith(p)),
+      );
+
       const remoteFileSet = new Set(remoteFiles);
       const cachedFileSet = new Set(this.vaultContentCache.keys());
 
@@ -389,19 +462,9 @@ export class VaultCacheService {
         logger.warning(`${errMsg} - Directory not found, skipping.`, opContext);
         return [];
       }
-      // Log and re-throw critical listing errors
-      if (err instanceof Error) {
-        logger.error(errMsg, err, opContext);
-      } else {
-        logger.error(errMsg, opContext);
-      }
-      const errorCode =
-        err instanceof McpError ? err.code : BaseErrorCode.INTERNAL_ERROR;
-      throw new McpError(
-        errorCode,
-        `${errMsg}: ${err instanceof Error ? err.message : String(err)}`,
-        opContext,
-      );
+      // Log and re-throw critical listing errors. Re-throwing the original error preserves the stack trace.
+      logger.error(errMsg, err, opContext);
+      throw err;
     }
   }
 }

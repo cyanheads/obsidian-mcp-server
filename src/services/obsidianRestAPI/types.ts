@@ -19,11 +19,14 @@ import { RequestContext } from "../../utils/index.js";
  * @param operationName A descriptive name for the operation being performed, used for logging.
  * @returns A promise that resolves with the data of type `T`.
  */
+import { McpError } from "../../types-global/errors.js";
+
 export type RequestFunction = <T = any>(
   config: AxiosRequestConfig,
   context: RequestContext,
   operationName: string,
-) => Promise<T>;
+  throwOnError?: boolean,
+) => Promise<T | McpError>;
 
 /**
  * Filesystem metadata for a note.
@@ -73,7 +76,8 @@ export interface SimpleSearchMatch {
  * Result item for a simple text search.
  */
 export interface SimpleSearchResult {
-  filename: string; // Path to the matching file
+  filename: string; // Original path from API
+  filePath: string; // Normalized path for internal use
   matches: SimpleSearchMatch[];
   score: number; // Relevance score
 }
@@ -82,7 +86,8 @@ export interface SimpleSearchResult {
  * Result item for a complex (Dataview/JsonLogic) search.
  */
 export interface ComplexSearchResult {
-  filename: string; // Path to the matching file
+  filename: string; // Original path from API
+  filePath: string; // Normalized path for internal use
   result: any; // The result returned by the query logic for this file
 }
 
@@ -144,3 +149,8 @@ export interface PatchOptions {
  * Type alias for periodic note periods.
  */
 export type Period = "daily" | "weekly" | "monthly" | "quarterly" | "yearly";
+
+/**
+ * Defines the set of permissions for file access.
+ */
+export type Permission = "read" | "write" | "create" | "delete";

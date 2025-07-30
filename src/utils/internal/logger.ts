@@ -66,7 +66,7 @@ const mcpToWinstonLevel: Record<
 interface ErrorWithMessageAndStack {
   message?: string;
   stack?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 /**
@@ -80,7 +80,7 @@ export interface McpLogPayload {
     message: string;
     stack?: string;
   };
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 /**
@@ -101,9 +101,8 @@ export type McpNotificationSender = (
   loggerName?: string,
 ) => void;
 
-// The logsPath from config is already resolved and validated by src/config/index.ts
-const resolvedLogsDir = config.logsPath;
-const isLogsDirSafe = !!resolvedLogsDir; // If logsPath is set, it's considered safe by config logic.
+// The logsPath from config is resolved and validated by src/config/index.ts.
+// It can be null if the directory is invalid or inaccessible, in which case file logging will be disabled.
 
 /**
  * Creates the Winston console log format.
@@ -154,6 +153,7 @@ function createWinstonConsoleFormat(): winston.Logform.Format {
 export class Logger {
   private static instance: Logger;
   private winstonLogger?: winston.Logger;
+  private interactionLogger?: winston.Logger;
   private initialized = false;
   private mcpNotificationSender?: McpNotificationSender;
   private currentMcpLevel: McpLogLevel = "info";
@@ -187,10 +187,7 @@ export class Logger {
     this.currentMcpLevel = level;
     this.currentWinstonLevel = mcpToWinstonLevel[level];
 
-    // The logs directory (config.logsPath / resolvedLogsDir) is expected to be created and validated
-    // by the configuration module (src/config/index.ts) before logger initialization.
-    // If isLogsDirSafe is true, we assume resolvedLogsDir exists and is usable.
-    // No redundant directory creation logic here.
+    const resolvedLogsDir = config.logsPath;
 
     const fileFormat = winston.format.combine(
       winston.format.timestamp(),
@@ -206,7 +203,7 @@ export class Logger {
       tailable: true,
     };
 
-    if (isLogsDirSafe) {
+    if (resolvedLogsDir) {
       transports.push(
         new winston.transports.File({
           filename: path.join(resolvedLogsDir, "error.log"),
@@ -247,6 +244,22 @@ export class Logger {
       exitOnError: false,
     });
 
+    // Initialize a separate logger for structured interactions
+    if (resolvedLogsDir) {
+      this.interactionLogger = winston.createLogger({
+        format: winston.format.combine(
+          winston.format.timestamp(),
+          winston.format.json({ space: 2 }),
+        ),
+        transports: [
+          new winston.transports.File({
+            filename: path.join(resolvedLogsDir, "interactions.log"),
+            ...fileTransportOptions,
+          }),
+        ],
+      });
+    }
+
     // Configure console transport after Winston logger is created
     const consoleStatus = this._configureConsoleTransport();
 
@@ -267,7 +280,7 @@ export class Logger {
         loggerSetup: true,
         requestId: "logger-post-init",
         timestamp: new Date().toISOString(),
-        logsPathUsed: resolvedLogsDir,
+        logsPathUsed: resolvedLogsDir ?? "none",
       },
     );
   }
@@ -387,6 +400,23 @@ export class Logger {
       Logger.instance = new Logger();
     }
     return Logger.instance;
+  }
+
+  /**
+   * Resets the singleton instance.
+   * This is intended for use in testing environments only.
+   */
+  public static resetForTesting(): void {
+    // This is a clear indication that this method is for testing purposes.
+    if (process.env.NODE_ENV !== "test") {
+      console.warn(
+        "Warning: `resetForTesting` should only be called in a test environment.",
+      );
+      return;
+    }
+    // De-reference the instance to allow garbage collection
+    // and force re-creation on next getInstance() call.
+    (Logger.instance as unknown) = undefined;
   }
 
   /**
@@ -567,6 +597,25 @@ export class Logger {
     const errorObj = err instanceof Error ? err : undefined;
     const actualContext = err instanceof Error ? context : err;
     this.log("emerg", msg, actualContext, errorObj);
+  }
+
+  /**
+   * Logs a structured interaction object to a dedicated file.
+   * @param interactionName - A name for the interaction type (e.g., 'OpenRouterIO').
+   * @param data - The structured data to log.
+   */
+  public logInteraction(
+    interactionName: string,
+    data: Record<string, unknown>,
+  ): void {
+    if (!this.interactionLogger) {
+      this.warning(
+        "Interaction logger not available. File logging may be disabled.",
+        data.context as RequestContext,
+      );
+      return;
+    }
+    this.interactionLogger.info({ interactionName, ...data });
   }
 }
 

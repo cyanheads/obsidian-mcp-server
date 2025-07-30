@@ -6,6 +6,7 @@
 
 import { RequestContext } from "../../../utils/index.js";
 import { NoteJson, RequestFunction } from "../types.js";
+import { handleRequest } from "../utils/requestHandler.js";
 
 /**
  * Gets the content of the currently active file in Obsidian.
@@ -21,14 +22,16 @@ export async function getActiveFile(
 ): Promise<string | NoteJson> {
   const acceptHeader =
     format === "json" ? "application/vnd.olrapi.note+json" : "text/markdown";
-  return _request<string | NoteJson>(
-    {
-      method: "GET",
-      url: `/active/`,
-      headers: { Accept: acceptHeader },
-    },
-    context,
-    "getActiveFile",
+  return handleRequest(
+    _request<string | NoteJson>(
+      {
+        method: "GET",
+        url: `/active/`,
+        headers: { Accept: acceptHeader },
+      },
+      context,
+      "getActiveFile",
+    ),
   );
 }
 
@@ -44,15 +47,17 @@ export async function updateActiveFile(
   content: string,
   context: RequestContext,
 ): Promise<void> {
-  await _request<void>(
-    {
-      method: "PUT",
-      url: `/active/`,
-      headers: { "Content-Type": "text/markdown" },
-      data: content,
-    },
-    context,
-    "updateActiveFile",
+  await handleRequest(
+    _request<void>(
+      {
+        method: "PUT",
+        url: `/active/`,
+        headers: { "Content-Type": "text/markdown" },
+        data: content,
+      },
+      context,
+      "updateActiveFile",
+    ),
   );
 }
 
@@ -68,15 +73,17 @@ export async function appendActiveFile(
   content: string,
   context: RequestContext,
 ): Promise<void> {
-  await _request<void>(
-    {
-      method: "POST",
-      url: `/active/`,
-      headers: { "Content-Type": "text/markdown" },
-      data: content,
-    },
-    context,
-    "appendActiveFile",
+  await handleRequest(
+    _request<void>(
+      {
+        method: "POST",
+        url: `/active/`,
+        headers: { "Content-Type": "text/markdown" },
+        data: content,
+      },
+      context,
+      "appendActiveFile",
+    ),
   );
 }
 
@@ -90,12 +97,14 @@ export async function deleteActiveFile(
   _request: RequestFunction,
   context: RequestContext,
 ): Promise<void> {
-  await _request<void>(
-    {
-      method: "DELETE",
-      url: `/active/`,
-    },
-    context,
-    "deleteActiveFile",
+  await handleRequest(
+    _request<void>(
+      {
+        method: "DELETE",
+        url: `/active/`,
+      },
+      context,
+      "deleteActiveFile",
+    ),
   );
 }

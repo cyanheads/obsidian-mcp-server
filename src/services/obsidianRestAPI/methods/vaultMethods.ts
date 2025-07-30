@@ -4,14 +4,16 @@
  * Methods for interacting with vault files and directories via the Obsidian REST API.
  */
 
+import { McpError } from "../../../types-global/errors.js";
 import { RequestContext } from "../../../utils/index.js";
 import {
-  NoteJson,
   FileListResponse,
+  NoteJson,
   NoteStat,
   RequestFunction,
 } from "../types.js";
-import { encodeVaultPath } from "../../../utils/obsidian/obsidianApiUtils.js";
+import { encodeVaultPath } from "../utils/obsidianApiUtils.js";
+import { handleRequest } from "../utils/requestHandler.js";
 
 /**
  * Gets the content of a specific file in the vault.
@@ -29,15 +31,17 @@ export async function getFileContent(
 ): Promise<string | NoteJson> {
   const acceptHeader =
     format === "json" ? "application/vnd.olrapi.note+json" : "text/markdown";
-  const encodedPath = encodeVaultPath(filePath); // Use the new encoding function
-  return _request<string | NoteJson>(
-    {
-      method: "GET",
-      url: `/vault${encodedPath}`,
-      headers: { Accept: acceptHeader },
-    },
-    context,
-    "getFileContent",
+  const encodedPath = encodeVaultPath(filePath);
+  return handleRequest(
+    _request<string | NoteJson>(
+      {
+        method: "GET",
+        url: `/vault${encodedPath}`,
+        headers: { Accept: acceptHeader },
+      },
+      context,
+      "getFileContent",
+    ),
   );
 }
 
@@ -55,17 +59,18 @@ export async function updateFileContent(
   content: string,
   context: RequestContext,
 ): Promise<void> {
-  const encodedPath = encodeVaultPath(filePath); // Use the new encoding function
-  // PUT returns 204 No Content, so the expected type is void
-  await _request<void>(
-    {
-      method: "PUT",
-      url: `/vault${encodedPath}`, // Construct URL correctly
-      headers: { "Content-Type": "text/markdown" },
-      data: content,
-    },
-    context,
-    "updateFileContent",
+  const encodedPath = encodeVaultPath(filePath);
+  await handleRequest(
+    _request<void>(
+      {
+        method: "PUT",
+        url: `/vault${encodedPath}`,
+        headers: { "Content-Type": "text/markdown" },
+        data: content,
+      },
+      context,
+      "updateFileContent",
+    ),
   );
 }
 
@@ -83,16 +88,18 @@ export async function appendFileContent(
   content: string,
   context: RequestContext,
 ): Promise<void> {
-  const encodedPath = encodeVaultPath(filePath); // Use the new encoding function
-  await _request<void>(
-    {
-      method: "POST",
-      url: `/vault${encodedPath}`, // Construct URL correctly
-      headers: { "Content-Type": "text/markdown" },
-      data: content,
-    },
-    context,
-    "appendFileContent",
+  const encodedPath = encodeVaultPath(filePath);
+  await handleRequest(
+    _request<void>(
+      {
+        method: "POST",
+        url: `/vault${encodedPath}`,
+        headers: { "Content-Type": "text/markdown" },
+        data: content,
+      },
+      context,
+      "appendFileContent",
+    ),
   );
 }
 
@@ -108,14 +115,16 @@ export async function deleteFile(
   filePath: string,
   context: RequestContext,
 ): Promise<void> {
-  const encodedPath = encodeVaultPath(filePath); // Use the new encoding function
-  await _request<void>(
-    {
-      method: "DELETE",
-      url: `/vault${encodedPath}`, // Construct URL correctly
-    },
-    context,
-    "deleteFile",
+  const encodedPath = encodeVaultPath(filePath);
+  await handleRequest(
+    _request<void>(
+      {
+        method: "DELETE",
+        url: `/vault${encodedPath}`,
+      },
+      context,
+      "deleteFile",
+    ),
   );
 }
 
@@ -156,13 +165,15 @@ export async function listFiles(
   // The trailing slash is important for directory listing endpoints in this API.
   const url = pathSegment ? `/vault/${pathSegment}/` : "/vault/";
 
-  const response = await _request<FileListResponse>(
-    {
-      method: "GET",
-      url: url, // Use the correctly constructed URL
-    },
-    context,
-    "listFiles",
+  const response = await handleRequest(
+    _request<FileListResponse>(
+      {
+        method: "GET",
+        url: url,
+      },
+      context,
+      "listFiles",
+    ),
   );
   return response.files;
 }
@@ -174,39 +185,40 @@ export async function listFiles(
  * @param context - Request context.
  * @returns The file's metadata.
  */
+
 export async function getFileMetadata(
   _request: RequestFunction,
   filePath: string,
   context: RequestContext,
-): Promise<NoteStat | null> {
+): Promise<NoteStat | null | McpError> {
   const encodedPath = encodeVaultPath(filePath);
-  try {
-    const response = await _request<any>(
-      {
-        method: "HEAD",
-        url: `/vault${encodedPath}`,
-      },
-      context,
-      "getFileMetadata",
-    );
+  const response = await _request<any>(
+    {
+      method: "HEAD",
+      url: `/vault${encodedPath}`,
+    },
+    context,
+    "getFileMetadata",
+    false, // Do not throw on error
+  );
 
-    if (response && response.headers) {
-      const headers = response.headers;
-      return {
-        mtime: headers["x-obsidian-mtime"]
-          ? parseFloat(headers["x-obsidian-mtime"]) * 1000
-          : 0,
-        ctime: headers["x-obsidian-ctime"]
-          ? parseFloat(headers["x-obsidian-ctime"]) * 1000
-          : 0,
-        size: headers["content-length"]
-          ? parseInt(headers["content-length"], 10)
-          : 0,
-      };
-    }
-    return null;
-  } catch (error) {
-    // Errors are already logged by the _request function, so we can just return null
-    return null;
+  if (response instanceof McpError) {
+    return response; // Propagate the error object up to the service layer
   }
+
+  if (response && response.headers) {
+    const headers = response.headers;
+    return {
+      mtime: headers["x-obsidian-mtime"]
+        ? parseFloat(headers["x-obsidian-mtime"]) * 1000
+        : 0,
+      ctime: headers["x-obsidian-ctime"]
+        ? parseFloat(headers["x-obsidian-ctime"]) * 1000
+        : 0,
+      size: headers["content-length"]
+        ? parseInt(headers["content-length"], 10)
+        : 0,
+    };
+  }
+  return null;
 }

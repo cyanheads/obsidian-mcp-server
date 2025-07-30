@@ -6,10 +6,11 @@
 
 import { RequestContext } from "../../../utils/index.js";
 import {
-  SimpleSearchResult,
   ComplexSearchResult,
   RequestFunction,
+  SimpleSearchResult,
 } from "../types.js";
+import { handleRequest } from "../utils/requestHandler.js";
 
 /**
  * Performs a simple text search across the vault.
@@ -25,15 +26,23 @@ export async function searchSimple(
   contextLength: number = 100,
   context: RequestContext,
 ): Promise<SimpleSearchResult[]> {
-  return _request<SimpleSearchResult[]>(
-    {
-      method: "POST",
-      url: "/search/simple/",
-      params: { query, contextLength }, // Send as query parameters
-    },
-    context,
-    "searchSimple",
+  const results = await handleRequest(
+    _request<
+      (Omit<SimpleSearchResult, "filePath" | "filename"> & { filename: string })[]
+    >(
+      {
+        method: "POST",
+        url: "/search/simple/",
+        params: { query, contextLength },
+      },
+      context,
+      "searchSimple",
+    ),
   );
+  return results.map((result) => ({
+    ...result,
+    filePath: result.filename,
+  }));
 }
 
 /**
@@ -52,14 +61,24 @@ export async function searchComplex(
     | "application/vnd.olrapi.jsonlogic+json",
   context: RequestContext,
 ): Promise<ComplexSearchResult[]> {
-  return _request<ComplexSearchResult[]>(
-    {
-      method: "POST",
-      url: "/search/",
-      headers: { "Content-Type": contentType },
-      data: query,
-    },
-    context,
-    "searchComplex",
+  const results = await handleRequest(
+    _request<
+      (Omit<ComplexSearchResult, "filePath" | "filename"> & {
+        filename: string;
+      })[]
+    >(
+      {
+        method: "POST",
+        url: "/search/",
+        headers: { "Content-Type": contentType },
+        data: query,
+      },
+      context,
+      "searchComplex",
+    ),
   );
+  return results.map((result) => ({
+    ...result,
+    filePath: result.filename,
+  }));
 }

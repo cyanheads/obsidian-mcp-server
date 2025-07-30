@@ -5,7 +5,7 @@
  */
 import { McpError, BaseErrorCode } from "../../types-global/errors.js";
 import { logger } from "./logger.js";
-import { RequestContext } from "./requestContext.js";
+import { RequestContext } from "../index.js";
 
 /**
  * Configuration for the {@link retryWithDelay} function, defining how retries are handled.
@@ -111,15 +111,13 @@ export async function retryWithDelay<T>(
         );
 
         if (error instanceof McpError) {
-          // If the last error was already an McpError, re-throw it but ensure its details are preserved/updated.
-          error.details = {
-            ...(typeof error.details === "object" && error.details !== null
-              ? error.details
-              : {}),
-            ...retryAttemptContext, // Add retry context to existing details
+          // If the last error was already an McpError, create a new one with updated details to respect immutability.
+          const newDetails = {
+            ...(error.details ?? {}),
+            ...retryAttemptContext,
             finalAttempt: true,
           };
-          throw error;
+          throw new McpError(error.code, error.message, newDetails);
         }
         // For other errors, wrap in a new McpError
         throw new McpError(

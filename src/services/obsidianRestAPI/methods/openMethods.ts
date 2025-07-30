@@ -6,6 +6,7 @@
 
 import { RequestContext } from "../../../utils/index.js";
 import { RequestFunction } from "../types.js";
+import { handleRequest } from "../utils/requestHandler.js";
 
 /**
  * Opens a specific file in Obsidian. Creates the file if it doesn't exist.
@@ -22,13 +23,15 @@ export async function openFile(
   context: RequestContext,
 ): Promise<void> {
   // This endpoint returns 200 OK, not 204
-  await _request<void>(
-    {
-      method: "POST",
-      url: `/open/${encodeURIComponent(filePath)}`,
-      params: { newLeaf },
-    },
-    context,
-    "openFile",
+  await handleRequest(
+    _request<void>(
+      {
+        method: "POST",
+        url: `/open/${encodeURIComponent(filePath)}`,
+        params: { newLeaf },
+      },
+      context,
+      "openFile",
+    ),
   );
 }

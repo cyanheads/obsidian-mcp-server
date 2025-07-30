@@ -1,156 +1,152 @@
 /**
- * @fileoverview Provides a utility class for parsing potentially partial JSON strings,
- * with support for handling and logging optional LLM <think> blocks.
- * It wraps the 'partial-json' library.
+ * @fileoverview Provides a utility class for parsing potentially partial JSON strings.
+ * It wraps the 'partial-json' npm library and includes functionality to handle
+ * optional <think>...</think> blocks often found at the beginning of LLM outputs.
  * @module src/utils/parsing/jsonParser
  */
-
 import {
   parse as parsePartialJson,
   Allow as PartialJsonAllow,
 } from "partial-json";
 import { BaseErrorCode, McpError } from "../../types-global/errors.js";
-import {
-  logger,
-  RequestContext,
-  requestContextService,
-} from "../internal/index.js"; // Corrected import path for internal utils
+import { logger, RequestContext, requestContextService } from "../index.js";
 
 /**
- * Enum mirroring `partial-json`'s `Allow` constants. These constants specify
+ * Enum mirroring `partial-json`'s `Allow` constants. These specify
  * what types of partial JSON structures are permissible during parsing.
  * They can be combined using bitwise OR (e.g., `Allow.STR | Allow.OBJ`).
  *
- * - `Allow.OBJ`: Allows partial objects (e.g., `{"key": "value",`)
- * - `Allow.ARR`: Allows partial arrays (e.g., `[1, 2,`)
- * - `Allow.STR`: Allows partial strings (e.g., `"abc`)
- * - `Allow.NUM`: Allows partial numbers (e.g., `1.2e+`)
- * - `Allow.BOOL`: Allows partial booleans (e.g., `tru`)
- * - `Allow.NULL`: Allows partial nulls (e.g., `nul`)
- * - `Allow.ALL`: Allows all types of partial JSON structures (default).
+ * The available properties are:
+ * - `STR`: Allow partial string.
+ * - `NUM`: Allow partial number.
+ * - `ARR`: Allow partial array.
+ * - `OBJ`: Allow partial object.
+ * - `NULL`: Allow partial null.
+ * - `BOOL`: Allow partial boolean.
+ * - `NAN`: Allow partial NaN. (Note: Standard JSON does not support NaN)
+ * - `INFINITY`: Allow partial Infinity. (Note: Standard JSON does not support Infinity)
+ * - `_INFINITY`: Allow partial -Infinity. (Note: Standard JSON does not support -Infinity)
+ * - `INF`: Allow both partial Infinity and -Infinity.
+ * - `SPECIAL`: Allow all special values (NaN, Infinity, -Infinity).
+ * - `ATOM`: Allow all atomic values (strings, numbers, booleans, null, special values).
+ * - `COLLECTION`: Allow all collection values (objects, arrays).
+ * - `ALL`: Allow all value types to be partial (default for `partial-json`'s parse).
+ * @see {@link https://github.com/promplate/partial-json-parser-js} for more details.
  */
 export const Allow = PartialJsonAllow;
 
-// Regex to find a <think> block at the start of a string,
-// capturing its content and the rest of the string.
+/**
+ * Regular expression to find a <think> block at the start of a string.
+ * Captures content within <think>...</think> (Group 1) and the rest of the string (Group 2).
+ * @private
+ */
 const thinkBlockRegex = /^<think>([\s\S]*?)<\/think>\s*([\s\S]*)$/;
 
 /**
- * Utility class for parsing JSON strings that may be partial or incomplete.
- * It wraps the 'partial-json' library to provide a consistent parsing interface
- * and includes logic to handle and log optional `<think>...</think>` blocks
- * that might precede the JSON content (often found in LLM outputs).
+ * Utility class for parsing potentially partial JSON strings.
+ * Wraps the 'partial-json' library for robust JSON parsing, handling
+ * incomplete structures and optional <think> blocks from LLMs.
  */
-class JsonParser {
+export class JsonParser {
   /**
-   * Parses a JSON string, which may be partial or prefixed with an LLM `<think>` block.
+   * Parses a JSON string, which may be partial or prefixed with a <think> block.
+   * If a <think> block is present, its content is logged, and parsing proceeds on the
+   * remainder. Uses 'partial-json' to handle incomplete JSON.
    *
-   * @template T The expected type of the parsed JavaScript value. Defaults to `any`.
-   * @param {string} jsonString - The JSON string to parse.
-   * @param {number} [allowPartial=Allow.ALL] - A bitwise OR combination of `Allow` constants
-   *   specifying which types of partial JSON structures are permissible (e.g., `Allow.OBJ | Allow.ARR`).
-   *   Defaults to `Allow.ALL`, permitting any form of partial JSON.
-   * @param {RequestContext} [providedContext] - Optional `RequestContext` for logging,
-   *   especially for capturing `<think>` block content or parsing errors.
-   * @returns {T} The parsed JavaScript value.
-   * @throws {McpError} Throws an `McpError` with `BaseErrorCode.VALIDATION_ERROR` if:
-   *   - The string is empty after removing a `<think>` block.
-   *   - The remaining content does not appear to be a valid JSON structure (object, array, or permitted primitive).
-   *   - The `partial-json` library encounters a parsing error.
+   * @template T The expected type of the parsed JSON object. Defaults to `any`.
+   * @param jsonString - The JSON string to parse.
+   * @param allowPartial - Bitwise OR combination of `Allow` constants specifying permissible
+   *   partial JSON types. Defaults to `Allow.ALL`.
+   * @param context - Optional `RequestContext` for logging and error correlation.
+   * @returns The parsed JavaScript value.
+   * @throws {McpError} If the string is empty after processing or if `partial-json` fails.
    */
-  parse<T = any>(
+  parse<T = unknown>(
     jsonString: string,
     allowPartial: number = Allow.ALL,
-    providedContext?: RequestContext,
+    context?: RequestContext,
   ): T {
-    const operation = "JsonParser.parse";
-    // Ensure opContext is always a valid RequestContext for internal logging
-    const opContext =
-      providedContext ||
-      requestContextService.createRequestContext({ operation });
-
     let stringToParse = jsonString;
-    let thinkContentExtracted: string | undefined;
-
     const match = jsonString.match(thinkBlockRegex);
 
     if (match) {
-      thinkContentExtracted = match[1].trim();
+      const thinkContent = match[1].trim();
       const restOfString = match[2];
 
-      if (thinkContentExtracted) {
-        logger.debug("LLM <think> block content extracted.", {
-          ...opContext,
-          operation,
-          thinkContent: thinkContentExtracted,
+      const logContext =
+        context ||
+        requestContextService.createRequestContext({
+          operation: "JsonParser.thinkBlock",
+        });
+      if (thinkContent) {
+        logger.debug("LLM <think> block detected and logged.", {
+          ...logContext,
+          thinkContent,
         });
       } else {
-        logger.debug("Empty LLM <think> block detected and removed.", {
-          ...opContext,
-          operation,
-        });
+        logger.debug("Empty LLM <think> block detected.", logContext);
       }
-      stringToParse = restOfString; // Continue parsing with the remainder of the string
+      stringToParse = restOfString;
     }
 
-    stringToParse = stringToParse.trim(); // Trim whitespace from the string that will be parsed
+    stringToParse = stringToParse.trim();
 
     if (!stringToParse) {
-      const errorMsg =
-        "JSON string is empty after potential <think> block removal and trimming.";
-      logger.warning(errorMsg, {
-        ...opContext,
-        operation,
-        originalInput: jsonString,
-      });
-      throw new McpError(BaseErrorCode.VALIDATION_ERROR, errorMsg, {
-        ...opContext,
-        operation,
-      });
+      throw new McpError(
+        BaseErrorCode.VALIDATION_ERROR,
+        "JSON string is empty after removing <think> block and trimming.",
+        context,
+      );
     }
 
     try {
-      // The pre-check for firstChar and specific primitive types has been removed.
-      // We now directly rely on parsePartialJson to validate the structure according
-      // to the 'allowPartial' flags. If parsePartialJson fails, it will throw an
-      // error which is caught below and wrapped in an McpError.
       return parsePartialJson(stringToParse, allowPartial) as T;
-    } catch (error: any) {
-      const errorMessage = `Failed to parse JSON content: ${error.message}`;
-      logger.error(errorMessage, error, {
-        ...opContext, // Use the guaranteed valid opContext
-        operation,
-        contentAttempted: stringToParse,
-        thinkContentFound: thinkContentExtracted,
+    } catch (e: unknown) {
+      const error = e as Error;
+      const errorLogContext =
+        context ||
+        requestContextService.createRequestContext({
+          operation: "JsonParser.parseError",
+        });
+      logger.error("Failed to parse JSON content.", {
+        ...errorLogContext,
+        errorDetails: error.message,
+        contentAttempted: stringToParse.substring(0, 200),
       });
-      throw new McpError(BaseErrorCode.VALIDATION_ERROR, errorMessage, {
-        ...opContext, // Use the guaranteed valid opContext
-        operation,
-        originalContent: stringToParse,
-        thinkContentProcessed: !!thinkContentExtracted,
-        rawError:
-          error instanceof Error
-            ? { message: error.message, stack: error.stack }
-            : String(error),
-      });
+
+      throw new McpError(
+        BaseErrorCode.VALIDATION_ERROR,
+        `Failed to parse JSON: ${error.message}`,
+        {
+          ...context,
+          originalContentSample:
+            stringToParse.substring(0, 200) +
+            (stringToParse.length > 200 ? "..." : ""),
+          rawError: error instanceof Error ? error.stack : String(error),
+        },
+      );
     }
   }
 }
 
 /**
  * Singleton instance of the `JsonParser`.
- * Use this instance for all partial JSON parsing needs.
- *
- * Example:
+ * Use this instance to parse JSON strings, with support for partial JSON and <think> blocks.
+ * @example
  * ```typescript
- * import { jsonParser, Allow, RequestContext } from './jsonParser';
- * import { requestContextService } from '../internal'; // Assuming requestContextService is exported from internal utils
- * const context: RequestContext = requestContextService.createRequestContext({ operation: 'MyOperation' });
+ * import { jsonParser, Allow, requestContextService } from './utils';
+ * const context = requestContextService.createRequestContext({ operation: 'TestJsonParsing' });
+ *
+ * const fullJson = '{"key": "value"}';
+ * const parsedFull = jsonParser.parse(fullJson, Allow.ALL, context);
+ * console.log(parsedFull); // Output: { key: 'value' }
+ *
+ * const partialObject = '<think>This is a thought.</think>{"key": "value", "arr": [1,';
  * try {
- *   const data = jsonParser.parse('<think>Thinking...</think>{"key": "value", "arr": [1,', Allow.ALL, context);
- *   console.log(data); // Output: { key: "value", arr: [ 1 ] }
+ *   const parsedPartial = jsonParser.parse(partialObject, undefined, context);
+ *   console.log(parsedPartial);
  * } catch (e) {
- *   console.error("Parsing failed:", e);
+ *   console.error("Parsing partial object failed:", e);
  * }
  * ```
  */

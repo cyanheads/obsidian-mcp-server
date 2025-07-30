@@ -1,7 +1,6 @@
 /**
- * @module ObsidianApiUtils
- * @description
- * Internal utilities for the Obsidian REST API service.
+ * @fileoverview Utilities for encoding vault-relative file paths for Obsidian REST API requests.
+ * @module src/services/obsidianRestAPI/utils/obsidianApiUtils
  */
 
 /**

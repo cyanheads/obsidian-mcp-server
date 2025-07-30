@@ -1,13 +1,13 @@
 /**
  * @fileoverview Utilities for formatting Obsidian stat objects,
  * including timestamps and calculating estimated token counts.
- * @module src/utils/obsidian/obsidianStatUtils
+ * @module src/services/obsidianRestAPI/utils/obsidianStatUtils
  */
 
 import { format } from "date-fns";
-import { BaseErrorCode, McpError } from "../../types-global/errors.js";
-import { logger, RequestContext } from "../internal/index.js";
-import { countTokens } from "../metrics/index.js";
+import { BaseErrorCode, McpError } from "../../../types-global/errors.js";
+import { logger, RequestContext } from "../../../utils/internal/index.js";
+import { countTokens } from "../../../utils/metrics/index.js";
 
 /**
  * Default format string for timestamps, providing a human-readable date and time.

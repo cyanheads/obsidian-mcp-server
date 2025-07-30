@@ -6,9 +6,9 @@
  * @module src/utils/internal/errorHandler
  */
 import { BaseErrorCode, McpError } from "../../types-global/errors.js";
-import { generateUUID, sanitizeInputForLogging } from "../index.js"; // Import from main barrel file
+import { generateUUID, sanitizeInputForLogging } from "../index.js";
 import { logger } from "./logger.js";
-import { RequestContext } from "./requestContext.js"; // Import RequestContext
+import { RequestContext } from "./requestContext.js";
 
 /**
  * Defines a generic structure for providing context with errors.
@@ -259,7 +259,7 @@ function getErrorMessage(error: unknown): string {
     if (str === "[object Object]" && error !== null) {
       try {
         return `Non-Error object encountered: ${JSON.stringify(error)}`;
-      } catch (stringifyError) {
+      } catch {
         return `Unstringifyable non-Error object encountered (constructor: ${error.constructor?.name || "Unknown"})`;
       }
     }
@@ -341,20 +341,19 @@ export class ErrorHandler {
 
     const consolidatedDetails: Record<string, unknown> = {
       ...errorDetailsSeed,
-      ...context, // Spread context here to allow its properties to be overridden by more specific error details if needed
+      ...context,
       originalErrorName,
       originalMessage: originalErrorMessage,
     };
     if (
       originalStack &&
-      !(error instanceof McpError && error.details?.originalStack) // Avoid duplicating if already in McpError details
+      !(error instanceof McpError && error.details?.originalStack)
     ) {
       consolidatedDetails.originalStack = originalStack;
     }
 
     if (error instanceof McpError) {
       loggedErrorCode = error.code;
-      // If an errorMapper is provided, use it. Otherwise, reconstruct McpError with consolidated details.
       finalError = errorMapper
         ? errorMapper(error)
         : new McpError(error.code, error.message, consolidatedDetails);
@@ -367,13 +366,12 @@ export class ErrorHandler {
         : new McpError(loggedErrorCode, message, consolidatedDetails);
     }
 
-    // Preserve stack trace if the error was transformed but the new error doesn't have one
     if (
-      finalError !== error && // if error was transformed
-      error instanceof Error && // original was an Error
-      finalError instanceof Error && // final is an Error
-      !finalError.stack && // final has no stack
-      error.stack // original had a stack
+      finalError !== error &&
+      error instanceof Error &&
+      finalError instanceof Error &&
+      !finalError.stack &&
+      error.stack
     ) {
       finalError.stack = error.stack;
     }
@@ -381,14 +379,13 @@ export class ErrorHandler {
     const logRequestId =
       typeof context.requestId === "string" && context.requestId
         ? context.requestId
-        : generateUUID(); // Generate if not provided in context
+        : generateUUID();
 
     const logTimestamp =
       typeof context.timestamp === "string" && context.timestamp
         ? context.timestamp
-        : new Date().toISOString(); // Generate if not provided
+        : new Date().toISOString();
 
-    // Prepare log payload, ensuring RequestContext properties are at the top level for logger
     const logPayload: Record<string, unknown> = {
       requestId: logRequestId,
       timestamp: logTimestamp,
@@ -396,9 +393,8 @@ export class ErrorHandler {
       input: sanitizedInput,
       critical,
       errorCode: loggedErrorCode,
-      originalErrorType: originalErrorName, // Renamed from originalErrorName for clarity in logs
+      originalErrorType: originalErrorName,
       finalErrorType: getErrorName(finalError),
-      // Spread remaining context properties, excluding what's already explicitly set
       ...Object.fromEntries(
         Object.entries(context).filter(
           ([key]) => key !== "requestId" && key !== "timestamp",
@@ -406,11 +402,9 @@ export class ErrorHandler {
       ),
     };
 
-    // Add detailed error information
     if (finalError instanceof McpError && finalError.details) {
-      logPayload.errorDetails = finalError.details; // Already consolidated
+      logPayload.errorDetails = finalError.details;
     } else {
-      // For non-McpErrors or McpErrors without details, use consolidatedDetails
       logPayload.errorDetails = consolidatedDetails;
     }
 
@@ -422,12 +416,9 @@ export class ErrorHandler {
       }
     }
 
-    // Log using the logger, casting logPayload to RequestContext for compatibility
-    // The logger's `error` method expects a RequestContext as its second or third argument.
     logger.error(
       `Error in ${operation}: ${finalError.message || originalErrorMessage}`,
-      finalError, // Pass the actual error object
-      logPayload as RequestContext, // Pass the structured log data as context
+      logPayload as unknown as RequestContext, // Cast to RequestContext for logger compatibility
     );
 
     if (rethrow) {
@@ -463,7 +454,6 @@ export class ErrorHandler {
     if (defaultFactory) {
       return defaultFactory(error);
     }
-    // Ensure a proper Error object is returned
     return error instanceof Error ? error : new Error(String(error));
   }
 
@@ -479,8 +469,8 @@ export class ErrorHandler {
         message: error.message,
         details:
           typeof error.details === "object" && error.details !== null
-            ? error.details // Use existing details if they are an object
-            : {}, // Default to empty object if details are not suitable
+            ? error.details
+            : {},
       };
     }
 
@@ -488,24 +478,23 @@ export class ErrorHandler {
       return {
         code: ErrorHandler.determineErrorCode(error),
         message: error.message,
-        details: { errorType: error.name || "Error" }, // Ensure errorType is always present
+        details: { errorType: error.name || "Error" },
       };
     }
 
-    // Handle non-Error types
     return {
       code: BaseErrorCode.UNKNOWN_ERROR,
-      message: getErrorMessage(error), // Use helper to get a string message
-      details: { errorType: getErrorName(error) }, // Use helper to get a type name
+      message: getErrorMessage(error),
+      details: { errorType: getErrorName(error) },
     };
   }
 
   /**
    * Safely executes a function (sync or async) and handles errors using `ErrorHandler.handleError`.
-   * The error is always rethrown by default by `handleError` when `rethrow` is true.
+   * The error is always rethrown.
    * @template T The expected return type of the function `fn`.
    * @param fn - The function to execute.
-   * @param options - Error handling options (excluding `rethrow`, as it's forced to true).
+   * @param options - Error handling options (excluding `rethrow`).
    * @returns A promise resolving with the result of `fn` if successful.
    * @throws {McpError | Error} The error processed by `ErrorHandler.handleError`.
    * @example
@@ -517,22 +506,19 @@ export class ErrorHandler {
    *       if (!response.ok) throw new Error(`Failed to fetch user: ${response.status}`);
    *       return response.json();
    *     },
-   *     { operation: 'fetchUserData', context, input: { userId } } // rethrow is implicitly true
+   *     { operation: 'fetchUserData', context, input: { userId } }
    *   );
    * }
    * ```
    */
   public static async tryCatch<T>(
     fn: () => Promise<T> | T,
-    options: Omit<ErrorHandlerOptions, "rethrow">, // Omit rethrow from options type
+    options: Omit<ErrorHandlerOptions, "rethrow">,
   ): Promise<T> {
     try {
-      // Await the promise if fn returns one, otherwise resolve directly.
-      const result = fn();
-      return await Promise.resolve(result);
+      return await Promise.resolve(fn());
     } catch (error) {
       // ErrorHandler.handleError will return the error to be thrown.
-      // rethrow is true by default when calling handleError this way.
       throw ErrorHandler.handleError(error, { ...options, rethrow: true });
     }
   }
