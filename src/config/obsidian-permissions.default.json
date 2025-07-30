@@ -1,0 +1,9 @@
+{
+  "rules": [
+    {
+      "path": "/",
+      "permissions": ["read", "write", "create", "delete"]
+    }
+  ],
+  "defaultPermissions": []
+}

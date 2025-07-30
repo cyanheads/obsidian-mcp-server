@@ -1,0 +1,21 @@
+{
+  "rules": [
+    {
+      "path": "Daily Notes/",
+      "permissions": ["read", "write", "create", "delete"]
+    },
+    {
+      "path": "Templates/",
+      "permissions": ["read"]
+    },
+    {
+      "path": "Attachments/Images/",
+      "permissions": ["read", "create", "delete"]
+    },
+    {
+      "path": "Secrets/",
+      "permissions": []
+    }
+  ],
+  "defaultPermissions": ["read"]
+}
