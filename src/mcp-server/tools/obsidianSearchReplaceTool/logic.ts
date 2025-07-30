@@ -26,15 +26,53 @@ const ReplacementBlockSchema = z.object({
 });
 
 const BaseObsidianSearchReplaceInputSchema = z.object({
-  targetType: z.enum(["filePath", "activeFile", "periodicNote"]),
-  targetIdentifier: z.string().optional(),
-  replacements: z.array(ReplacementBlockSchema).min(1),
-  useRegex: z.boolean().default(false),
-  replaceAll: z.boolean().default(true),
-  caseSensitive: z.boolean().default(true),
-  flexibleWhitespace: z.boolean().default(false),
-  wholeWord: z.boolean().default(false),
-  returnContent: z.boolean().default(false),
+  targetType: z
+    .enum(["filePath", "activeFile", "periodicNote"])
+    .describe(
+      "The type of target to modify: a specific file path, the currently active file, or a periodic note.",
+    ),
+  targetIdentifier: z
+    .string()
+    .optional()
+    .describe(
+      "Identifier for the target, required for 'filePath' and 'periodicNote'.",
+    ),
+  replacements: z
+    .array(ReplacementBlockSchema)
+    .min(1)
+    .describe(
+      "An array of one or more search/replace objects, applied sequentially.",
+    ),
+  useRegex: z
+    .boolean()
+    .default(false)
+    .describe("If true, the 'search' string is treated as a regex pattern."),
+  replaceAll: z
+    .boolean()
+    .default(true)
+    .describe(
+      "If true, all occurrences of the search pattern are replaced; otherwise, only the first.",
+    ),
+  caseSensitive: z
+    .boolean()
+    .default(true)
+    .describe("If true, the search is case-sensitive."),
+  flexibleWhitespace: z
+    .boolean()
+    .default(false)
+    .describe(
+      "If true (and not using regex), matches patterns with any amount of whitespace between words.",
+    ),
+  wholeWord: z
+    .boolean()
+    .default(false)
+    .describe(
+      "If true (and not using regex), matches only whole words.",
+    ),
+  returnContent: z
+    .boolean()
+    .default(false)
+    .describe("If true, the final content of the note is returned."),
 });
 
 export const ObsidianSearchReplaceInputSchema =

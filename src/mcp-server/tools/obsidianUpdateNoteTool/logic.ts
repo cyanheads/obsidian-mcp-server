@@ -21,14 +21,44 @@ import {
 // ====================================================================================
 
 const BaseObsidianUpdateNoteInputSchema = z.object({
-  targetType: z.enum(["filePath", "activeFile", "periodicNote"]),
-  content: z.string(),
-  targetIdentifier: z.string().optional(),
-  modificationType: z.literal("wholeFile"),
-  wholeFileMode: z.enum(["append", "prepend", "overwrite"]),
-  createIfNeeded: z.boolean().default(true),
-  overwriteIfExists: z.boolean().default(false),
-  returnContent: z.boolean().default(false),
+  targetType: z
+    .enum(["filePath", "activeFile", "periodicNote"])
+    .describe(
+      "The type of target to modify: a specific file path, the currently active file, or a periodic note (e.g., daily).",
+    ),
+  content: z.string().describe("The content to add or use for overwriting."),
+  targetIdentifier: z
+    .string()
+    .optional()
+    .describe(
+      "Identifier for the target. Required for 'filePath' (e.g., 'Notes/My Note.md') and 'periodicNote' (e.g., 'daily', 'weekly').",
+    ),
+  modificationType: z
+    .literal("wholeFile")
+    .describe("The type of modification, fixed to 'wholeFile' for this tool."),
+  wholeFileMode: z
+    .enum(["append", "prepend", "overwrite"])
+    .describe(
+      "The mode of operation: 'append' to add to the end, 'prepend' to add to the beginning, or 'overwrite' to replace the entire content.",
+    ),
+  createIfNeeded: z
+    .boolean()
+    .default(true)
+    .describe(
+      "If true, a new file will be created if the target does not exist. Defaults to true.",
+    ),
+  overwriteIfExists: z
+    .boolean()
+    .default(false)
+    .describe(
+      "If true, allows 'overwrite' mode to proceed even if the file already exists. A safeguard to prevent accidental data loss. Defaults to false.",
+    ),
+  returnContent: z
+    .boolean()
+    .default(false)
+    .describe(
+      "If true, the final content of the note will be returned in the response. Defaults to false.",
+    ),
 });
 
 export const ObsidianUpdateNoteInputSchema =
