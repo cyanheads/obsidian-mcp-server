@@ -2,7 +2,7 @@
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-^5.8.3-blue.svg)](https://www.typescriptlang.org/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP%20SDK-^1.13.0-green.svg)](https://modelcontextprotocol.io/)
-[![Version](https://img.shields.io/badge/Version-2.0.7-blue.svg)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-2.0.8-blue.svg)](./CHANGELOG.md)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Status](https://img.shields.io/badge/Status-Production-brightgreen.svg)](https://github.com/cyanheads/obsidian-mcp-server/issues)
 [![GitHub](https://img.shields.io/github/stars/cyanheads/obsidian-mcp-server?style=social)](https://github.com/cyanheads/obsidian-mcp-server)
@@ -63,6 +63,7 @@ Leverages the robust utilities provided by `cyanheads/mcp-ts-template`:
 - **Request Context**: Tracking and correlation of operations via unique request IDs.
 - **Type Safety**: Strong typing enforced by TypeScript and Zod schemas.
 - **HTTP Transport Option**: Built-in Hono server with SSE, session management, CORS support, and pluggable authentication strategies (JWT and OAuth 2.1).
+- **Permissions Service**: A new service for managing granular, path-based access control (`read`, `write`, `create`, `delete`) within the Obsidian vault.
 
 ### Obsidian Integration
 
@@ -140,7 +141,7 @@ Configure the server using environment variables. These environmental variables 
 | `MCP_HTTP_PORT`                       | Port for the HTTP server.                                                | No                   | `3010`                   |
 | `MCP_HTTP_HOST`                       | Host for the HTTP server.                                                | No                   | `127.0.0.1`              |
 | `MCP_ALLOWED_ORIGINS`                 | Comma-separated origins for CORS. **Set for production.**                | No                   | (none)                   |
-| `MCP_AUTH_MODE`                       | Authentication strategy: `jwt` or `oauth`.                               | No                   | (none)                   |
+| `MCP_AUTH_MODE`                       | Authentication strategy: `jwt`, `oauth`, or `none`.                      | No                   | `none`                   |
 | **`MCP_AUTH_SECRET_KEY`**             | 32+ char secret for JWT. **Required for `jwt` mode.**                    | **Yes (if `jwt`)**   | `undefined`              |
 | `OAUTH_ISSUER_URL`                    | URL of the OAuth 2.1 issuer.                                             | **Yes (if `oauth`)** | `undefined`              |
 | `OAUTH_AUDIENCE`                      | Audience claim for OAuth tokens.                                         | **Yes (if `oauth`)** | `undefined`              |
