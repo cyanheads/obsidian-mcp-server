@@ -18,14 +18,14 @@ To enable the `PermissionsService`, you must create a permissions JSON file and 
 
 Create a file (e.g., `obsidian-permissions.json`) to define your access rules. The file has two main parts: `rules` and `defaultPermissions`.
 
--   `rules`: An array of objects, where each object defines:
-    -   `path`: The vault-relative path to a directory. **Must end with a `/`**.
-    -   `permissions`: An array of strings specifying the allowed actions. Valid permissions are:
-        -   `"read"`: Allows reading the content of notes.
-        -   `"write"`: Allows modifying existing notes.
-        -   `"create"`: Allows creating new notes.
-        -   `"delete"`: Allows deleting notes.
--   `defaultPermissions`: An array of permissions that apply to any path not covered by a specific rule.
+- `rules`: An array of objects, where each object defines:
+  - `path`: The vault-relative path to a directory. **Must end with a `/`**.
+  - `permissions`: An array of strings specifying the allowed actions. Valid permissions are:
+    - `"read"`: Allows reading the content of notes.
+    - `"write"`: Allows modifying existing notes.
+    - `"create"`: Allows creating new notes.
+    - `"delete"`: Allows deleting notes.
+- `defaultPermissions`: An array of permissions that apply to any path not covered by a specific rule.
 
 **Example `obsidian-permissions.json`:**
 
@@ -54,11 +54,12 @@ Create a file (e.g., `obsidian-permissions.json`) to define your access rules. T
 ```
 
 In this example:
--   Full access is granted to the `Daily Notes/` directory.
--   Files in `Templates/` are read-only.
--   In `Attachments/Images/`, files can be read, created, and deleted, but not modified.
--   All access is denied to the `Secrets/` directory.
--   For any other path in the vault, only `read` access is granted.
+
+- Full access is granted to the `Daily Notes/` directory.
+- Files in `Templates/` are read-only.
+- In `Attachments/Images/`, files can be read, created, and deleted, but not modified.
+- All access is denied to the `Secrets/` directory.
+- For any other path in the vault, only `read` access is granted.
 
 **2. Update Your MCP Client Configuration**
 

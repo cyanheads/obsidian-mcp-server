@@ -66,9 +66,7 @@ const BaseObsidianSearchReplaceInputSchema = z.object({
   wholeWord: z
     .boolean()
     .default(false)
-    .describe(
-      "If true (and not using regex), matches only whole words.",
-    ),
+    .describe("If true (and not using regex), matches only whole words."),
   returnContent: z
     .boolean()
     .default(false)

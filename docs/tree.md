@@ -1,9 +1,11 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2025-07-30 13:17:39
+Generated on: 2025-07-30 14:01:01
 
 ```
 obsidian-mcp-server
+├── .clinerules
+│   └── clinerules.md
 ├── .github
 │   ├── workflows
 │   │   └── publish.yml
@@ -13,6 +15,7 @@ obsidian-mcp-server
 │   │   ├── obsidian_rest_api_spec.json
 │   │   └── obsidian_rest_api_spec.yaml
 │   ├── obsidian_mcp_tools_spec.md
+│   ├── permissions.md
 │   └── tree.md
 ├── scripts
 │   ├── clean.ts
@@ -136,7 +139,6 @@ obsidian-mcp-server
 │   │   │   └── sanitization.ts
 │   │   └── index.ts
 │   └── index.ts
-├── .clinerules
 ├── .gitignore
 ├── .ncurc.json
 ├── CHANGELOG.md

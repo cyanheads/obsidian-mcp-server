@@ -232,7 +232,9 @@ export class ObsidianRestApiService {
     const fileExists = (await this.getFileMetadata(filePath, context)) !== null;
     const requiredPermission = fileExists ? "write" : "create";
 
-    if (!this.permissionsService.isAllowed(filePath, requiredPermission, context)) {
+    if (
+      !this.permissionsService.isAllowed(filePath, requiredPermission, context)
+    ) {
       throw new McpError(
         BaseErrorCode.FORBIDDEN,
         `${requiredPermission.charAt(0).toUpperCase() + requiredPermission.slice(1)} access denied for path: ${filePath}`,
@@ -256,7 +258,9 @@ export class ObsidianRestApiService {
     const fileExists = (await this.getFileMetadata(filePath, context)) !== null;
     const requiredPermission = fileExists ? "write" : "create";
 
-    if (!this.permissionsService.isAllowed(filePath, requiredPermission, context)) {
+    if (
+      !this.permissionsService.isAllowed(filePath, requiredPermission, context)
+    ) {
       throw new McpError(
         BaseErrorCode.FORBIDDEN,
         `${requiredPermission.charAt(0).toUpperCase() + requiredPermission.slice(1)} access denied for path: ${filePath}`,

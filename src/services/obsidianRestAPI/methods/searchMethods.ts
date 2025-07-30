@@ -28,7 +28,9 @@ export async function searchSimple(
 ): Promise<SimpleSearchResult[]> {
   const results = await handleRequest(
     _request<
-      (Omit<SimpleSearchResult, "filePath" | "filename"> & { filename: string })[]
+      (Omit<SimpleSearchResult, "filePath" | "filename"> & {
+        filename: string;
+      })[]
     >(
       {
         method: "POST",
