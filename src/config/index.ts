@@ -104,6 +104,18 @@ const EnvSchema = z.object({
     .int()
     .positive()
     .default(30000),
+  OBSIDIAN_CUSTOM_HEADERS: z
+    .string()
+    .optional()
+    .transform((val) => {
+      if (!val) return {};
+      try {
+        return JSON.parse(val);
+      } catch {
+        console.error("Warning: OBSIDIAN_CUSTOM_HEADERS is not valid JSON, ignoring.");
+        return {};
+      }
+    }),
 });
 
 const parsedEnv = EnvSchema.safeParse(process.env);
@@ -214,6 +226,7 @@ export const config = {
   obsidianCacheRefreshIntervalMin: env.OBSIDIAN_CACHE_REFRESH_INTERVAL_MIN,
   obsidianEnableCache: env.OBSIDIAN_ENABLE_CACHE,
   obsidianApiSearchTimeoutMs: env.OBSIDIAN_API_SEARCH_TIMEOUT_MS,
+  obsidianCustomHeaders: env.OBSIDIAN_CUSTOM_HEADERS as Record<string, string>,
 };
 
 /**

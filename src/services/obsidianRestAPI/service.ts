@@ -57,6 +57,7 @@ export class ObsidianRestApiService {
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
         Accept: "application/json", // Default accept type
+        ...config.obsidianCustomHeaders, // Custom headers (e.g., CF Access service token)
       },
       timeout: 60000, // Increased timeout to 60 seconds (was 15000)
       httpsAgent,
