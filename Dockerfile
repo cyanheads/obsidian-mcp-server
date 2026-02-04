@@ -17,6 +17,8 @@ RUN npm ci --only=production
 # Build the application
 FROM base AS builder
 WORKDIR /usr/src/app
+# Override NODE_ENV to ensure dev dependencies (like @types/*) are installed
+ENV NODE_ENV=development
 # Copy dependency manifests and install *all* dependencies (including dev)
 COPY package.json package-lock.json* ./
 RUN npm ci
