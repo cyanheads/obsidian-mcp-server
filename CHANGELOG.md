@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **HTTP Transport**: Fixed `ERR_HTTP_HEADERS_SENT` crash when using `@hono/node-server`. The MCP SDK transport writes directly to the Node.js `ServerResponse`, but Hono's node adapter would then attempt to write headers again. Now signals to `@hono/node-server` via the `x-hono-already-sent` header that the response has already been handled.
+
 ## [2.0.7] - 2025-06-20
 
 ### Changed

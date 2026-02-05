@@ -243,7 +243,11 @@ export async function startHttpTransport(
     }
 
     // Pass the request to the transport to handle.
-    return await transport.handleRequest(c.env.incoming, c.env.outgoing, body);
+    // The transport writes directly to the Node.js ServerResponse (c.env.outgoing).
+    // We must signal to @hono/node-server that the response is already handled,
+    // otherwise it will try to write headers again, causing ERR_HTTP_HEADERS_SENT.
+    await transport.handleRequest(c.env.incoming, c.env.outgoing, body);
+    return new Response(null, { headers: { "x-hono-already-sent": "true" } });
   });
 
   // A reusable handler for GET and DELETE requests which operate on existing sessions.
@@ -261,7 +265,8 @@ export async function startHttpTransport(
     }
 
     // Let the transport handle the streaming (GET) or termination (DELETE) request.
-    return await transport.handleRequest(c.env.incoming, c.env.outgoing);
+    await transport.handleRequest(c.env.incoming, c.env.outgoing);
+    return new Response(null, { headers: { "x-hono-already-sent": "true" } });
   };
 
   app.get(MCP_ENDPOINT_PATH, handleSessionRequest);
