@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Token Introspection Auth**: Added RFC 7662 Token Introspection as a third authentication strategy (`MCP_AUTH_MODE=introspection`). This enables validation of opaque bearer tokens against a remote introspection endpoint, complementing the existing JWT and OAuth 2.1 strategies. Configure with `TOKEN_INTROSPECTION_URL`, and optionally `TOKEN_INTROSPECTION_CLIENT_ID` and `TOKEN_INTROSPECTION_CLIENT_SECRET` for client authentication.
+
 ## [2.0.7] - 2025-06-20
 
 ### Changed

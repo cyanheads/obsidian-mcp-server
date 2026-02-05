@@ -72,7 +72,7 @@ const EnvSchema = z.object({
   MCP_HTTP_PORT: z.coerce.number().int().positive().default(3010),
   MCP_HTTP_HOST: z.string().default("127.0.0.1"),
   MCP_ALLOWED_ORIGINS: z.string().optional(),
-  MCP_AUTH_MODE: z.enum(["jwt", "oauth"]).optional(),
+  MCP_AUTH_MODE: z.enum(["jwt", "oauth", "introspection"]).optional(),
   MCP_AUTH_SECRET_KEY: z
     .string()
     .min(
@@ -83,6 +83,10 @@ const EnvSchema = z.object({
   OAUTH_ISSUER_URL: z.string().url().optional(),
   OAUTH_AUDIENCE: z.string().optional(),
   OAUTH_JWKS_URI: z.string().url().optional(),
+  // --- Token Introspection (RFC 7662) ---
+  TOKEN_INTROSPECTION_URL: z.string().url().optional(),
+  TOKEN_INTROSPECTION_CLIENT_ID: z.string().optional(),
+  TOKEN_INTROSPECTION_CLIENT_SECRET: z.string().optional(),
   // --- Obsidian Specific Config ---
   OBSIDIAN_API_KEY: z.string().min(1, "OBSIDIAN_API_KEY cannot be empty"),
   OBSIDIAN_BASE_URL: z.string().url().default("http://127.0.0.1:27123"),
@@ -208,6 +212,10 @@ export const config = {
   oauthIssuerUrl: env.OAUTH_ISSUER_URL,
   oauthAudience: env.OAUTH_AUDIENCE,
   oauthJwksUri: env.OAUTH_JWKS_URI,
+  // Token Introspection (RFC 7662)
+  tokenIntrospectionUrl: env.TOKEN_INTROSPECTION_URL,
+  tokenIntrospectionClientId: env.TOKEN_INTROSPECTION_CLIENT_ID,
+  tokenIntrospectionClientSecret: env.TOKEN_INTROSPECTION_CLIENT_SECRET,
   obsidianApiKey: env.OBSIDIAN_API_KEY,
   obsidianBaseUrl: env.OBSIDIAN_BASE_URL,
   obsidianVerifySsl: env.OBSIDIAN_VERIFY_SSL,

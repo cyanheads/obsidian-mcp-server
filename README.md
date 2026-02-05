@@ -140,11 +140,14 @@ Configure the server using environment variables. These environmental variables 
 | `MCP_HTTP_PORT`                       | Port for the HTTP server.                                                | No                   | `3010`                   |
 | `MCP_HTTP_HOST`                       | Host for the HTTP server.                                                | No                   | `127.0.0.1`              |
 | `MCP_ALLOWED_ORIGINS`                 | Comma-separated origins for CORS. **Set for production.**                | No                   | (none)                   |
-| `MCP_AUTH_MODE`                       | Authentication strategy: `jwt` or `oauth`.                               | No                   | (none)                   |
+| `MCP_AUTH_MODE`                       | Authentication strategy: `jwt`, `oauth`, or `introspection`.             | No                   | (none)                   |
 | **`MCP_AUTH_SECRET_KEY`**             | 32+ char secret for JWT. **Required for `jwt` mode.**                    | **Yes (if `jwt`)**   | `undefined`              |
 | `OAUTH_ISSUER_URL`                    | URL of the OAuth 2.1 issuer.                                             | **Yes (if `oauth`)** | `undefined`              |
 | `OAUTH_AUDIENCE`                      | Audience claim for OAuth tokens.                                         | **Yes (if `oauth`)** | `undefined`              |
 | `OAUTH_JWKS_URI`                      | URI for the JSON Web Key Set (optional, derived from issuer if omitted). | No                   | (derived)                |
+| `TOKEN_INTROSPECTION_URL`             | URL of the RFC 7662 token introspection endpoint.                        | **Yes (if `introspection`)** | `undefined`        |
+| `TOKEN_INTROSPECTION_CLIENT_ID`       | Client ID for authenticating to the introspection endpoint.              | No                   | `undefined`              |
+| `TOKEN_INTROSPECTION_CLIENT_SECRET`   | Client secret for authenticating to the introspection endpoint.          | No                   | `undefined`              |
 | `MCP_LOG_LEVEL`                       | Logging level (`debug`, `info`, `error`, etc.).                          | No                   | `info`                   |
 | `OBSIDIAN_VERIFY_SSL`                 | Set to `false` to disable SSL verification.                              | No                   | `true`                   |
 | `OBSIDIAN_ENABLE_CACHE`               | Set to `true` to enable the in-memory vault cache.                       | No                   | `true`                   |

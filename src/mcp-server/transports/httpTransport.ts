@@ -35,6 +35,7 @@ import {
 import {
   jwtAuthMiddleware,
   oauthMiddleware,
+  tokenIntrospectionMiddleware,
   type AuthInfo,
 } from "./auth/index.js";
 import { httpErrorHandler } from "./httpErrorHandler.js";
@@ -176,8 +177,13 @@ export async function startHttpTransport(
     await next();
   });
 
+  // Apply authentication middleware based on configured mode.
+  // JWT is the default fallthrough to preserve the existing dev-mode bypass behavior
+  // when MCP_AUTH_MODE is not explicitly set.
   if (config.mcpAuthMode === "oauth") {
     app.use(MCP_ENDPOINT_PATH, oauthMiddleware);
+  } else if (config.mcpAuthMode === "introspection") {
+    app.use(MCP_ENDPOINT_PATH, tokenIntrospectionMiddleware);
   } else {
     app.use(MCP_ENDPOINT_PATH, jwtAuthMiddleware);
   }

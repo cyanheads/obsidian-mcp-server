@@ -10,3 +10,4 @@ export type { AuthInfo } from "./core/authTypes.js";
 
 export { mcpAuthMiddleware as jwtAuthMiddleware } from "./strategies/jwt/jwtMiddleware.js";
 export { oauthMiddleware } from "./strategies/oauth/oauthMiddleware.js";
+export { tokenIntrospectionMiddleware } from "./strategies/introspection/tokenIntrospectionMiddleware.js";
