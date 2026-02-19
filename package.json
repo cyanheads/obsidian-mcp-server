@@ -38,7 +38,7 @@
   "dependencies": {
     "@hono/node-server": "^1.14.4",
     "@modelcontextprotocol/inspector": "^0.14.3",
-    "@modelcontextprotocol/sdk": "^1.13.0",
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "@types/sanitize-html": "^2.16.0",
     "@types/validator": "13.15.2",
     "axios": "^1.10.0",
