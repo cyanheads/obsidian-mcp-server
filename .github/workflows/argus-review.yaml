@@ -1,0 +1,22 @@
+name: Argus Review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: Simplifying-Cloud/pr-review-action@v1
+        with:
+          llm_base_url: 'https://openrouter.ai/api/v1/'
+          llm_api_key: ${{ secrets.OPENROUTER_API_KEY }}
+          llm_model: ${{ vars.LLM_MODEL || 'anthropic/claude-sonnet-4-6' }}
+          review_focus: |
+            - Security: injection, auth bypass, secrets in code
+            - Error handling: ensure errors are propagated, not swallowed
+            - Simplicity: flag over-engineering and unnecessary complexity
+            - Dependencies: flag unnecessary 3rd party additions
