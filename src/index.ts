@@ -10,6 +10,7 @@ import { logger, McpLogLevel } from "./utils/internal/logger.js"; // Import logg
 // Import Services
 import { ObsidianRestApiService } from "./services/obsidianRestAPI/index.js";
 import { VaultCacheService } from "./services/obsidianRestAPI/vaultCache/index.js"; // Import VaultCacheService
+import { OmnisearchService } from "./services/omnisearch/index.js";
 
 /**
  * The main MCP server instance (only stored globally for stdio shutdown).
@@ -248,6 +249,15 @@ const start = async () => {
     } else {
       logger.info("Vault cache is disabled by configuration.", startupContext);
     }
+
+    const omnisearchService = new OmnisearchService(
+      config.obsidianOmnisearchBaseUrl,
+    );
+    logger.info(
+      `Omnisearch service instantiated (baseUrl: ${config.obsidianOmnisearchBaseUrl}).`,
+      startupContext,
+    );
+
     logger.info("Shared services instantiated.", startupContext);
     // --- End Service Instantiation ---
 
@@ -263,6 +273,7 @@ const start = async () => {
     const serverOrHttpInstance = await initializeAndStartServer(
       obsidianService,
       vaultCacheService,
+      omnisearchService,
     );
 
     if (

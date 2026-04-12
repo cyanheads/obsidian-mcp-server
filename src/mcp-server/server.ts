@@ -24,10 +24,13 @@ import { ErrorHandler, logger, requestContextService } from "../utils/index.js";
 import { ObsidianRestApiService } from "../services/obsidianRestAPI/index.js";
 // Import the Vault Cache service
 import { VaultCacheService } from "../services/obsidianRestAPI/vaultCache/index.js";
+// Import the Omnisearch service
+import { OmnisearchService } from "../services/omnisearch/index.js";
 // Import registration functions for specific resources and tools.
 import { registerObsidianDeleteNoteTool } from "./tools/obsidianDeleteNoteTool/index.js";
 import { registerObsidianGlobalSearchTool } from "./tools/obsidianGlobalSearchTool/index.js";
 import { registerObsidianListNotesTool } from "./tools/obsidianListNotesTool/index.js";
+import { registerObsidianOmnisearchTool } from "./tools/obsidianOmnisearchTool/index.js";
 import { registerObsidianReadNoteTool } from "./tools/obsidianReadNoteTool/index.js";
 import { registerObsidianSearchReplaceTool } from "./tools/obsidianSearchReplaceTool/index.js";
 import { registerObsidianUpdateNoteTool } from "./tools/obsidianUpdateNoteTool/index.js";
@@ -61,6 +64,7 @@ import { connectStdioTransport } from "./transports/stdioTransport.js";
 async function createMcpServerInstance(
   obsidianService: ObsidianRestApiService,
   vaultCacheService: VaultCacheService | undefined,
+  omnisearchService: OmnisearchService,
 ): Promise<McpServer> {
   const context = requestContextService.createRequestContext({
     operation: "createMcpServerInstance",
@@ -141,6 +145,7 @@ async function createMcpServerInstance(
       obsidianService,
       vaultCacheService,
     );
+    await registerObsidianOmnisearchTool(server, omnisearchService);
 
     logger.info("Resources and tools registered successfully", context);
 
@@ -197,6 +202,7 @@ async function createMcpServerInstance(
 async function startTransport(
   obsidianService: ObsidianRestApiService,
   vaultCacheService: VaultCacheService | undefined,
+  omnisearchService: OmnisearchService,
 ): Promise<McpServer | ServerType | void> {
   const transportType = config.mcpTransportType;
   const context = requestContextService.createRequestContext({
@@ -213,7 +219,11 @@ async function startTransport(
     // For HTTP, startHttpTransport manages its own lifecycle and server instances per session.
     // It needs a factory function to create new McpServer instances, passing along the shared services.
     const mcpServerFactory = async () =>
-      createMcpServerInstance(obsidianService, vaultCacheService);
+      createMcpServerInstance(
+        obsidianService,
+        vaultCacheService,
+        omnisearchService,
+      );
     const httpServerInstance = await startHttpTransport(
       mcpServerFactory,
       context,
@@ -229,6 +239,7 @@ async function startTransport(
     const server = await createMcpServerInstance(
       obsidianService,
       vaultCacheService,
+      omnisearchService,
     );
     logger.debug("Delegating to connectStdioTransport...", context);
     await connectStdioTransport(server, context);
@@ -261,6 +272,7 @@ async function startTransport(
 export async function initializeAndStartServer(
   obsidianService: ObsidianRestApiService,
   vaultCacheService: VaultCacheService | undefined,
+  omnisearchService: OmnisearchService,
 ): Promise<void | McpServer | ServerType> {
   const context = requestContextService.createRequestContext({
     operation: "initializeAndStartServer",
@@ -278,7 +290,11 @@ export async function initializeAndStartServer(
     );
 
     // Initiate the transport setup based on configuration, passing shared services.
-    const result = await startTransport(obsidianService, vaultCacheService);
+    const result = await startTransport(
+      obsidianService,
+      vaultCacheService,
+      omnisearchService,
+    );
     logger.info(
       "MCP Server initialization sequence completed successfully.",
       context,
