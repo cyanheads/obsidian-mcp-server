@@ -11,6 +11,7 @@ import { logger, McpLogLevel } from "./utils/internal/logger.js"; // Import logg
 import { ObsidianRestApiService } from "./services/obsidianRestAPI/index.js";
 import { VaultCacheService } from "./services/obsidianRestAPI/vaultCache/index.js"; // Import VaultCacheService
 import { OmnisearchService } from "./services/omnisearch/index.js";
+import { SmartConnectionsService } from "./services/smartConnections/index.js";
 
 /**
  * The main MCP server instance (only stored globally for stdio shutdown).
@@ -258,6 +259,24 @@ const start = async () => {
       startupContext,
     );
 
+    let smartConnectionsService: SmartConnectionsService | undefined;
+    if (config.obsidianVaultPath) {
+      smartConnectionsService = new SmartConnectionsService(
+        config.obsidianVaultPath,
+        config.smartConnectionsModel,
+        config.smartConnectionsStoredModel,
+      );
+      logger.info(
+        `Smart Connections service instantiated (vaultPath: ${config.obsidianVaultPath}, model: ${config.smartConnectionsModel}, storedModel: ${config.smartConnectionsStoredModel}).`,
+        startupContext,
+      );
+    } else {
+      logger.info(
+        "OBSIDIAN_VAULT_PATH not set; Smart Connections tools will be disabled.",
+        startupContext,
+      );
+    }
+
     logger.info("Shared services instantiated.", startupContext);
     // --- End Service Instantiation ---
 
@@ -274,6 +293,7 @@ const start = async () => {
       obsidianService,
       vaultCacheService,
       omnisearchService,
+      smartConnectionsService,
     );
 
     if (

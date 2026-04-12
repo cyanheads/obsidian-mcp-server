@@ -26,13 +26,18 @@ import { ObsidianRestApiService } from "../services/obsidianRestAPI/index.js";
 import { VaultCacheService } from "../services/obsidianRestAPI/vaultCache/index.js";
 // Import the Omnisearch service
 import { OmnisearchService } from "../services/omnisearch/index.js";
+// Import the Smart Connections service
+import { SmartConnectionsService } from "../services/smartConnections/index.js";
 // Import registration functions for specific resources and tools.
+import { registerObsidianContextBlocksTool } from "./tools/obsidianContextBlocksTool/index.js";
 import { registerObsidianDeleteNoteTool } from "./tools/obsidianDeleteNoteTool/index.js";
+import { registerObsidianFindRelatedTool } from "./tools/obsidianFindRelatedTool/index.js";
 import { registerObsidianGlobalSearchTool } from "./tools/obsidianGlobalSearchTool/index.js";
 import { registerObsidianListNotesTool } from "./tools/obsidianListNotesTool/index.js";
 import { registerObsidianOmnisearchTool } from "./tools/obsidianOmnisearchTool/index.js";
 import { registerObsidianReadNoteTool } from "./tools/obsidianReadNoteTool/index.js";
 import { registerObsidianSearchReplaceTool } from "./tools/obsidianSearchReplaceTool/index.js";
+import { registerObsidianSemanticSearchTool } from "./tools/obsidianSemanticSearchTool/index.js";
 import { registerObsidianUpdateNoteTool } from "./tools/obsidianUpdateNoteTool/index.js";
 import { registerObsidianManageFrontmatterTool } from "./tools/obsidianManageFrontmatterTool/index.js";
 import { registerObsidianManageTagsTool } from "./tools/obsidianManageTagsTool/index.js";
@@ -65,6 +70,7 @@ async function createMcpServerInstance(
   obsidianService: ObsidianRestApiService,
   vaultCacheService: VaultCacheService | undefined,
   omnisearchService: OmnisearchService,
+  smartConnectionsService: SmartConnectionsService | undefined,
 ): Promise<McpServer> {
   const context = requestContextService.createRequestContext({
     operation: "createMcpServerInstance",
@@ -147,6 +153,17 @@ async function createMcpServerInstance(
     );
     await registerObsidianOmnisearchTool(server, omnisearchService);
 
+    if (smartConnectionsService) {
+      await registerObsidianSemanticSearchTool(server, smartConnectionsService);
+      await registerObsidianFindRelatedTool(server, smartConnectionsService);
+      await registerObsidianContextBlocksTool(server, smartConnectionsService);
+    } else {
+      logger.warning(
+        "Skipping Smart Connections tools (obsidian_semantic_search, obsidian_find_related, obsidian_context_blocks) because OBSIDIAN_VAULT_PATH is not set.",
+        context,
+      );
+    }
+
     logger.info("Resources and tools registered successfully", context);
 
     if (vaultCacheService) {
@@ -203,6 +220,7 @@ async function startTransport(
   obsidianService: ObsidianRestApiService,
   vaultCacheService: VaultCacheService | undefined,
   omnisearchService: OmnisearchService,
+  smartConnectionsService: SmartConnectionsService | undefined,
 ): Promise<McpServer | ServerType | void> {
   const transportType = config.mcpTransportType;
   const context = requestContextService.createRequestContext({
@@ -223,6 +241,7 @@ async function startTransport(
         obsidianService,
         vaultCacheService,
         omnisearchService,
+        smartConnectionsService,
       );
     const httpServerInstance = await startHttpTransport(
       mcpServerFactory,
@@ -240,6 +259,7 @@ async function startTransport(
       obsidianService,
       vaultCacheService,
       omnisearchService,
+      smartConnectionsService,
     );
     logger.debug("Delegating to connectStdioTransport...", context);
     await connectStdioTransport(server, context);
@@ -273,6 +293,7 @@ export async function initializeAndStartServer(
   obsidianService: ObsidianRestApiService,
   vaultCacheService: VaultCacheService | undefined,
   omnisearchService: OmnisearchService,
+  smartConnectionsService: SmartConnectionsService | undefined,
 ): Promise<void | McpServer | ServerType> {
   const context = requestContextService.createRequestContext({
     operation: "initializeAndStartServer",
@@ -294,6 +315,7 @@ export async function initializeAndStartServer(
       obsidianService,
       vaultCacheService,
       omnisearchService,
+      smartConnectionsService,
     );
     logger.info(
       "MCP Server initialization sequence completed successfully.",
