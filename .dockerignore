@@ -1,0 +1,12 @@
+.git
+.github
+node_modules
+dist
+logs
+*.log
+.env
+.env.*
+docs
+*.md
+repomix-output.*
+.cache

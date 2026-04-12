@@ -86,6 +86,15 @@ const EnvSchema = z.object({
   // --- Obsidian Specific Config ---
   OBSIDIAN_API_KEY: z.string().min(1, "OBSIDIAN_API_KEY cannot be empty"),
   OBSIDIAN_BASE_URL: z.string().url().default("http://127.0.0.1:27123"),
+  OBSIDIAN_OMNISEARCH_BASE_URL: z
+    .string()
+    .url()
+    .default("http://127.0.0.1:51361"),
+  OBSIDIAN_VAULT_PATH: z.string().optional(),
+  SMART_CONNECTIONS_MODEL: z.string().default("TaylorAI/bge-micro-v2"),
+  SMART_CONNECTIONS_STORED_MODEL: z
+    .string()
+    .default("TaylorAI/bge-micro-v2"),
   OBSIDIAN_VERIFY_SSL: z
     .string()
     .transform((val) => val.toLowerCase() === "true")
@@ -210,6 +219,10 @@ export const config = {
   oauthJwksUri: env.OAUTH_JWKS_URI,
   obsidianApiKey: env.OBSIDIAN_API_KEY,
   obsidianBaseUrl: env.OBSIDIAN_BASE_URL,
+  obsidianOmnisearchBaseUrl: env.OBSIDIAN_OMNISEARCH_BASE_URL,
+  obsidianVaultPath: env.OBSIDIAN_VAULT_PATH,
+  smartConnectionsModel: env.SMART_CONNECTIONS_MODEL,
+  smartConnectionsStoredModel: env.SMART_CONNECTIONS_STORED_MODEL,
   obsidianVerifySsl: env.OBSIDIAN_VERIFY_SSL,
   obsidianCacheRefreshIntervalMin: env.OBSIDIAN_CACHE_REFRESH_INTERVAL_MIN,
   obsidianEnableCache: env.OBSIDIAN_ENABLE_CACHE,
