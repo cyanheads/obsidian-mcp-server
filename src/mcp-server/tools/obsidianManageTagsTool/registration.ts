@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import {
   ObsidianRestApiService,
   VaultCacheService,
@@ -9,6 +10,7 @@ import {
   logger,
   RequestContext,
   requestContextService,
+  createJsonSchema,
 } from "../../../utils/index.js";
 import type {
   ObsidianManageTagsInput,
@@ -40,11 +42,14 @@ export const registerObsidianManageTagsTool = async (
 
   await ErrorHandler.tryCatch(
     async () => {
-      server.tool(
+      // Convert Zod schema to JSON Schema with explicit type fields for Gemini CLI compatibility.
+      // Cast to ZodRawShape as the MCP SDK accepts this at runtime despite TypeScript strictness.
+      const jsonSchema = createJsonSchema(ManageTagsInputSchema) as unknown as z.ZodRawShape;
+      (server.tool as any)(
         toolName,
         toolDescription,
-        ObsidianManageTagsInputSchemaShape,
-        async (params: ObsidianManageTagsInput) => {
+        jsonSchema,
+        async (params: any) => {
           const handlerContext: RequestContext =
             requestContextService.createRequestContext({
               parentContext: registrationContext,

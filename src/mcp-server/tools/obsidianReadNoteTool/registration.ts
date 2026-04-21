@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import { ObsidianRestApiService } from "../../../services/obsidianRestAPI/index.js";
 import { BaseErrorCode, McpError } from "../../../types-global/errors.js";
 import {
@@ -6,6 +7,7 @@ import {
   logger,
   RequestContext,
   requestContextService,
+  createJsonSchema,
 } from "../../../utils/index.js";
 // Import necessary types, schema, and logic function from the logic file
 import type {
@@ -57,10 +59,15 @@ export const registerObsidianReadNoteTool = async (
     async () => {
       // Use the high-level SDK method `server.tool` for registration.
       // It handles schema generation from the shape, basic validation, and routing.
-      server.tool(
+      // Convert Zod schema to JSON Schema with explicit type fields for Gemini CLI compatibility.
+      // Cast to ZodRawShape as the MCP SDK accepts this at runtime despite TypeScript strictness.
+      const jsonSchema = createJsonSchema(ObsidianReadNoteInputSchema) as unknown as z.ZodRawShape;
+      // Cast server.tool to any to bypass TypeScript strict type checking on overloads
+      // The runtime behavior is correct - the MCP SDK accepts both Zod schemas and JSON Schema objects
+      (server.tool as any)(
         toolName,
         toolDescription,
-        ObsidianReadNoteInputSchema.shape, // Provide the Zod schema shape for input definition.
+        jsonSchema,
         /**
          * The handler function executed when the 'obsidian_read_note' tool is called by the client.
          *
@@ -71,7 +78,7 @@ export const registerObsidianReadNoteTool = async (
          * @returns {Promise<CallToolResult>} A promise resolving to the structured result for the MCP client,
          *   containing either the successful response data (serialized JSON) or an error indication.
          */
-        async (params: ObsidianReadNoteInput) => {
+        async (params: any) => {
           // Type matches the inferred input schema
           // Create a specific context for this handler invocation.
           const handlerContext: RequestContext =

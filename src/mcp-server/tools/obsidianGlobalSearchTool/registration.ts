@@ -8,11 +8,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ObsidianRestApiService } from "../../../services/obsidianRestAPI/index.js";
 import type { VaultCacheService } from "../../../services/obsidianRestAPI/vaultCache/index.js"; // Import VaultCacheService type
 import { BaseErrorCode, McpError } from "../../../types-global/errors.js";
+import { z } from "zod";
 import {
   ErrorHandler,
   logger,
   RequestContext,
   requestContextService,
+  createJsonSchema,
 } from "../../../utils/index.js";
 // Import types, schema shape, and the core processing logic from logic.ts
 import type {
@@ -20,6 +22,7 @@ import type {
   ObsidianGlobalSearchResponse,
 } from "./logic.js"; // Ensure '.js' extension
 import {
+  ObsidianGlobalSearchInputSchema,
   ObsidianGlobalSearchInputSchemaShape,
   processObsidianGlobalSearch,
 } from "./logic.js"; // Ensure '.js' extension
@@ -52,10 +55,13 @@ export async function registerObsidianGlobalSearchTool(
 
   await ErrorHandler.tryCatch(
     async () => {
-      server.tool(
+      // Convert Zod schema to JSON Schema with explicit type fields for Gemini CLI compatibility.
+      // Cast to ZodRawShape as the MCP SDK accepts this at runtime despite TypeScript strictness.
+      const jsonSchema = createJsonSchema(ObsidianGlobalSearchInputSchema) as unknown as z.ZodRawShape;
+      (server.tool as any)(
         toolName,
         toolDescription,
-        ObsidianGlobalSearchInputSchemaShape,
+        jsonSchema,
         async (
           params: ObsidianGlobalSearchInput,
           handlerInvocationContext: any,

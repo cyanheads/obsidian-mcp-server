@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import {
   ObsidianRestApiService,
   VaultCacheService,
@@ -9,6 +10,7 @@ import {
   logger,
   RequestContext,
   requestContextService,
+  createJsonSchema,
 } from "../../../utils/index.js";
 // Import types for handler signature and response structure
 import type {
@@ -64,10 +66,13 @@ export const registerObsidianUpdateNoteTool = async (
     async () => {
       // Use the high-level SDK method for tool registration.
       // This handles schema generation, validation, and routing automatically.
-      server.tool(
+      // Convert Zod schema to JSON Schema with explicit type fields for Gemini CLI compatibility.
+      // Cast to ZodRawShape as the MCP SDK accepts this at runtime despite TypeScript strictness.
+      const jsonSchema = createJsonSchema(ObsidianUpdateNoteInputSchema) as unknown as z.ZodRawShape;
+      (server.tool as any)(
         toolName,
         toolDescription,
-        ObsidianUpdateNoteInputSchemaShape, // Provide the Zod schema shape for input validation.
+        jsonSchema, // Provide the JSON Schema with explicit type fields.
         /**
          * The handler function executed when the 'obsidian_update_note' tool is called.
          *
@@ -76,7 +81,7 @@ export const registerObsidianUpdateNoteTool = async (
          * @returns {Promise<CallToolResult>} A promise resolving to the structured result for the MCP client,
          *   containing either the successful response data or an error indication.
          */
-        async (params: ObsidianUpdateNoteRegistrationInput) => {
+        async (params: any) => {
           // Create a specific context for this handler invocation.
           const handlerContext: RequestContext =
             requestContextService.createRequestContext({

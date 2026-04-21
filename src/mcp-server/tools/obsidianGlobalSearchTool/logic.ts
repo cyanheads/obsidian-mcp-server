@@ -21,7 +21,7 @@ import {
 // ====================================================================================
 // Schema Definitions (Updated for Pagination, Match Limit, and Path Filter)
 // ====================================================================================
-const ObsidianGlobalSearchInputSchema = z
+export const ObsidianGlobalSearchInputSchema = z
   .object({
     query: z
       .string()

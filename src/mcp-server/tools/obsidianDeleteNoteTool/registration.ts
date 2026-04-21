@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import {
   ObsidianRestApiService,
   VaultCacheService,
@@ -9,6 +10,7 @@ import {
   logger,
   RequestContext,
   requestContextService,
+  createJsonSchema,
 } from "../../../utils/index.js";
 // Import necessary types, schema, and logic function from the logic file
 import type {
@@ -60,10 +62,13 @@ export const registerObsidianDeleteNoteTool = async (
   await ErrorHandler.tryCatch(
     async () => {
       // Use the high-level SDK method `server.tool` for registration.
-      server.tool(
+      // Convert Zod schema to JSON Schema with explicit type fields for Gemini CLI compatibility.
+      // Cast to ZodRawShape as the MCP SDK accepts this at runtime despite TypeScript strictness.
+      const jsonSchema = createJsonSchema(ObsidianDeleteNoteInputSchema) as unknown as z.ZodRawShape;
+      (server.tool as any)(
         toolName,
         toolDescription,
-        ObsidianDeleteNoteInputSchema.shape, // Provide the Zod schema shape for input definition.
+        jsonSchema, // Provide the JSON Schema with explicit type fields.
         /**
          * The handler function executed when the 'obsidian_delete_note' tool is called by the client.
          *
@@ -72,7 +77,7 @@ export const registerObsidianDeleteNoteTool = async (
          * @returns {Promise<CallToolResult>} A promise resolving to the structured result for the MCP client,
          *   containing either the successful response data (serialized JSON) or an error indication.
          */
-        async (params: ObsidianDeleteNoteInput) => {
+        async (params: any) => {
           // Type matches the inferred input schema
           // Create a specific context for this handler invocation.
           const handlerContext: RequestContext =
