@@ -6,20 +6,20 @@
 
 | # | Name | Description | Key Inputs | Annotations |
 |:--|:-----|:------------|:-----------|:------------|
-| 1 | `obsidian_get_note` | Read a note's content, structured metadata (frontmatter/tags/stat — parsed by the upstream plugin), or section structure (document map). Works against any vault path, the active file, or a periodic note. | `target`, `format` (`content`/`full`/`document-map`), `section?` | `readOnlyHint`, `idempotentHint` |
+| 1 | `obsidian_get_note` | Read a note's content, structured metadata (frontmatter/tags/stat — parsed by the upstream plugin), section structure (document map), or a single section. Works against any vault path, the active file, or a periodic note. | `target`, `format` (`content`/`full`/`document-map`/`section`); `section` required when `format: 'section'` | `readOnlyHint`, `idempotentHint` |
 | 2 | `obsidian_write_note` | Create or overwrite a note (whole file) or replace a single section in place. Idempotent. | `target`, `content`, `section?`, `contentType?` | `idempotentHint`, `destructiveHint` |
 | 3 | `obsidian_append_to_note` | Append content to the end of a note, or to the end of a heading/block/frontmatter section. | `target`, `content`, `section?`, `contentType?`, `createTargetIfMissing?` | (none — additive) |
 | 4 | `obsidian_patch_note` | Surgical edit of a heading, block reference, or frontmatter field. Supports `append`/`prepend`/`replace`. The right tool when you need precise placement inside an existing document. | `target`, `section`, `operation`, `content`, `contentType?`, `patchOptions?` | `destructiveHint` (always — worst-case across operations) |
 | 5 | `obsidian_delete_note` | Permanently delete a note. Elicits human confirmation when the client supports it. | `target` | `destructiveHint` |
 | 6 | `obsidian_replace_in_note` | String or regex search-replace inside a single note. Composed read → mutate → write at the service layer (no native upstream endpoint). Per-replacement `useRegex`/`caseSensitive`/`replaceAll` flags. | `target`, `replacements: [{ search, replace, useRegex?, caseSensitive?, replaceAll? }]` | `destructiveHint` |
-| 7 | `obsidian_manage_frontmatter` | Atomic `get` / `set` / `delete` on a single frontmatter key. `set` uses PATCH; `delete` uses read-modify-write because PATCH has no delete operation. Avoids rewriting the whole file for `get` and `set`. | `target`, `operation`, `key`, `value?` (set only) | `destructiveHint` (set/delete) |
+| 7 | `obsidian_manage_frontmatter` | Atomic `get` / `set` / `delete` on a single frontmatter key. `set` uses PATCH; `delete` uses read-modify-write because PATCH has no delete operation. Avoids rewriting the whole file for `get` and `set`. | discriminated on `operation`: `{ operation: 'get'\|'delete', target, key }` or `{ operation: 'set', target, key, value }` | `destructiveHint` (set/delete) |
 | 8 | `obsidian_manage_tags` | Add, remove, or list a note's tags across both frontmatter (`tags:` array) and inline (`#tag`) syntax. Service layer reconciles both locations. | `target`, `operation`, `tags?: string[]`, `location?: 'frontmatter'\|'inline'\|'both'` (default `both`) | `destructiveHint` (add/remove) |
 | 9 | `obsidian_list_files` | List files and subdirectories at a vault path. Defaults to vault root. Optional client-side filters by extension and name. | `path?`, `extension?`, `nameRegex?` | `readOnlyHint`, `idempotentHint` |
 | 10 | `obsidian_search_notes` | Search the vault. Modes: `text` (substring + context, with optional `pathPrefix` filter), `dataview` (DQL `TABLE` query — use this for path/date/metadata filters), `jsonlogic` (structured filter on `NoteJson`). | `mode`, `query`, `contextLength?`, `pathPrefix?` (text mode) | `readOnlyHint` |
 | 11 | `obsidian_list_tags` | All tags found across the vault, with usage counts. Includes hierarchical parents (e.g. `work` for `work/tasks`). | (none) | `readOnlyHint`, `idempotentHint` |
 | 12 | `obsidian_list_commands` | List Obsidian command-palette commands available for execution. | (none) | `readOnlyHint`, `idempotentHint` |
 | 13 | `obsidian_execute_command` | Execute an Obsidian command by ID (from `obsidian_list_commands`). Behavior is opaque — some commands are destructive (e.g. delete file), some open UI. **Registered only when `OBSIDIAN_ENABLE_COMMANDS=true`.** | `commandId` | `openWorldHint`, `destructiveHint` |
-| 14 | `obsidian_open_in_ui` | Open a file in the Obsidian app UI. **Creates the note if it doesn't exist** (upstream side effect — verify the path first if you only intend to open). Useful for surfacing a note to the human after agent edits. | `path`, `newLeaf?` | `openWorldHint`, `destructiveHint` |
+| 14 | `obsidian_open_in_ui` | Open a file in the Obsidian app UI. By default fails with `NotFound` if the path doesn't exist. Pass `failIfMissing: false` to allow the upstream's create-on-open side effect (useful for "open or create" UX). Useful for surfacing a note to the human after agent edits. | `path`, `failIfMissing?` (default `true`), `newLeaf?` | `openWorldHint`, `destructiveHint` |
 
 ### Common Input Shapes
 
@@ -66,7 +66,7 @@ Sketches of the `structuredContent` payload each tool returns. `format()` render
 | `obsidian_get_note` (`format: 'content'`) | `{ path, content }` |
 | `obsidian_get_note` (`format: 'full'`) | `{ path, content, frontmatter, tags, stat: { ctime, mtime, size } }` |
 | `obsidian_get_note` (`format: 'document-map'`) | `{ path, headings, blocks, frontmatterFields }` |
-| `obsidian_get_note` (with `section`) | `{ path, section: { type, target }, value }` — `value` is the section's raw markdown, or the JSON value when `section.type === 'frontmatter'`. `format` is ignored when `section` is set. |
+| `obsidian_get_note` (`format: 'section'`) | `{ path, section: { type, target }, value }` — `value` is the section's raw markdown, or the JSON value when `section.type === 'frontmatter'`. |
 | `obsidian_write_note`, `obsidian_append_to_note` | `{ path, sectionTargeted: boolean, updatedContent?: string }` — the API returns the full updated file when section was targeted; we forward it. |
 | `obsidian_patch_note` | `{ path, section, operation }` — upstream returns 200 with no body. |
 | `obsidian_delete_note` | `{ path, deleted: true }` |
@@ -80,7 +80,7 @@ Sketches of the `structuredContent` payload each tool returns. `format()` render
 | `obsidian_list_tags` | `{ tags: [{ name, count }] }` |
 | `obsidian_list_commands` | `{ commands: [{ id, name }] }` |
 | `obsidian_execute_command` | `{ commandId, executed: true }` |
-| `obsidian_open_in_ui` | `{ path, opened: true, createdIfMissing: boolean }` — `createdIfMissing` is best-effort (we check existence before the open call). |
+| `obsidian_open_in_ui` | `{ path, opened: true, createdIfMissing: boolean }` — `createdIfMissing` reflects whether the file existed before the open call. Always `false` when `failIfMissing: true` (default), since the handler throws `NotFound` instead of letting upstream create. |
 
 ### Resources
 
@@ -155,7 +155,7 @@ Loaded via `parseEnvConfig` in `src/config/server-config.ts`.
 
 ## Implementation Order
 
-1. **Config** — `src/config/server-config.ts` with the three env vars above
+1. **Config** — `src/config/server-config.ts` with the env vars above
 2. **Service** — `src/services/obsidian/obsidian-service.ts` with init/accessor pattern, the target → URL translator, the headers builder for PATCH/section targeting, and `withRetry` resilience
 3. **Read-only tools** — `obsidian_get_note`, `obsidian_list_files`, `obsidian_list_tags`, `obsidian_list_commands`, `obsidian_search_notes`
 4. **Resources** — `obsidian://vault/{path}`, `obsidian://tags`, `obsidian://status` (thin shims over the read tools' service methods)
@@ -317,6 +317,41 @@ Every tool's `format()` renders the same data as `structuredContent` — full co
 The Obsidian API defaults to `text/markdown` (just content). We default to `'full'` (NoteJson — content + frontmatter + tags + stat). The size delta is small; structured metadata is meaningfully more useful to an LLM than raw YAML embedded in the markdown body. `'content'` and `'document-map'` remain available for size-sensitive or section-discovery cases.
 
 We do **not** parse frontmatter ourselves. Setting `Accept: application/vnd.olrapi.note+json` tells the Obsidian Local REST API plugin to do the parsing and return the result as a `frontmatter` object inside NoteJson. That's the right boundary: no YAML parser dependency, no risk of diverging from how Obsidian itself interprets edge cases (date coercion, multi-line strings, tag syntax), and the plugin already merges inline `#tag` syntax with the frontmatter `tags:` field into the unified `tags` array.
+
+### Discriminated inputs where parameters are conditionally required
+
+Two tools have parameters that are required in some modes and forbidden in others. Encode that in the schema rather than checking at handler runtime:
+
+```ts
+// obsidian_get_note — `section` is only meaningful when format === 'section'
+input: z.discriminatedUnion('format', [
+  z.object({ format: z.literal('content'),       target: Target }),
+  z.object({ format: z.literal('full'),          target: Target }),
+  z.object({ format: z.literal('document-map'),  target: Target }),
+  z.object({ format: z.literal('section'),       target: Target, section: Section }),
+])
+
+// obsidian_manage_frontmatter — `value` is required on set, forbidden on get/delete
+input: z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('get'),    target: Target, key: z.string() }),
+  z.object({ operation: z.literal('delete'), target: Target, key: z.string() }),
+  z.object({ operation: z.literal('set'),    target: Target, key: z.string(), value: z.unknown() }),
+])
+```
+
+The alternative — flat schemas with `z.any().optional()` and runtime checks — accepts contradictory inputs and surfaces the failure as a generic validation error mid-handler. The discriminator gives the LLM and the linter a clear signal about what each mode actually needs.
+
+### `obsidian_replace_in_note` applies replacements sequentially
+
+Multiple replacements are applied in array order over the evolving content — replacement[1] sees replacement[0]'s output. Sequential is more expressive than parallel-over-original: an agent can express either pattern (chain or independent) under sequential semantics, but parallel loses information when replacements would touch overlapping regions. `perReplacement[i].count` reflects matches found at the time replacement *i* was applied.
+
+### `obsidian_manage_tags` reconciliation policy
+
+When `location: 'both'`:
+- **`add`**: ensures the tag exists in both representations. If present in only one, adds to the other; tags already in both are reported in `skipped`.
+- **`remove`**: strips the tag from both representations. Inline `#tag` occurrences inside fenced code blocks are left alone — they're code, not tags.
+
+When `location: 'frontmatter'` or `'inline'`, only that representation is touched. `applied` lists tags actually changed; `skipped` lists tags already present (for `add`) or absent (for `remove`) in the targeted location.
 
 ### Composed convenience tools where the upstream API forces multi-step dances
 
