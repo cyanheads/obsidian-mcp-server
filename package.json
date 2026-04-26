@@ -1,91 +1,62 @@
 {
   "name": "obsidian-mcp-server",
-  "version": "2.0.7",
-  "description": "Obsidian Knowledge-Management MCP (Model Context Protocol) server that enables AI agents and development tools to interact with an Obsidian vault. It provides a comprehensive suite of tools for reading, writing, searching, and managing notes, tags, and frontmatter, acting as a bridge to the Obsidian Local REST API plugin.",
+  "version": "0.1.0",
+  "description": "MCP server for interacting with Obsidian vaults via the Model Context Protocol.",
+  "type": "module",
   "main": "dist/index.js",
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE",
-    "CHANGELOG.md"
-  ],
+  "types": "dist/index.d.ts",
   "bin": {
     "obsidian-mcp-server": "dist/index.js"
   },
-  "type": "module",
+  "files": [
+    "changelog/",
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "CLAUDE.md",
+    "Dockerfile",
+    "server.json"
+  ],
+  "scripts": {
+    "build": "tsx scripts/build.ts",
+    "rebuild": "tsx scripts/clean.ts && tsx scripts/build.ts",
+    "clean": "tsx scripts/clean.ts",
+    "devcheck": "tsx scripts/devcheck.ts",
+    "tree": "tsx scripts/tree.ts",
+    "format": "biome check --write --unsafe .",
+    "lint:mcp": "tsx scripts/lint-mcp.ts",
+    "changelog:build": "tsx scripts/build-changelog.ts",
+    "changelog:check": "tsx scripts/build-changelog.ts --check",
+    "test": "vitest run",
+    "dev:stdio": "MCP_TRANSPORT_TYPE=stdio tsx --watch src/index.ts",
+    "dev:http": "MCP_TRANSPORT_TYPE=http tsx --watch src/index.ts",
+    "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",
+    "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
+  },
+  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cyanheads/obsidian-mcp-server.git"
   },
-  "bugs": {
-    "url": "https://github.com/cyanheads/obsidian-mcp-server/issues"
-  },
-  "homepage": "https://github.com/cyanheads/obsidian-mcp-server#readme",
-  "scripts": {
-    "build": "tsc && node --loader ts-node/esm scripts/make-executable.ts dist/index.js",
-    "start": "node dist/index.js",
-    "start:stdio": "MCP_LOG_LEVEL=debug MCP_TRANSPORT_TYPE=stdio node dist/index.js",
-    "start:http": "MCP_LOG_LEVEL=debug MCP_TRANSPORT_TYPE=http node dist/index.js",
-    "rebuild": "npx ts-node --esm scripts/clean.ts && npm run build",
-    "fetch:spec": "npx ts-node --esm scripts/fetch-openapi-spec.ts",
-    "docs:generate": "typedoc --tsconfig ./tsconfig.typedoc.json",
-    "tree": "npx ts-node --esm scripts/tree.ts",
-    "format": "prettier --write \"**/*.{ts,js,json,md,html,css}\"",
-    "inspect": "mcp-inspector --config mcp.json",
-    "inspect:stdio": "mcp-inspector --config mcp.json --server obsidian-mcp-server-stdio",
-    "inspect:http": "mcp-inspector --config mcp.json --server obsidian-mcp-server-http"
-  },
-  "dependencies": {
-    "@hono/node-server": "^1.14.4",
-    "@modelcontextprotocol/inspector": "^0.14.3",
-    "@modelcontextprotocol/sdk": "^1.13.0",
-    "@types/sanitize-html": "^2.16.0",
-    "@types/validator": "13.15.2",
-    "axios": "^1.10.0",
-    "chrono-node": "2.8.0",
-    "date-fns": "^4.1.0",
-    "dotenv": "^16.5.0",
-    "hono": "^4.8.2",
-    "ignore": "^7.0.5",
-    "jose": "^6.0.11",
-    "js-yaml": "^4.1.0",
-    "openai": "^5.6.0",
-    "partial-json": "^0.1.7",
-    "sanitize-html": "^2.17.0",
-    "tiktoken": "^1.0.21",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.8.3",
-    "validator": "13.15.15",
-    "winston": "^3.17.0",
-    "winston-transport": "^4.9.0",
-    "zod": "^3.25.67"
-  },
-  "keywords": [
-    "mcp",
-    "model-context-protocol",
-    "obsidian",
-    "obsidian-md",
-    "ai",
-    "llm",
-    "agent",
-    "automation",
-    "api",
-    "server",
-    "typescript",
-    "knowledge-management",
-    "note-taking",
-    "rest-api",
-    "integration"
-  ],
-  "author": "Casey Hand @cyanheads",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@cyanheads/mcp-ts-core": "^0.7.5",
+    "pino-pretty": "^13.1.3"
   },
   "devDependencies": {
-    "@types/js-yaml": "^4.0.9",
-    "@types/node": "^24.0.3",
-    "prettier": "^3.5.3",
-    "typedoc": "^0.28.5"
+    "@biomejs/biome": "^2.4.7",
+    "@types/node": "^25.6.0",
+    "depcheck": "^1.4.7",
+    "ignore": "^7.0.5",
+    "tsc-alias": "^1.8.16",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
   }
 }
