@@ -20,7 +20,7 @@ body:
     id: version
     attributes:
       label: Server version
-      placeholder: "0.1.0"
+      placeholder: "3.0.0"
     validations:
       required: true
 

@@ -1,0 +1,154 @@
+/**
+ * @fileoverview Handler tests for obsidian_manage_frontmatter (get/set/delete).
+ * @module tests/tools/obsidian-manage-frontmatter.test
+ */
+
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it } from 'vitest';
+import { obsidianManageFrontmatter } from '@/mcp-server/tools/definitions/obsidian-manage-frontmatter.tool.js';
+import { setupHarness } from '../helpers.js';
+
+const harness = setupHarness();
+
+const noteJson = (content: string, frontmatter: Record<string, unknown>) => ({
+  path: 'N.md',
+  content,
+  frontmatter,
+  tags: [],
+  stat: { ctime: 0, mtime: 0, size: content.length },
+});
+
+describe('obsidian_manage_frontmatter / get', () => {
+  it('returns the value when the key exists', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('body', { priority: 5 }), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const out = await obsidianManageFrontmatter.handler(
+      obsidianManageFrontmatter.input.parse({
+        operation: 'get',
+        target: { type: 'path', path: 'N.md' },
+        key: 'priority',
+      }),
+      createMockContext(),
+    );
+
+    if (out.result.operation !== 'get') throw new Error('expected get branch');
+    expect(out.result.exists).toBe(true);
+    expect(out.result.value).toBe(5);
+  });
+
+  it('reports exists=false when the key is absent', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('body', {}), { headers: { 'content-type': 'application/json' } });
+
+    const out = await obsidianManageFrontmatter.handler(
+      obsidianManageFrontmatter.input.parse({
+        operation: 'get',
+        target: { type: 'path', path: 'N.md' },
+        key: 'priority',
+      }),
+      createMockContext(),
+    );
+    if (out.result.operation !== 'get') throw new Error('expected get branch');
+    expect(out.result.exists).toBe(false);
+    expect(out.result.value).toBeNull();
+  });
+});
+
+describe('obsidian_manage_frontmatter / set', () => {
+  it('PATCHes the frontmatter field with JSON content type and refetches', async () => {
+    let seenHeaders: Record<string, string> = {};
+    let seenBody = '';
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'PATCH' })
+      .reply((opts) => {
+        seenHeaders = (opts.headers as Record<string, string>) ?? {};
+        seenBody = String(opts.body ?? '');
+        return { statusCode: 200, data: '' };
+      });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('body', { priority: 9 }), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const out = await obsidianManageFrontmatter.handler(
+      obsidianManageFrontmatter.input.parse({
+        operation: 'set',
+        target: { type: 'path', path: 'N.md' },
+        key: 'priority',
+        value: 9,
+      }),
+      createMockContext(),
+    );
+
+    expect(seenHeaders.operation ?? seenHeaders.Operation).toBe('replace');
+    expect(seenHeaders['target-type'] ?? seenHeaders['Target-Type']).toBe('frontmatter');
+    expect(seenHeaders['content-type'] ?? seenHeaders['Content-Type']).toBe('application/json');
+    expect(seenBody).toBe('9');
+    if (out.result.operation !== 'set') throw new Error('expected set branch');
+    expect(out.result.frontmatter).toEqual({ priority: 9 });
+  });
+
+  it('throws InvalidParams when value is missing for set', async () => {
+    await expect(
+      obsidianManageFrontmatter.handler(
+        obsidianManageFrontmatter.input.parse({
+          operation: 'set',
+          target: { type: 'path', path: 'N.md' },
+          key: 'priority',
+        }),
+        createMockContext(),
+      ),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+  });
+});
+
+describe('obsidian_manage_frontmatter / delete', () => {
+  it('reads, strips the key, writes the file, and reports the post-state frontmatter', async () => {
+    const before = ['---', 'priority: 5', 'author: casey', '---', '', 'body'].join('\n');
+    let putBody = '';
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(before, { priority: 5, author: 'casey' }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
+      .reply((opts) => {
+        putBody = String(opts.body ?? '');
+        return { statusCode: 200, data: '' };
+      });
+    // Refetch after write
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(putBody || 'body', { author: 'casey' }), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const out = await obsidianManageFrontmatter.handler(
+      obsidianManageFrontmatter.input.parse({
+        operation: 'delete',
+        target: { type: 'path', path: 'N.md' },
+        key: 'priority',
+      }),
+      createMockContext(),
+    );
+
+    expect(putBody).not.toContain('priority:');
+    if (out.result.operation !== 'delete') throw new Error('expected delete branch');
+    expect(out.result.frontmatter).toEqual({ author: 'casey' });
+  });
+});

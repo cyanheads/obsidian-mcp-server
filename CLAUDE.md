@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** obsidian-mcp-server
-**Version:** 0.1.0
+**Version:** 3.0.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -31,125 +31,145 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
-- **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
-- **Check `ctx.elicit` / `ctx.sample`** for presence before calling.
-- **Secrets in env vars only** — never hardcoded.
+- **Check `ctx.elicit`** for presence before calling — used by `obsidian_delete_note` to confirm destructive ops.
+- **All Obsidian access goes through `getObsidianService()`.** No direct `fetch()` calls to the Local REST API in tools/resources — the service centralizes auth, TLS, timeouts, and `ctx.signal` propagation.
+- **Secrets in env vars only.** `OBSIDIAN_API_KEY` is required; never hardcoded.
+- **`obsidian_execute_command` is opt-in.** Registered only when `OBSIDIAN_ENABLE_COMMANDS=true` — Obsidian commands are opaque and can be destructive.
 
 ---
 
 ## Patterns
 
-### Tool
+### Tool — `obsidian_list_tags`
+
+A small read-only tool that wraps a single upstream endpoint, normalizes the response into the output schema, and renders a markdown twin in `format()`.
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
-  input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
-  }),
+export const obsidianListTags = tool('obsidian_list_tags', {
+  description:
+    'List every tag found across the vault, with usage counts. Includes hierarchical parents — `work/tasks` contributes to both `work` and `work/tasks`.',
+  annotations: { readOnlyHint: true, idempotentHint: true },
+  input: z.object({}),
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    tags: z
+      .array(
+        z.object({
+          name: z.string().describe('Tag name without the leading `#`.'),
+          count: z.number().describe('Usage count across the vault.'),
+        }).describe('A tag with its usage count.'),
+      )
+      .describe('All tags in the vault, in upstream-provided order.'),
   }),
-  auth: ['inventory:read'],
+  auth: ['tool:obsidian_list_tags:read'],
 
-  async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+  async handler(_input, ctx) {
+    const svc = getObsidianService();
+    const tags = await svc.listTags(ctx);
+    return { tags: tags.map((t) => ({ name: t.tag, count: t.count })) };
   },
 
   // format() populates content[] — the markdown twin of structuredContent.
   // Different clients read different surfaces (Claude Code → structuredContent,
   // Claude Desktop → content[]); both must carry the same data.
   // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
-});
-```
-
-### Resource
-
-```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw new Error(`Item ${params.itemId} not found`);
-    return item;
+  format: (result) => {
+    if (result.tags.length === 0) {
+      return [{ type: 'text', text: '_No tags found in the vault._' }];
+    }
+    const lines = [`**${result.tags.length} tags**`, ''];
+    for (const t of result.tags) lines.push(`- \`#${t.name}\` (${t.count})`);
+    return [{ type: 'text', text: lines.join('\n') }];
   },
 });
 ```
 
-### Prompt
+For a destructive tool with optional human-in-the-loop confirmation, see `obsidian-delete-note.tool.ts` — it uses `ctx.elicit` when present and falls back to the `destructiveHint` annotation otherwise.
+
+### Resource — `obsidian://status`
 
 ```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
+import { resource, z } from '@cyanheads/mcp-ts-core';
+import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
+export const obsidianStatus = resource('obsidian://status', {
+  name: 'obsidian-status',
+  description:
+    'Server reachability, plugin version, and auth status of the Obsidian Local REST API.',
+  mimeType: 'application/json',
+  params: z.object({}),
+  output: z.object({
+    status: z.string().describe('Upstream reported status string.'),
+    service: z.string().describe('Service identifier returned by the plugin.'),
+    authenticated: z.boolean().describe('Whether the configured OBSIDIAN_API_KEY is recognized.'),
   }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
+  auth: ['resource:obsidian-status:read'],
+  async handler(_params, ctx) {
+    const svc = getObsidianService();
+    return await svc.getStatus(ctx);
+  },
 });
 ```
 
-### Server config
+For a parameterized resource, see `obsidian-vault-note.resource.ts` (`obsidian://vault/{+path}`) — the `{+path}` segment captures everything after `/vault/` including slashes.
+
+### Prompt
+
+This server exposes a CRUD/search surface; no recurring multi-turn pattern benefits from a structured prompt template, so `allPromptDefinitions` is intentionally empty. Add one with `prompt('name', { ... })` if a workflow emerges.
+
+### Server config — `OBSIDIAN_*` env vars
 
 ```ts
 // src/config/server-config.ts — lazy-parsed, separate from framework config
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
+const envBoolean = z.preprocess((val) => {
+  if (val === undefined || val === null || val === '') return;
+  if (typeof val === 'boolean') return val;
+  return String(val).toLowerCase().trim() === 'true' || val === '1';
+}, z.boolean());
+
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
+  apiKey: z.string().min(1).describe('Bearer token for the Obsidian Local REST API plugin.'),
+  baseUrl: z.string().url().default('https://127.0.0.1:27124'),
+  verifySsl: envBoolean.default(false),
+  requestTimeoutMs: z.coerce.number().int().positive().default(30_000),
+  enableCommands: envBoolean.default(false),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
+    apiKey: 'OBSIDIAN_API_KEY',
+    baseUrl: 'OBSIDIAN_BASE_URL',
+    verifySsl: 'OBSIDIAN_VERIFY_SSL',
+    requestTimeoutMs: 'OBSIDIAN_REQUEST_TIMEOUT_MS',
+    enableCommands: 'OBSIDIAN_ENABLE_COMMANDS',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so validation errors name the actual variable (`MY_API_KEY`) rather than the internal path (`apiKey`). It throws a `ConfigurationError` the framework catches and prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so validation errors name the actual variable (`OBSIDIAN_API_KEY`) rather than the internal path (`apiKey`). It throws a `ConfigurationError` the framework catches and prints as a clean startup banner.
 
 ---
 
 ## Context
 
-Handlers receive a unified `ctx` object. Key properties:
+Handlers receive a unified `ctx` object. Properties this server actually uses:
 
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.elicit` | Ask user for structured input. **Check for presence first:** `if (ctx.elicit) { ... }` |
-| `ctx.sample` | Request LLM completion from the client. **Check for presence first:** `if (ctx.sample) { ... }` |
-| `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.progress` | Task progress (present when `task: true`) — `.setTotal(n)`, `.increment()`, `.update(message)`. |
-| `ctx.requestId` | Unique request ID. |
+| `ctx.elicit` | Optional human-in-the-loop confirmation. **Check for presence first** — used by `obsidian_delete_note` to confirm destructive operations when the client supports elicitation. |
+| `ctx.signal` | `AbortSignal` propagated to the Local REST API client so per-request timeouts and client cancellations cut off in-flight HTTP. |
+| `ctx.requestId` | Unique request ID — surfaces in log lines for correlation. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio. |
+
+The framework also provides `ctx.state`, `ctx.sample`, and `ctx.progress`. They aren't used by this server — Obsidian is single-vault and stateless from the server's perspective, so per-tenant KV and progress streams aren't needed. See the framework `CLAUDE.md` for the full surface.
 
 ---
 
@@ -180,20 +200,27 @@ Plain `Error` is fine for most cases. Use factories when the error code matters.
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() entry point — registers tools/resources, inits Obsidian service
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # OBSIDIAN_* env vars (Zod schema)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    obsidian/
+      obsidian-service.ts               # Local REST API client (init/accessor pattern)
+      frontmatter-ops.ts                # YAML frontmatter parse/serialize/edit helpers
+      section-extractor.ts              # Heading/block/frontmatter section extraction
+      types.ts                          # Domain types (NoteJson, NoteTarget, etc.)
   mcp-server/
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
+      _shared/schemas.ts                # Shared TargetSchema + SectionSchema reused across tools
+      index.ts                          # baseToolDefinitions[] + conditional obsidianExecuteCommand
+      obsidian-*.tool.ts                # 14 tool definitions (13 base + 1 opt-in)
     resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
+      index.ts                          # allResourceDefinitions[]
+      obsidian-vault-note.resource.ts   # obsidian://vault/{+path}
+      obsidian-tags.resource.ts         # obsidian://tags
+      obsidian-status.resource.ts       # obsidian://status
     prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      index.ts                          # allPromptDefinitions = [] (intentionally empty)
 ```
 
 ---
@@ -229,15 +256,17 @@ Available skills:
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
 | `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
-| `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
+| `release-and-publish` | Ship a release end-to-end across npm, MCP Registry, and GHCR |
 | `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |
+| `migrate-mcp-ts-template` | Migrate a `mcp-ts-template` fork to depend on `@cyanheads/mcp-ts-core` as a package |
 | `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
 | `report-issue-local` | File a bug or feature request against this server's own repo via `gh` CLI |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
 | `api-config` | AppConfig, parseConfig, env vars |
 | `api-context` | Context interface, logger, state, progress |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
+| `api-linter` | MCP definition linter rule reference (`bun run lint:mcp` failures) |
 | `api-services` | LLM, Speech, Graph services |
 | `api-testing` | createMockContext, test patterns |
 | `api-utils` | Formatting, parsing, security, pagination, scheduling |
@@ -249,23 +278,24 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Commands
 
-**Runtime:** Scripts use `tsx` — both `npm run <cmd>` and `bun run <cmd>` work. Use whichever package manager you have; `bun` is slightly faster for invoking scripts but not required.
+**Runtime:** Scripts use `tsx` — both `bun run <cmd>` and `npm run <cmd>` work. `bun` is preferred (faster startup, native TS).
 
 | Command | Purpose |
 |:--------|:--------|
-| `npm run build` | Compile TypeScript |
-| `npm run rebuild` | Clean + build |
-| `npm run clean` | Remove build artifacts |
-| `npm run devcheck` | Lint + format + typecheck + security + changelog sync |
-| `npm run tree` | Generate directory structure doc |
-| `npm run format` | Auto-fix formatting |
-| `npm test` | Run tests |
-| `npm run dev:stdio` | Dev mode (stdio) |
-| `npm run dev:http` | Dev mode (HTTP) |
-| `npm run start:stdio` | Production mode (stdio) |
-| `npm run start:http` | Production mode (HTTP) |
-| `npm run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
-| `npm run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
+| `bun run build` | Compile TypeScript |
+| `bun run rebuild` | Clean + build |
+| `bun run clean` | Remove build artifacts |
+| `bun run devcheck` | Lint + format + typecheck + security + changelog sync |
+| `bun run tree` | Generate `docs/tree.md` |
+| `bun run format` | Auto-fix formatting (Biome) |
+| `bun run lint:mcp` | Validate MCP definitions against the linter rules |
+| `bun run test` | Run Vitest tests |
+| `bun run dev:stdio` | Dev mode (stdio, watch) |
+| `bun run dev:http` | Dev mode (HTTP, watch) |
+| `bun run start:stdio` | Production mode (stdio) — requires `bun run build` first |
+| `bun run start:http` | Production mode (HTTP) — requires `bun run build` first |
+| `bun run changelog:build` | Regenerate `CHANGELOG.md` rollup from `changelog/<minor>.x/*.md` |
+| `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 
 ---
 
@@ -313,6 +343,6 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
 - [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
-- [ ] Registered in `createApp()` arrays (directly or via barrel exports)
+- [ ] Registered in `createApp()` arrays (directly or via barrel exports). Conditional registration (e.g. `obsidianExecuteCommand` behind `OBSIDIAN_ENABLE_COMMANDS`) happens in `src/index.ts`, not in the barrel
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
-- [ ] `npm run devcheck` passes
+- [ ] `bun run devcheck` passes

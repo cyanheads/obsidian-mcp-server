@@ -38,7 +38,8 @@ ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 LABEL org.opencontainers.image.title="obsidian-mcp-server"
-LABEL org.opencontainers.image.description=""
+LABEL org.opencontainers.image.description="MCP server for Obsidian vaults — read, write, search, and surgically edit notes, tags, and frontmatter via the Local REST API plugin. STDIO or Streamable HTTP."
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/obsidian-mcp-server"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Copy dependency manifests

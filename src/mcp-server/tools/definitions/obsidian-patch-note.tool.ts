@@ -1,0 +1,73 @@
+/**
+ * @fileoverview obsidian_patch_note — surgical edit (`append` / `prepend` /
+ * `replace`) of a heading, block reference, or frontmatter field. Uses the
+ * upstream Local REST API v3 PATCH protocol.
+ * @module mcp-server/tools/definitions/obsidian-patch-note.tool
+ */
+
+import { tool, z } from '@cyanheads/mcp-ts-core';
+import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import {
+  ContentTypeSchema,
+  PatchOptionsSchema,
+  SectionSchema,
+  TargetSchema,
+} from './_shared/schemas.js';
+
+export const obsidianPatchNote = tool('obsidian_patch_note', {
+  description:
+    'Surgical edit of a heading, block reference, or frontmatter field. Choose `operation: "append"` to add after the section, `"prepend"` to add before, or `"replace"` to swap it out. Use `obsidian_get_note` with `format: "document-map"` to discover available headings, blocks, and frontmatter fields. Nested headings need `Parent::Child` syntax.',
+  annotations: { destructiveHint: true },
+  input: z.object({
+    target: TargetSchema.describe('Where the note lives.'),
+    section: SectionSchema.describe('Which heading/block/frontmatter field to edit.'),
+    operation: z
+      .enum(['append', 'prepend', 'replace'])
+      .describe('How to apply the content relative to the section.'),
+    content: z
+      .string()
+      .describe('Body to insert/replace. Markdown unless `contentType` is `json`.'),
+    contentType: ContentTypeSchema,
+    patchOptions: PatchOptionsSchema.describe(
+      'Optional flags: createTargetIfMissing, applyIfContentPreexists, trimTargetWhitespace.',
+    ),
+  }),
+  output: z.object({
+    path: z.string().describe('Resolved vault-relative path of the note.'),
+    section: SectionSchema.describe('Echoed section locator.'),
+    operation: z
+      .enum(['append', 'prepend', 'replace'])
+      .describe('Echoed operation that was applied.'),
+  }),
+  auth: ['tool:obsidian_patch_note:write'],
+
+  async handler(input, ctx) {
+    const svc = getObsidianService();
+    const { target } = input;
+
+    await svc.patchNote(ctx, target, input.content, {
+      operation: input.operation,
+      targetType: input.section.type,
+      target: input.section.target,
+      targetDelimiter: input.section.type === 'heading' ? '::' : undefined,
+      createTargetIfMissing: input.patchOptions?.createTargetIfMissing,
+      applyIfContentPreexists: input.patchOptions?.applyIfContentPreexists,
+      trimTargetWhitespace: input.patchOptions?.trimTargetWhitespace,
+      contentType: input.contentType,
+    });
+
+    const path = await svc.resolvePath(ctx, target);
+    return { path, section: input.section, operation: input.operation };
+  },
+
+  format: (result) => [
+    {
+      type: 'text',
+      text: [
+        `**Patched ${result.path}**`,
+        `*Operation:* ${result.operation}`,
+        `*Section:* ${result.section.type} → ${result.section.target}`,
+      ].join('\n'),
+    },
+  ],
+});

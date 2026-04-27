@@ -1,18 +1,31 @@
 #!/usr/bin/env node
 /**
- * @fileoverview obsidian-mcp-server MCP server entry point.
+ * @fileoverview obsidian-mcp-server entry point. Initializes the Obsidian
+ * Local REST API service in `setup()` so handlers can reach it via
+ * `getObsidianService()`.
  * @module index
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
-import { echoPrompt } from './mcp-server/prompts/definitions/echo.prompt.js';
-import { echoResource } from './mcp-server/resources/definitions/echo.resource.js';
-import { echoAppUiResource } from './mcp-server/resources/definitions/echo-app-ui.app-resource.js';
-import { echoTool } from './mcp-server/tools/definitions/echo.tool.js';
-import { echoAppTool } from './mcp-server/tools/definitions/echo-app.app-tool.js';
+import { getServerConfig } from '@/config/server-config.js';
+import { allPromptDefinitions } from '@/mcp-server/prompts/definitions/index.js';
+import { allResourceDefinitions } from '@/mcp-server/resources/definitions/index.js';
+import {
+  baseToolDefinitions,
+  obsidianExecuteCommand,
+} from '@/mcp-server/tools/definitions/index.js';
+import { initObsidianService } from '@/services/obsidian/obsidian-service.js';
+
+const config = getServerConfig();
+const tools = config.enableCommands
+  ? [...baseToolDefinitions, obsidianExecuteCommand]
+  : baseToolDefinitions;
 
 await createApp({
-  tools: [echoTool, echoAppTool],
-  resources: [echoResource, echoAppUiResource],
-  prompts: [echoPrompt],
+  tools,
+  resources: allResourceDefinitions,
+  prompts: allPromptDefinitions,
+  setup() {
+    initObsidianService(config);
+  },
 });
