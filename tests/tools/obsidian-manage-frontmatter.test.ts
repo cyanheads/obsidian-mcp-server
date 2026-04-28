@@ -114,14 +114,20 @@ describe('obsidian_manage_frontmatter / set', () => {
 });
 
 describe('obsidian_manage_frontmatter / delete', () => {
-  it('reads, strips the key, writes the file, and reports the post-state frontmatter', async () => {
+  it('reads, strips the key, writes the file, and projects the post-state frontmatter without a refetch', async () => {
     const before = ['---', 'priority: 5', 'author: casey', '---', '', 'body'].join('\n');
     let putBody = '';
+    let getCount = 0;
     harness
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson(before, { priority: 5, author: 'casey' }), {
-        headers: { 'content-type': 'application/json' },
+      .reply(() => {
+        getCount++;
+        return {
+          statusCode: 200,
+          data: noteJson(before, { priority: 5, author: 'casey' }),
+          responseOptions: { headers: { 'content-type': 'application/json' } },
+        };
       });
     harness
       .current()
@@ -129,13 +135,6 @@ describe('obsidian_manage_frontmatter / delete', () => {
       .reply((opts) => {
         putBody = String(opts.body ?? '');
         return { statusCode: 200, data: '' };
-      });
-    // Refetch after write
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson(putBody || 'body', { author: 'casey' }), {
-        headers: { 'content-type': 'application/json' },
       });
 
     const out = await obsidianManageFrontmatter.handler(
@@ -147,6 +146,7 @@ describe('obsidian_manage_frontmatter / delete', () => {
       createMockContext(),
     );
 
+    expect(getCount).toBe(1);
     expect(putBody).not.toContain('priority:');
     if (out.result.operation !== 'delete') throw new Error('expected delete branch');
     expect(out.result.frontmatter).toEqual({ author: 'casey' });

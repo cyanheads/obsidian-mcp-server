@@ -112,13 +112,14 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     if (newContent !== note.content) {
       await svc.writeNote(ctx, target, newContent, 'markdown');
     }
-    const after = await svc.getNoteJson(ctx, target);
+    const projected = { ...note.frontmatter };
+    delete projected[input.key];
     return {
       result: {
         operation: 'delete' as const,
-        path: after.path,
+        path: note.path,
         key: input.key,
-        frontmatter: after.frontmatter,
+        frontmatter: projected,
       },
     };
   },
