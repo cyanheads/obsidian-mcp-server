@@ -8,6 +8,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import type { NoteTarget } from '@/services/obsidian/types.js';
+import { withCaseFallback } from './_shared/suggest-paths.js';
 
 export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
   description:
@@ -27,7 +29,7 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
       .describe('Open in a new leaf (split pane) instead of the active one.'),
   }),
   output: z.object({
-    path: z.string().describe('Vault-relative path that was opened.'),
+    path: z.string().describe('Resolved vault-relative path that was opened.'),
     opened: z.boolean().describe('True when the open call succeeded.'),
     createdIfMissing: z
       .boolean()
@@ -37,28 +39,43 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
 
   async handler(input, ctx) {
     const svc = getObsidianService();
+    const target: NoteTarget = { type: 'path', path: input.path };
 
+    let resolvedPath = input.path;
     let preExisted = true;
+
     try {
-      await svc.getNoteJson(ctx, { type: 'path', path: input.path });
+      const { resolvedPath: rp } = await withCaseFallback(ctx, svc, target, (t) =>
+        svc.getNoteJson(ctx, t),
+      );
+      resolvedPath = rp ?? input.path;
     } catch (err) {
       if (!(err instanceof McpError) || err.code !== JsonRpcErrorCode.NotFound) {
         throw err;
       }
       if (input.failIfMissing) {
+        const suggestions = (err.data?.suggestions as string[]) ?? [];
+        const hint =
+          suggestions.length > 0
+            ? ` Did you mean: ${suggestions.map((s) => `"${s}"`).join(', ')}?`
+            : '';
         throw notFound(
-          `Cannot open '${input.path}' — file does not exist. Pass failIfMissing: false to create on open.`,
-          { path: input.path },
+          `Cannot open '${input.path}' — file does not exist.${hint} Pass failIfMissing: false to create on open.`,
+          {
+            path: input.path,
+            ...(suggestions.length > 0 ? { suggestions } : {}),
+          },
+          { cause: err },
         );
       }
       preExisted = false;
     }
 
-    await svc.openInUi(ctx, input.path, { newLeaf: input.newLeaf });
+    await svc.openInUi(ctx, resolvedPath, { newLeaf: input.newLeaf });
     return {
-      path: input.path,
+      path: resolvedPath,
       opened: true,
-      createdIfMissing: input.failIfMissing ? false : !preExisted,
+      createdIfMissing: !preExisted,
     };
   },
 

@@ -9,6 +9,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { forbidden } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { TargetSchema } from './_shared/schemas.js';
+import { withCaseFallback } from './_shared/suggest-paths.js';
 
 export const obsidianDeleteNote = tool('obsidian_delete_note', {
   description:
@@ -27,9 +28,17 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
     const svc = getObsidianService();
     const { target } = input;
 
-    // Resolve the path before deletion so we can report it back even when the
-    // upstream returns 204 with no body.
-    const path = await svc.resolvePath(ctx, target);
+    // Resolve the canonical path before showing the elicit prompt so the user
+    // sees the file we'll actually delete (case-fallback may correct typos).
+    let path: string;
+    if (target.type === 'path') {
+      const { resolvedPath } = await withCaseFallback(ctx, svc, target, (t) =>
+        svc.getNoteJson(ctx, t),
+      );
+      path = resolvedPath ?? target.path;
+    } else {
+      path = await svc.resolvePath(ctx, target);
+    }
 
     if (ctx.elicit) {
       const confirmed = await ctx.elicit(
@@ -43,7 +52,7 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
       }
     }
 
-    await svc.deleteNote(ctx, target);
+    await svc.deleteNote(ctx, { type: 'path', path });
     return { path, deleted: true };
   },
 

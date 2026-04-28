@@ -9,6 +9,7 @@ import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { extractSection } from '@/services/obsidian/section-extractor.js';
 import { SectionSchema, TargetSchema } from './_shared/schemas.js';
+import { withCaseFallback } from './_shared/suggest-paths.js';
 
 const StatSchema = z.object({
   ctime: z.number().describe('Created time, ms since epoch.'),
@@ -88,15 +89,21 @@ export const obsidianGetNote = tool('obsidian_get_note', {
 
     if (input.format === 'content') {
       if (target.type === 'path') {
-        const content = await svc.getNoteContent(ctx, target);
-        return { result: { format: 'content' as const, path: target.path, content } };
+        const { result: content, resolvedPath } = await withCaseFallback(ctx, svc, target, (t) =>
+          svc.getNoteContent(ctx, t),
+        );
+        return {
+          result: { format: 'content' as const, path: resolvedPath ?? target.path, content },
+        };
       }
       const note = await svc.getNoteJson(ctx, target);
       return { result: { format: 'content' as const, path: note.path, content: note.content } };
     }
 
     if (input.format === 'full') {
-      const note = await svc.getNoteJson(ctx, target);
+      const { result: note } = await withCaseFallback(ctx, svc, target, (t) =>
+        svc.getNoteJson(ctx, t),
+      );
       return {
         result: {
           format: 'full' as const,
@@ -110,6 +117,20 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     }
 
     if (input.format === 'document-map') {
+      if (target.type === 'path') {
+        const { result: map, resolvedPath } = await withCaseFallback(ctx, svc, target, (t) =>
+          svc.getDocumentMap(ctx, t),
+        );
+        return {
+          result: {
+            format: 'document-map' as const,
+            path: resolvedPath ?? target.path,
+            headings: map.headings,
+            blocks: map.blocks,
+            frontmatterFields: map.frontmatterFields,
+          },
+        };
+      }
       const [map, path] = await Promise.all([
         svc.getDocumentMap(ctx, target),
         svc.resolvePath(ctx, target),
@@ -130,7 +151,9 @@ export const obsidianGetNote = tool('obsidian_get_note', {
         format: input.format,
       });
     }
-    const note = await svc.getNoteJson(ctx, target);
+    const { result: note } = await withCaseFallback(ctx, svc, target, (t) =>
+      svc.getNoteJson(ctx, t),
+    );
     const value = extractSection(note, input.section);
     return {
       result: {

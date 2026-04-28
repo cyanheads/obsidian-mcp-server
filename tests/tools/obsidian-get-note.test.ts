@@ -181,6 +181,55 @@ describe('obsidian_get_note / format: section', () => {
   });
 });
 
+describe('obsidian_get_note / case-insensitive fallback', () => {
+  it('resolves a case-mismatch path and echoes the canonical name (content)', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Notes/MyNote.md', method: 'GET' })
+      .reply(404, { message: 'absent' });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Notes/', method: 'GET' })
+      .reply(200, { files: ['mynote.md'] });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Notes/mynote.md', method: 'GET' })
+      .reply(200, '# canonical body');
+
+    const input = obsidianGetNote.input.parse({
+      format: 'content',
+      target: { type: 'path', path: 'Notes/MyNote.md' },
+    });
+    const out = await obsidianGetNote.handler(input, createMockContext());
+    if (out.result.format !== 'content') throw new Error('expected content branch');
+    expect(out.result.path).toBe('Notes/mynote.md');
+    expect(out.result.content).toBe('# canonical body');
+  });
+});
+
+describe('obsidian_get_note / not-found suggestions', () => {
+  it('enriches NotFound with `did you mean` candidates from the parent dir', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Notes/Missing.md', method: 'GET' })
+      .reply(404, { message: 'absent' });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Notes/', method: 'GET' })
+      .reply(200, { files: ['Missing', 'other.md'] });
+
+    const input = obsidianGetNote.input.parse({
+      format: 'content',
+      target: { type: 'path', path: 'Notes/Missing.md' },
+    });
+    await expect(obsidianGetNote.handler(input, createMockContext())).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: expect.stringContaining('Did you mean: "Notes/Missing"?'),
+      data: { suggestions: ['Notes/Missing'] },
+    });
+  });
+});
+
 describe('obsidian_get_note / format()', () => {
   it('renders content', () => {
     const blocks = obsidianGetNote.format!({
