@@ -77,12 +77,15 @@ describe('obsidian_open_in_ui', () => {
     });
   });
 
-  it('reports createdIfMissing=true when file was absent and failIfMissing=false', async () => {
+  it('skips the existence probe when failIfMissing=false and reports createdIfMissing=true', async () => {
+    let getCalls = 0;
     harness
       .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(404, { message: 'absent' });
-    harness.current().pool.intercept({ path: '/vault/', method: 'GET' }).reply(200, { files: [] });
+      .pool.intercept({ path: (p) => (p as string).startsWith('/vault/'), method: 'GET' })
+      .reply(() => {
+        getCalls++;
+        return { statusCode: 200, data: '' };
+      });
     harness
       .current()
       .pool.intercept({ path: (p) => (p as string).startsWith('/open/N.md'), method: 'POST' })
@@ -92,6 +95,7 @@ describe('obsidian_open_in_ui', () => {
       obsidianOpenInUi.input.parse({ path: 'N.md', failIfMissing: false }),
       createMockContext(),
     );
+    expect(getCalls).toBe(0);
     expect(out.createdIfMissing).toBe(true);
     expect(out.path).toBe('N.md');
   });

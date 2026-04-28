@@ -41,8 +41,14 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
     const svc = getObsidianService();
     const target: NoteTarget = { type: 'path', path: input.path };
 
+    if (!input.failIfMissing) {
+      // Caller opted into "open or create" — skip the existence probe and let
+      // Obsidian create the file on open.
+      await svc.openInUi(ctx, input.path, { newLeaf: input.newLeaf });
+      return { path: input.path, opened: true, createdIfMissing: true };
+    }
+
     let resolvedPath = input.path;
-    let preExisted = true;
 
     try {
       const { resolvedPath: rp } = await withCaseFallback(ctx, svc, target, (t) =>
@@ -53,29 +59,26 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
       if (!(err instanceof McpError) || err.code !== JsonRpcErrorCode.NotFound) {
         throw err;
       }
-      if (input.failIfMissing) {
-        const suggestions = (err.data?.suggestions as string[]) ?? [];
-        const hint =
-          suggestions.length > 0
-            ? ` Did you mean: ${suggestions.map((s) => `"${s}"`).join(', ')}?`
-            : '';
-        throw notFound(
-          `Cannot open '${input.path}' — file does not exist.${hint} Pass failIfMissing: false to create on open.`,
-          {
-            path: input.path,
-            ...(suggestions.length > 0 ? { suggestions } : {}),
-          },
-          { cause: err },
-        );
-      }
-      preExisted = false;
+      const suggestions = (err.data?.suggestions as string[]) ?? [];
+      const hint =
+        suggestions.length > 0
+          ? ` Did you mean: ${suggestions.map((s) => `"${s}"`).join(', ')}?`
+          : '';
+      throw notFound(
+        `Cannot open '${input.path}' — file does not exist.${hint} Pass failIfMissing: false to create on open.`,
+        {
+          path: input.path,
+          ...(suggestions.length > 0 ? { suggestions } : {}),
+        },
+        { cause: err },
+      );
     }
 
     await svc.openInUi(ctx, resolvedPath, { newLeaf: input.newLeaf });
     return {
       path: resolvedPath,
       opened: true,
-      createdIfMissing: !preExisted,
+      createdIfMissing: false,
     };
   },
 
