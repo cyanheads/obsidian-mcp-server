@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-04-27 00:10:48
+Generated on: 2026-04-28 00:25:37
 
 ```text
 obsidian-mcp-server/
@@ -14,10 +14,9 @@ obsidian-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
-│   ├── 0.1.x/
+│   ├── 3.0.x/
 │   └── template.md
 ├── docs/
-│   ├── design.md
 │   └── openapi.yaml
 ├── scripts/
 │   ├── build-changelog.ts

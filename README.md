@@ -33,7 +33,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | `obsidian_manage_frontmatter` | Atomic `get` / `set` / `delete` on a single frontmatter key. |
 | `obsidian_manage_tags` | Add, remove, or list tags — reconciles frontmatter `tags:` and inline `#tag` syntax. |
 | `obsidian_delete_note` | Permanently delete a note. Elicits human confirmation when the client supports it. |
-| `obsidian_open_in_ui` | Open a file in the Obsidian app UI, with `failIfMissing` toggle. |
+| `obsidian_open_in_ui` | Open a file in the Obsidian app UI, with `failIfMissing` and `newLeaf` toggles. |
 | `obsidian_execute_command` | Execute an Obsidian command-palette command by ID. **Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`.** |
 
 ### `obsidian_get_note`
@@ -308,7 +308,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). |
 | `src/mcp-server/prompts` | Prompt definitions (currently empty — CRUD/search shape doesn't benefit from a structured template). |
 | `tests/` | Vitest tests mirroring `src/`. |
-| `docs/` | Design notes (`design.md`) and the upstream OpenAPI spec for the Local REST API plugin. |
+| `docs/` | Upstream OpenAPI spec for the Local REST API plugin and the generated `tree.md`. |
 | `changelog/` | Per-version release notes; `CHANGELOG.md` is the regenerated rollup. |
 
 ## Development guide
