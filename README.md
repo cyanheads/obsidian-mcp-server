@@ -181,25 +181,6 @@ Or with npx (no Bun required):
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "obsidian": {
-      "type": "stdio",
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "MCP_TRANSPORT_TYPE=stdio",
-        "-e", "OBSIDIAN_API_KEY=your-local-rest-api-key",
-        "ghcr.io/cyanheads/obsidian-mcp-server:latest"
-      ]
-    }
-  }
-}
-```
-
 For Streamable HTTP, set the transport and start the server:
 
 ```sh
