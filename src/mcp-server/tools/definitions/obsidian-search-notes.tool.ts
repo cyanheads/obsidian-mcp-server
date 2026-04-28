@@ -118,6 +118,10 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
   async handler(input, ctx) {
     const svc = getObsidianService();
 
+    if (input.pathPrefix && input.mode !== 'text') {
+      throw invalidParams('`pathPrefix` is only valid in text mode.', { mode: input.mode });
+    }
+
     if (input.mode === 'text') {
       if (!input.query) {
         throw invalidParams('`query` is required for text mode.', { mode: input.mode });

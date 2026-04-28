@@ -58,6 +58,22 @@ describe('obsidian_search_notes / text', () => {
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
   });
 
+  it('rejects pathPrefix when the mode is not text', async () => {
+    await expect(
+      obsidianSearchNotes.handler(
+        obsidianSearchNotes.input.parse({
+          mode: 'dataview',
+          query: 'TABLE x FROM ""',
+          pathPrefix: 'Projects/',
+        }),
+        createMockContext(),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      message: expect.stringContaining('pathPrefix'),
+    });
+  });
+
   it('caps hits at 100 and reports the overflow in `excluded`', async () => {
     const many = Array.from({ length: 105 }, (_, i) => ({
       filename: `n${i}.md`,
