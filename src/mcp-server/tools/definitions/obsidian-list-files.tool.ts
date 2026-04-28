@@ -6,7 +6,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 
 export const obsidianListFiles = tool('obsidian_list_files', {
@@ -44,6 +44,13 @@ export const obsidianListFiles = tool('obsidian_list_files', {
       .describe('Active filters that narrowed the listing, when any were applied.'),
   }),
   auth: ['tool:obsidian_list_files:read'],
+  errors: [
+    {
+      reason: 'regex_invalid',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The supplied `nameRegex` is not a valid ECMAScript regex.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();
@@ -73,9 +80,12 @@ export const obsidianListFiles = tool('obsidian_list_files', {
       try {
         re = new RegExp(input.nameRegex);
       } catch (err) {
-        throw invalidParams(`Invalid nameRegex: ${(err as Error).message}`, {
-          nameRegex: input.nameRegex,
-        });
+        throw ctx.fail(
+          'regex_invalid',
+          `Invalid nameRegex: ${(err as Error).message}`,
+          { nameRegex: input.nameRegex },
+          { cause: err },
+        );
       }
       filteredFiles = filteredFiles.filter((f) => re.test(f));
       filteredDirs = filteredDirs.filter((d) => re.test(d));

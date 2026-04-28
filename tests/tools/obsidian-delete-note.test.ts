@@ -50,7 +50,7 @@ describe('obsidian_delete_note', () => {
     expect(out.deleted).toBe(true);
   });
 
-  it('throws Forbidden and skips DELETE when the user declines elicit', async () => {
+  it('throws cancelled (InvalidRequest) and skips DELETE when the user declines elicit', async () => {
     let deleteCalls = 0;
     const elicit = vi.fn().mockResolvedValue({ action: 'reject' });
     harness
@@ -64,9 +64,12 @@ describe('obsidian_delete_note', () => {
     await expect(
       obsidianDeleteNote.handler(
         obsidianDeleteNote.input.parse({ target: { type: 'path', path: 'N.md' } }),
-        createMockContext({ elicit }),
+        createMockContext({ elicit, errors: obsidianDeleteNote.errors }),
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.Forbidden });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidRequest,
+      data: { reason: 'cancelled' },
+    });
     expect(deleteCalls).toBe(0);
   });
 
@@ -75,8 +78,11 @@ describe('obsidian_delete_note', () => {
     await expect(
       obsidianDeleteNote.handler(
         obsidianDeleteNote.input.parse({ target: { type: 'path', path: 'N.md' } }),
-        createMockContext({ elicit }),
+        createMockContext({ elicit, errors: obsidianDeleteNote.errors }),
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.Forbidden });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidRequest,
+      data: { reason: 'cancelled' },
+    });
   });
 });

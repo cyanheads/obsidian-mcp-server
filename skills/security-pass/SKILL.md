@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / sampling / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: audit
 ---
@@ -203,10 +203,10 @@ grep -rn "^let " src/services/
 
 What accidentally reaches the LLM, user, or observability sinks.
 
-**Look in:** `throw new McpError(...)` sites, `McpError.data` fields, output schemas, and every logging / telemetry surface — not just `ctx.log`.
+**Look in:** `throw new McpError(...)` and `ctx.fail(reason, msg, data)` sites, error factory calls (`notFound`, `httpErrorFromResponse`, …), `McpError.data` fields (the `data` arg flows through both paths), output schemas, and every logging / telemetry surface — not just `ctx.log`.
 
 ```bash
-grep -rn "new McpError" src/
+grep -rnE "new McpError|ctx\.fail\(|httpErrorFromResponse\(" src/
 grep -rnE "\b(ctx\.log|console\.(log|info|warn|error|debug)|logger\.)" src/
 grep -rnE "(Sentry\.|captureException|setTag|setContext|addBreadcrumb)" src/
 grep -rnE "(setAttribute|setAttributes|span\.)" src/  # OpenTelemetry
@@ -214,7 +214,8 @@ grep -rnE "(setAttribute|setAttributes|span\.)" src/  # OpenTelemetry
 
 **Check:**
 
-- Error `data` fields carry upstream response bodies, auth headers, stack traces?
+- Error `data` fields (whether passed via `ctx.fail(reason, msg, data)`, `new McpError(code, msg, data)`, or factory calls) carry upstream response bodies, auth headers, stack traces?
+- `httpErrorFromResponse` body capture sweeping in too much (default 500-byte cap is fine for most APIs but consider `captureBody: false` when the upstream returns auth-bearing payloads)?
 - Output schemas include token prefixes, internal IDs, session identifiers?
 - `format()` renders fields that shouldn't leave the server?
 - `ctx.log.info(msg, body)` where `body` is the raw request (may contain secrets)?
@@ -222,7 +223,7 @@ grep -rnE "(setAttribute|setAttributes|span\.)" src/  # OpenTelemetry
 - OpenTelemetry span attributes / Sentry breadcrumbs carry tokens, PII, or full request bodies?
 - Secret / token / HMAC comparisons use `===` or `==` instead of constant-time (`timingSafeEqual` / `crypto.timingSafeEqual`) — leaks length and prefix via timing?
 
-**Smell:** `throw new McpError(code, upstream.message, { raw: upstream.body })`. Or: `if (apiKey === expected)` on a request-auth path.
+**Smell:** `throw new McpError(code, upstream.message, { raw: upstream.body })` or `throw ctx.fail('upstream_failed', e.message, { raw: e.response.body })`. Or: `if (apiKey === expected)` on a request-auth path.
 
 #### Axis 8 — Resource bounds
 

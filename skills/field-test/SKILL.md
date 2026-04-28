@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.0"
+  version: "2.1"
   audience: external
   type: debug
 ---
@@ -27,14 +27,20 @@ Write the helper to `/tmp/mcp-field-test.sh` once, then source it in every subse
 cat > /tmp/mcp-field-test.sh <<'HELPER_EOF'
 #!/bin/bash
 # Field-test helper: manage an MCP HTTP server + JSON-RPC session across shell calls.
+# Surfaces failures aggressively — field test is for finding things that fail,
+# so the helper auto-tails logs and prints HTTP status/body on errors instead
+# of swallowing them.
 STATE_FILE="/tmp/mcp-field-test.env"
 [ -f "$STATE_FILE" ] && . "$STATE_FILE"
 
 mcp_start() {
   local dir="${1:-$PWD}"
   echo "building $dir ..."
-  (cd "$dir" && bun run rebuild) >/tmp/mcp-build.log 2>&1 \
-    || { echo "BUILD FAILED — see /tmp/mcp-build.log"; return 1; }
+  if ! (cd "$dir" && bun run rebuild) >/tmp/mcp-build.log 2>&1; then
+    echo "BUILD FAILED — last 30 lines of /tmp/mcp-build.log:"
+    tail -30 /tmp/mcp-build.log
+    return 1
+  fi
   echo "starting server ..."
   (cd "$dir" && bun run start:http) >/tmp/mcp-server.log 2>&1 &
   local pid=$!
@@ -45,7 +51,8 @@ mcp_start() {
     sleep 0.25
   done
   if [ -z "$line" ]; then
-    echo "server failed to start — see /tmp/mcp-server.log"
+    echo "server failed to start within 10s — last 30 lines of /tmp/mcp-server.log:"
+    tail -30 /tmp/mcp-server.log
     kill "$pid" 2>/dev/null
     return 1
   fi
@@ -63,12 +70,21 @@ EOF
 mcp_init() {
   [ -z "$MCP_URL" ] && { echo "run mcp_start first"; return 1; }
   local hdr="/tmp/mcp-init-headers.txt"
-  curl -sS -D "$hdr" -X POST "$MCP_URL" \
+  local body_file="/tmp/mcp-init-body.txt"
+  local status
+  status=$(curl -sS -D "$hdr" -o "$body_file" -w '%{http_code}' -X POST "$MCP_URL" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"field-test","version":"2.0"}}}' >/dev/null
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"field-test","version":"2.1"}}}')
   local sid; sid=$(grep -i '^mcp-session-id:' "$hdr" | awk '{print $2}' | tr -d '\r\n')
-  [ -z "$sid" ] && { echo "no session id returned"; return 1; }
+  if [ -z "$sid" ]; then
+    echo "init failed — HTTP $status, no Mcp-Session-Id header returned"
+    echo "--- response body ---"
+    cat "$body_file"
+    echo "--- response headers ---"
+    cat "$hdr"
+    return 1
+  fi
   cat > "$STATE_FILE" <<EOF
 export MCP_PID=$MCP_PID
 export MCP_URL=$MCP_URL
@@ -81,11 +97,13 @@ EOF
     -H "Accept: application/json, text/event-stream" \
     -H "Mcp-Session-Id: $sid" \
     -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
-  echo "session=$sid"
+  echo "session=$sid (HTTP $status)"
 }
 
 # Usage: mcp_call METHOD [JSON_PARAMS]
-# Prints the JSON-RPC response (SSE framing stripped). Pipe to `jq`.
+# Prints the JSON-RPC response. SSE framing is stripped when present; on
+# non-SSE responses the raw body is printed instead so plain-JSON error
+# replies (HTTP 4xx/5xx) still surface. Pipe to `jq`.
 mcp_call() {
   [ -z "$MCP_SID" ] && { echo "run mcp_init first"; return 1; }
   local method="$1"; local params="${2:-}"
@@ -95,17 +113,57 @@ mcp_call() {
   else
     body=$(printf '{"jsonrpc":"2.0","id":%d,"method":"%s","params":%s}' "$RANDOM" "$method" "$params")
   fi
-  curl -sS -X POST "$MCP_URL" \
+  local resp_file="/tmp/mcp-call-body.txt"
+  local status
+  status=$(curl -sS -o "$resp_file" -w '%{http_code}' -X POST "$MCP_URL" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
     -H "Mcp-Session-Id: $MCP_SID" \
-    -d "$body" | sed -n 's/^data: //p'
+    -d "$body")
+  if [ "$status" -ge 400 ]; then
+    echo "HTTP $status from $method — response:" >&2
+    cat "$resp_file" >&2
+    return 1
+  fi
+  local sse; sse=$(sed -n 's/^data: //p' "$resp_file")
+  if [ -n "$sse" ]; then
+    printf '%s\n' "$sse"
+  else
+    cat "$resp_file"
+  fi
+}
+
+# Tail the server log. Useful when a call surprises you — pino startup banner,
+# definition lint diagnostics, request handler errors, upstream calls, and
+# rate-limit warnings live in /tmp/mcp-server.log.
+# Usage: mcp_log [N]   (default: 50 lines)
+mcp_log() {
+  local n="${1:-50}"
+  tail -n "$n" /tmp/mcp-server.log
 }
 
 mcp_stop() {
-  [ -n "$MCP_PID" ] && kill "$MCP_PID" 2>/dev/null
+  if [ -z "$MCP_PID" ]; then
+    rm -f "$STATE_FILE"
+    echo "no PID to stop"
+    return 0
+  fi
+  kill "$MCP_PID" 2>/dev/null
+  for _ in $(seq 1 12); do
+    kill -0 "$MCP_PID" 2>/dev/null || break
+    sleep 0.25
+  done
+  if kill -0 "$MCP_PID" 2>/dev/null; then
+    echo "PID $MCP_PID didn't exit on SIGTERM — sending SIGKILL"
+    kill -9 "$MCP_PID" 2>/dev/null
+    sleep 0.5
+  fi
+  if kill -0 "$MCP_PID" 2>/dev/null; then
+    echo "WARNING: PID $MCP_PID still alive after SIGKILL"
+  else
+    echo "stopped pid=$MCP_PID"
+  fi
   rm -f "$STATE_FILE"
-  echo "stopped"
 }
 HELPER_EOF
 
@@ -132,8 +190,8 @@ Runs `initialize`, captures the session id, sends `notifications/initialized`.
 
 ```bash
 . /tmp/mcp-field-test.sh
-mcp_call tools/list     | jq '.result.tools[]     | {name, description, inputSchema, outputSchema}'
-mcp_call resources/list | jq '.result.resources[] | {uri, name, mimeType}'
+mcp_call tools/list     | jq '.result.tools[]     | {name, description, inputSchema, outputSchema, errors: ._meta["mcp-ts-core/errors"]}'
+mcp_call resources/list | jq '.result.resources[] | {uri, name, mimeType, errors: ._meta["mcp-ts-core/errors"]}'
 mcp_call prompts/list   | jq '.result.prompts[]   | {name, description, arguments}'
 ```
 
@@ -171,6 +229,8 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 | Hits external API / live upstream | One call that exercises upstream; note rate-limit / timeout / transient-failure behavior |
 | Chained with other tools (search → detail → act) | Run one representative chain end-to-end; does each step return the IDs/cursors the next needs? |
 | `cursor` / `offset` / `limit` params | Pagination: second page, end-of-list |
+| Tool declared an `errors: [...]` contract | Error contract (tool): trigger ≥1 declared failure mode. Verify `result._meta.error.code` matches the contract entry, `result._meta.error.data.reason` is the declared reason (only present when the handler threw an `McpError` — `ctx.fail` always does, plain `throw new Error(...)` does not), and `content[0].text` is actionable. Reasons declared but unreachable from any input are dead contract entries. |
+| Resource declared an `errors: [...]` contract | Error contract (resource): trigger ≥1 declared failure mode by reading a URI that exercises it. Resources re-throw errors at the JSON-RPC level — verify `error.code` matches the contract entry and `error.data.reason` is the declared reason. (Resources don't use the `result.isError` envelope — they fail the request itself.) |
 
 **Resources.** Happy path, not-found URI, `list` if defined, pagination if used.
 **Prompts.** Happy path, defaults omitted, skim message quality.
@@ -188,9 +248,13 @@ Use `TaskCreate` — one task per definition. Mark complete as you go. Don't bat
 
 For each call, capture: input sent, response (trim huge payloads to files), whether `isError: true` appeared, anything surprising (slow response, parity drift, unhelpful text, crash).
 
+When a call surprises you — slow, hangs, returns terse output, surfaces an unhelpful error — run `. /tmp/mcp-field-test.sh && mcp_log` to tail the server log. The pino startup banner, request handler errors, upstream API call traces, and rate-limit warnings all land in `/tmp/mcp-server.log` rather than coming back through `mcp_call`. Don't guess at runtime behavior from response text alone.
+
 **Interpreting responses**
 
 - Tool domain errors return `{result: {content: [...], isError: true}}` — they live in `result`, not `error`. Check `isError`, not the JSON-RPC error field.
+- **Tool error code/reason** rides on `result._meta.error.{code, data.reason}` — inspect that, not just the text. `data` is only spread when the handler threw an `McpError` (or `ZodError`); plain `throw new Error(...)` won't populate `data.reason`. Use `ctx.fail`-thrown errors when the contract reason matters.
+- **Resource errors** are JSON-RPC-level — they appear in the top-level `error.{code, data.reason}` field, not inside `result`. Resource handlers re-throw rather than producing an `isError` envelope.
 - JSON-RPC `error` only appears for protocol issues (bad session, malformed envelope, unknown method).
 - `mcp_call` already strips SSE framing. Pipe to `jq` for readability.
 
@@ -253,6 +317,8 @@ End with:
 - [ ] Catalog surfaced and presented; descriptions audited for leaks (implementation details, meta-coaching, consumer-aware phrasing)
 - [ ] Universal battery run on every definition
 - [ ] Situational categories applied only when triggered
+- [ ] **If a tool declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; `result._meta.error.code` and `data.reason` verified against the contract entry
+- [ ] **If a resource declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; top-level JSON-RPC `error.code` and `error.data.reason` verified against the contract entry
 - [ ] External-state / auth-gated tools handled explicitly (run, skip, or confirm)
 - [ ] Server stopped; state file removed
 - [ ] Report: summary paragraph → grouped findings → numbered options

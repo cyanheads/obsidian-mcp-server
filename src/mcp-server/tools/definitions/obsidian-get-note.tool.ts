@@ -5,7 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { extractSection } from '@/services/obsidian/section-extractor.js';
 import { SectionSchema, TargetSchema } from './_shared/schemas.js';
@@ -82,6 +82,28 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       .describe('Mode-discriminated projection of the requested note.'),
   }),
   auth: ['tool:obsidian_get_note:read'],
+  errors: [
+    {
+      reason: 'section_required',
+      code: JsonRpcErrorCode.ValidationError,
+      when: '`format` is "section" but no `section` locator was provided.',
+    },
+    {
+      reason: 'note_missing',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The vault path does not resolve to an existing note.',
+    },
+    {
+      reason: 'no_active_file',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `active` but no file is currently open in Obsidian.',
+    },
+    {
+      reason: 'periodic_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `periodic` but no matching periodic note exists.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();
@@ -147,7 +169,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     }
 
     if (!input.section) {
-      throw invalidParams('`section` is required when `format` is "section".', {
+      throw ctx.fail('section_required', '`section` is required when `format` is "section".', {
         format: input.format,
       });
     }

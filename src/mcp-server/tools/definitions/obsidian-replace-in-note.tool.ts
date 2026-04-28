@@ -6,7 +6,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { TargetSchema } from './_shared/schemas.js';
 
@@ -48,6 +48,28 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
       .describe('Per-entry counts in the order replacements were applied.'),
   }),
   auth: ['tool:obsidian_replace_in_note:write'],
+  errors: [
+    {
+      reason: 'regex_invalid',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A `useRegex: true` replacement supplied a `search` pattern that is not a valid ECMAScript regex.',
+    },
+    {
+      reason: 'note_missing',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The vault path does not resolve to an existing note.',
+    },
+    {
+      reason: 'no_active_file',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `active` but no file is currently open in Obsidian.',
+    },
+    {
+      reason: 'periodic_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `periodic` but no matching periodic note exists.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();
@@ -65,9 +87,12 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
         try {
           re = new RegExp(r.search, `${r.replaceAll ? 'g' : ''}${r.caseSensitive ? '' : 'i'}`);
         } catch (err) {
-          throw invalidParams(`Invalid regex '${r.search}': ${(err as Error).message}`, {
-            search: r.search,
-          });
+          throw ctx.fail(
+            'regex_invalid',
+            `Invalid regex '${r.search}': ${(err as Error).message}`,
+            { search: r.search },
+            { cause: err },
+          );
         }
         // Count separately, then apply with the string overload so $1/$2/$&
         // capture-group references in `r.replace` are honored.

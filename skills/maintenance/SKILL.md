@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.9"
   audience: external
   type: workflow
 ---
@@ -50,6 +50,8 @@ Do not redo this investigation inline — the `changelog` skill handles tag-form
 
 ### 4. Framework review (`@cyanheads/mcp-ts-core`)
 
+**Skill-version paradox.** If `node_modules/@cyanheads/mcp-ts-core/skills/maintenance/SKILL.md`'s `version` exceeds the one running, run Step 5 Phase A first and re-invoke `maintenance` — otherwise feature-adoption rows added in the new version silently don't surface.
+
 If `@cyanheads/mcp-ts-core` was updated, do a deeper pass beyond what the `changelog` skill covers. The framework ships a **directory-based changelog** grouped by minor series (`.x` semver-wildcard convention) — one file per released version at `node_modules/@cyanheads/mcp-ts-core/changelog/<major.minor>.x/<version>.md`. Read only the files between old and new rather than scanning a monolithic file.
 
 Example — `0.5.2 → 0.5.4` means reading two new version files:
@@ -65,7 +67,8 @@ Scan specifically for:
 
 | Area | Adoption Check |
 |:-----|:---------------|
-| New error factories in `/errors` | Replace ad-hoc `new McpError(...)` with factories where applicable |
+| New `/errors` surface — factories, typed contracts (`errors[]` + `ctx.fail`), `httpErrorFromResponse` | Replace ad-hoc `new McpError(...)` with factories; declare `errors: [...]` on tools that surface domain-specific failure modes; route declared throws through `ctx.fail(reason, …)` so the conformance lint is happy |
+| Existing factory choice — semantic audit | Beyond factory-vs-`new McpError`: audit each `throw factory(...)` against intent. `invalidParams` (-32602) is for malformed JSON-RPC params (wrong-shape post-Zod is rare); semantic post-shape validation should use `validationError` (-32007). `notFound` for missing entities, `conflict` for state collisions, `unauthorized` vs `forbidden` for unauth vs scope-denied. Wrong codes degrade `mcp_error_classified_code` observability and break client retry logic — fix during this pass even if not adopting contracts yet. |
 | New utilities in `/utils` | Identify any that supersede local helper code |
 | New context capabilities | Added `ctx.*` methods worth adopting |
 | Provider/service APIs | Updates to `OpenRouterProvider`, `SpeechService`, `GraphService`, etc. |

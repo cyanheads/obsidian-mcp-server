@@ -56,7 +56,7 @@ describe('obsidian_list_files', () => {
     expect(out.directories).toEqual(['archive']);
   });
 
-  it('throws InvalidParams when nameRegex is not valid', async () => {
+  it('throws regex_invalid (ValidationError) when nameRegex is not valid', async () => {
     harness
       .current()
       .pool.intercept({ path: '/vault/', method: 'GET' })
@@ -65,9 +65,12 @@ describe('obsidian_list_files', () => {
     await expect(
       obsidianListFiles.handler(
         obsidianListFiles.input.parse({ nameRegex: '[' }),
-        createMockContext(),
+        createMockContext({ errors: obsidianListFiles.errors }),
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'regex_invalid' },
+    });
   });
 
   it('targets the requested subdirectory with a normalized URL', async () => {

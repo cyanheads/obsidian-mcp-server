@@ -43,7 +43,7 @@ describe('obsidian_open_in_ui', () => {
     expect(out).toEqual({ path: 'N.md', opened: true, createdIfMissing: false });
   });
 
-  it('throws NotFound when the file does not exist and failIfMissing is true', async () => {
+  it('throws note_missing (NotFound) when the file does not exist and failIfMissing is true', async () => {
     harness
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
@@ -54,11 +54,17 @@ describe('obsidian_open_in_ui', () => {
       .reply(200, { files: ['totally-different.md'] });
 
     await expect(
-      obsidianOpenInUi.handler(obsidianOpenInUi.input.parse({ path: 'N.md' }), createMockContext()),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
+      obsidianOpenInUi.handler(
+        obsidianOpenInUi.input.parse({ path: 'N.md' }),
+        createMockContext({ errors: obsidianOpenInUi.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'note_missing' },
+    });
   });
 
-  it('appends `did you mean` to the NotFound message when a close match exists', async () => {
+  it('appends `did you mean` to the note_missing message when a close match exists', async () => {
     harness
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
@@ -69,11 +75,14 @@ describe('obsidian_open_in_ui', () => {
       .reply(200, { files: ['n'] });
 
     await expect(
-      obsidianOpenInUi.handler(obsidianOpenInUi.input.parse({ path: 'N.md' }), createMockContext()),
+      obsidianOpenInUi.handler(
+        obsidianOpenInUi.input.parse({ path: 'N.md' }),
+        createMockContext({ errors: obsidianOpenInUi.errors }),
+      ),
     ).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       message: expect.stringContaining('Did you mean: "n"?'),
-      data: { path: 'N.md', suggestions: ['n'] },
+      data: { path: 'N.md', suggestions: ['n'], reason: 'note_missing' },
     });
   });
 

@@ -135,7 +135,7 @@ describe('obsidian_replace_in_note', () => {
     expect(out.totalReplacements).toBe(1);
   });
 
-  it('throws InvalidParams on a malformed regex', async () => {
+  it('throws regex_invalid (ValidationError) on a malformed regex', async () => {
     harness
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
@@ -147,8 +147,11 @@ describe('obsidian_replace_in_note', () => {
           target: { type: 'path', path: 'N.md' },
           replacements: [{ search: '(', replace: 'x', useRegex: true }],
         }),
-        createMockContext(),
+        createMockContext({ errors: obsidianReplaceInNote.errors }),
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'regex_invalid' },
+    });
   });
 });

@@ -134,7 +134,7 @@ describe('obsidian_manage_tags / add', () => {
 });
 
 describe('obsidian_manage_tags / remove', () => {
-  it('throws InvalidParams when tags is empty/missing', async () => {
+  it('throws tags_required (ValidationError) when tags is empty/missing', async () => {
     harness
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
@@ -148,8 +148,11 @@ describe('obsidian_manage_tags / remove', () => {
           target: { type: 'path', path: 'N.md' },
           operation: 'remove',
         }),
-        createMockContext(),
+        createMockContext({ errors: obsidianManageTags.errors }),
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'tags_required' },
+    });
   });
 });

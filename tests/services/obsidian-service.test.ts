@@ -100,14 +100,14 @@ describe('ObsidianService.getNoteJson', () => {
     expect(note.path).toBe('Daily/2026-04-01.md');
   });
 
-  it('rejects malformed dates with InvalidParams', async () => {
+  it('rejects malformed dates with ValidationError', async () => {
     await expect(
       service.getNoteJson(ctx, {
         type: 'periodic',
         period: 'daily',
         date: 'not-a-date',
       }),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
   });
 
   it('uses the current-period path when date is omitted', async () => {
@@ -206,32 +206,91 @@ describe('ObsidianService error classification', () => {
     );
   });
 
-  it('classifies 404 on /active/ with the "open a file first" hint', async () => {
+  it('classifies 404 on /active/ with no_active_file reason', async () => {
     pool.intercept({ path: '/active/', method: 'GET' }).reply(404, { message: 'no active' });
 
     await expect(service.getNoteJson(ctx, { type: 'active' })).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       message: expect.stringContaining('No file is currently active'),
+      data: { reason: 'no_active_file' },
     });
   });
 
-  it('classifies 405 as InvalidParams (path is a directory)', async () => {
+  it('classifies 404 on /periodic/ with periodic_not_found reason', async () => {
+    pool
+      .intercept({ path: '/periodic/daily/2026/04/28/', method: 'GET' })
+      .reply(404, { message: 'no daily' });
+
+    await expect(
+      service.getNoteJson(ctx, { type: 'periodic', period: 'daily', date: '2026-04-28' }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'periodic_not_found' },
+    });
+  });
+
+  it('classifies 404 on a vault path with note_missing reason', async () => {
+    pool.intercept({ path: '/vault/x.md', method: 'GET' }).reply(404, { message: 'gone' });
+
+    await expect(service.getNoteContent(ctx, { type: 'path', path: 'x.md' })).rejects.toMatchObject(
+      {
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'note_missing' },
+      },
+    );
+  });
+
+  it('classifies 404 on /commands/ with command_unknown reason', async () => {
+    pool
+      .intercept({ path: '/commands/unknown%3Acmd/', method: 'POST' })
+      .reply(404, { message: 'no such command' });
+
+    await expect(service.executeCommand(ctx, 'unknown:cmd')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: expect.stringContaining('Unknown Obsidian command'),
+      data: { reason: 'command_unknown' },
+    });
+  });
+
+  it('classifies 405 as ValidationError with path_is_directory reason', async () => {
     pool.intercept({ path: '/vault/dir.md', method: 'GET' }).reply(405, { message: 'directory' });
 
     await expect(
       service.getNoteContent(ctx, { type: 'path', path: 'dir.md' }),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_is_directory' },
+    });
   });
 
-  it('classifies 400 as InvalidParams and preserves the upstream message', async () => {
+  it('classifies 400 as ValidationError and preserves the upstream message', async () => {
     pool.intercept({ path: '/vault/x.md', method: 'GET' }).reply(400, { message: 'malformed' });
 
     await expect(service.getNoteContent(ctx, { type: 'path', path: 'x.md' })).rejects.toMatchObject(
       {
-        code: JsonRpcErrorCode.InvalidParams,
+        code: JsonRpcErrorCode.ValidationError,
         message: expect.stringContaining('malformed'),
       },
     );
+  });
+
+  it('classifies 400 with "could not be applied" body as section_target_missing', async () => {
+    pool
+      .intercept({ path: '/vault/N.md', method: 'PATCH' })
+      .reply(400, { message: 'patch could not be applied to the target' });
+
+    await expect(
+      service.patchNote(ctx, { type: 'path', path: 'N.md' }, 'body', {
+        operation: 'append',
+        targetType: 'heading',
+        target: 'Missing',
+        contentType: 'markdown',
+      }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('Section target not found'),
+      data: { reason: 'section_target_missing' },
+    });
   });
 });
 

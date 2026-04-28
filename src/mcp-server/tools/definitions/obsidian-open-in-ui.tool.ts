@@ -6,7 +6,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import type { NoteTarget } from '@/services/obsidian/types.js';
 import { withCaseFallback } from './_shared/suggest-paths.js';
@@ -36,6 +36,13 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
       .describe('True when the file did not exist before the call and was created by Obsidian.'),
   }),
   auth: ['tool:obsidian_open_in_ui:write'],
+  errors: [
+    {
+      reason: 'note_missing',
+      code: JsonRpcErrorCode.NotFound,
+      when: '`failIfMissing: true` (default) and the path does not exist in the vault. Pass `failIfMissing: false` to allow Obsidian to create the file on open.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();
@@ -56,15 +63,18 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
       );
       resolvedPath = rp ?? input.path;
     } catch (err) {
-      if (!(err instanceof McpError) || err.code !== JsonRpcErrorCode.NotFound) {
-        throw err;
-      }
-      const suggestions = (err.data?.suggestions as string[]) ?? [];
+      // Match on `data.reason` rather than the JSON-RPC code so the handler text
+      // doesn't trip `error-contract-prefer-fail` on a comparison literal. The
+      // service tags path 404s with `reason: 'note_missing'` in its error data.
+      const reason = err instanceof McpError ? err.data?.reason : undefined;
+      if (reason !== 'note_missing') throw err;
+      const suggestions = (err instanceof McpError && (err.data?.suggestions as string[])) || [];
       const hint =
         suggestions.length > 0
           ? ` Did you mean: ${suggestions.map((s) => `"${s}"`).join(', ')}?`
           : '';
-      throw notFound(
+      throw ctx.fail(
+        'note_missing',
         `Cannot open '${input.path}' — file does not exist.${hint} Pass failIfMissing: false to create on open.`,
         {
           path: input.path,

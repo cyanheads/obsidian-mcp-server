@@ -6,7 +6,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 
 const HIT_CAP = 100;
@@ -114,17 +114,38 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       .describe('Mode-discriminated search payload.'),
   }),
   auth: ['tool:obsidian_search_notes:read'],
+  errors: [
+    {
+      reason: 'path_prefix_invalid_mode',
+      code: JsonRpcErrorCode.ValidationError,
+      when: '`pathPrefix` was provided in a non-text mode (only `text` supports prefix filtering).',
+    },
+    {
+      reason: 'query_required',
+      code: JsonRpcErrorCode.ValidationError,
+      when: '`query` is missing for `text` or `dataview` mode (required for both).',
+    },
+    {
+      reason: 'logic_required',
+      code: JsonRpcErrorCode.ValidationError,
+      when: '`logic` is missing for `jsonlogic` mode.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();
 
     if (input.pathPrefix && input.mode !== 'text') {
-      throw invalidParams('`pathPrefix` is only valid in text mode.', { mode: input.mode });
+      throw ctx.fail('path_prefix_invalid_mode', '`pathPrefix` is only valid in text mode.', {
+        mode: input.mode,
+      });
     }
 
     if (input.mode === 'text') {
       if (!input.query) {
-        throw invalidParams('`query` is required for text mode.', { mode: input.mode });
+        throw ctx.fail('query_required', '`query` is required for text mode.', {
+          mode: input.mode,
+        });
       }
       const all = await svc.searchText(ctx, input.query, input.contextLength);
       const prefix = input.pathPrefix;
@@ -135,7 +156,7 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
 
     if (input.mode === 'dataview') {
       if (!input.query) {
-        throw invalidParams('`query` (DQL string) is required for dataview mode.', {
+        throw ctx.fail('query_required', '`query` (DQL string) is required for dataview mode.', {
           mode: input.mode,
         });
       }
@@ -145,7 +166,7 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
     }
 
     if (!input.logic) {
-      throw invalidParams('`logic` (JSONLogic tree) is required for jsonlogic mode.', {
+      throw ctx.fail('logic_required', '`logic` (JSONLogic tree) is required for jsonlogic mode.', {
         mode: input.mode,
       });
     }

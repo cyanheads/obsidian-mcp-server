@@ -99,7 +99,7 @@ describe('obsidian_manage_frontmatter / set', () => {
     expect(out.result.frontmatter).toEqual({ priority: 9 });
   });
 
-  it('throws InvalidParams when value is missing for set', async () => {
+  it('throws value_required (ValidationError) when value is missing for set', async () => {
     await expect(
       obsidianManageFrontmatter.handler(
         obsidianManageFrontmatter.input.parse({
@@ -107,9 +107,12 @@ describe('obsidian_manage_frontmatter / set', () => {
           target: { type: 'path', path: 'N.md' },
           key: 'priority',
         }),
-        createMockContext(),
+        createMockContext({ errors: obsidianManageFrontmatter.errors }),
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'value_required' },
+    });
   });
 });
 

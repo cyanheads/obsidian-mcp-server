@@ -6,6 +6,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 
 export const obsidianExecuteCommand = tool('obsidian_execute_command', {
@@ -23,6 +24,13 @@ export const obsidianExecuteCommand = tool('obsidian_execute_command', {
     executed: z.boolean().describe('True when the upstream POST returned successfully.'),
   }),
   auth: ['tool:obsidian_execute_command:admin'],
+  errors: [
+    {
+      reason: 'command_unknown',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The supplied `commandId` is not registered in Obsidian. Use `obsidian_list_commands` to discover valid IDs.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();

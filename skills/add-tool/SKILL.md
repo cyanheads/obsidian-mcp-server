@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: reference
 ---
@@ -58,10 +58,16 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
     // All fields need .describe(). Only JSON-Schema-serializable Zod types allowed.
   }),
   // auth: ['tool:{{tool_name}}:read'],
+  // errors: [
+  //   { reason: 'no_match', code: JsonRpcErrorCode.NotFound, when: 'No items matched the query.' },
+  //   { reason: 'queue_full', code: JsonRpcErrorCode.RateLimited, when: 'Local queue at capacity.', retryable: true },
+  // ],
 
   async handler(input, ctx) {
     ctx.log.info('Processing', { /* relevant input fields */ });
-    // Pure logic — throw on failure, no try/catch
+    // Pure logic — throw on failure, no try/catch.
+    // With an `errors[]` contract: `throw ctx.fail('reason_id', message?, data?)`.
+    // Without: throw via factories (`notFound`, `validationError`, …) or plain `Error`.
     return { /* output */ };
   },
 
@@ -233,9 +239,39 @@ format: (result) => [{
 
 ### Error classification and messaging
 
-The framework auto-classifies many errors at runtime (HTTP status codes, JS error types, common patterns). Use explicit error factories when you want a specific code and clear recovery guidance; plain `throw new Error()` when auto-classification is sufficient.
+**Recommended: declare an `errors[]` contract.** A typed contract surfaces in `tools/list` and gives the handler a typed `ctx.fail(reason, …)` keyed by the declared reason union — TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated and tamper-proof, and the linter enforces conformance against the handler body.
 
-**Classify by origin** — different sources need different codes:
+```typescript
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+
+export const fetchArticles = tool('fetch_articles', {
+  description: 'Fetch articles by PMID.',
+  errors: [
+    { reason: 'no_pmid_match', code: JsonRpcErrorCode.NotFound,
+      when: 'None of the requested PMIDs returned data.' },
+    { reason: 'queue_full', code: JsonRpcErrorCode.RateLimited,
+      when: 'Local request queue at capacity.', retryable: true },
+  ],
+  input: z.object({ pmids: z.array(z.string()).describe('PMIDs to fetch') }),
+  output: z.object({ articles: z.array(ArticleSchema).describe('Resolved articles') }),
+  async handler(input, ctx) {
+    if (queue.full()) throw ctx.fail('queue_full');
+    const articles = await fetch(input.pmids);
+    if (articles.length === 0) {
+      throw ctx.fail('no_pmid_match', `No data for ${input.pmids.length} PMIDs`, { pmids: input.pmids });
+    }
+    return { articles };
+  },
+});
+```
+
+**Baseline codes** (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. Omit the contract only for throwaway prototypes — declare it everywhere else. Wire-level behavior is identical when omitted, but you lose the type-checked `ctx.fail`, the `tools/list` advertisement, and conformance lint coverage.
+
+`ctx.fail` accepts an optional 4th `options` argument for ES2022 cause chaining: `throw ctx.fail('upstream_error', 'Upstream returned 500', { url }, { cause: e })`.
+
+**Service-thrown contract reasons.** When the throw happens in a called service rather than the handler itself, `ctx.fail` isn't reachable — services don't have `ctx`. Pass `data: { reason: 'X' }` to the factory in the service; the framework's auto-classifier preserves `data` on the wire, so the contract reason rides through unchanged. The handler bubbles the error without catching. See `add-service` for the pattern.
+
+**Fallback: error factories.** Use when no contract entry fits — ad-hoc throws, prototype tools, or service-layer code. The framework also auto-classifies plain `throw new Error()` from message patterns as a last resort.
 
 ```typescript
 // Client input error — agent can fix and retry
@@ -259,7 +295,7 @@ throw invalidParams(
 );
 ```
 
-**Error messages are recovery instructions.** Name what went wrong, why, and what action to take. The message is the agent's only signal — a bare "Not found" is a dead end.
+**Error messages are recovery instructions.** Name what went wrong, why, and what action to take. The message is the agent's only signal — a bare "Not found" is a dead end. See `skills/api-errors/SKILL.md` for the full contract pattern, factories list, and auto-classification table.
 
 ### Include operational metadata
 
@@ -329,6 +365,7 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 - [ ] `format()` renders every field in the output schema — enforced at lint time via sentinel injection, startup fails with `format-parity` errors otherwise. Different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data. Primary fix: render the missing field in `format()` (use `z.discriminatedUnion` for list/detail variants). Escape hatch: if the output schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) rather than maintaining aspirational typing
 - [ ] If wrapping external API: output schema and `format()` preserve uncertainty from sparse upstream payloads instead of inventing concrete values
 - [ ] `auth` scopes declared if the tool needs authorization
+- [ ] `errors: [...]` contract declared for known domain failure modes (recommended; omit only for throwaway prototypes)
 - [ ] `task: true` added if the tool is long-running
 - [ ] Registered in the project's existing `createApp()` tool list (directly or via barrel)
 - [ ] `bun run devcheck` passes

@@ -6,6 +6,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import {
   ContentTypeSchema,
@@ -40,6 +41,28 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
       .describe('Echoed operation that was applied.'),
   }),
   auth: ['tool:obsidian_patch_note:write'],
+  errors: [
+    {
+      reason: 'note_missing',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The vault path does not resolve to an existing note.',
+    },
+    {
+      reason: 'no_active_file',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `active` but no file is currently open in Obsidian.',
+    },
+    {
+      reason: 'periodic_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `periodic` but no matching periodic note exists.',
+    },
+    {
+      reason: 'section_target_missing',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The named heading/block/frontmatter field does not exist in the note. Use `obsidian_get_note` with `format: "document-map"` to discover available targets.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();

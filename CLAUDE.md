@@ -175,24 +175,40 @@ The framework also provides `ctx.state`, `ctx.sample`, and `ctx.progress`. They 
 
 ## Errors
 
-Handlers throw — the framework catches, classifies, and formats. Three escalation levels:
+Handlers throw — the framework catches, classifies, and formats.
+
+**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, retryable? }]` on `tool()` / `resource()` to advertise the failure surface in `tools/list` (under `_meta['mcp-ts-core/errors']`) and receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring.
 
 ```ts
-// 1. Plain Error — framework auto-classifies from message patterns
-throw new Error('Item not found');           // → NotFound
-throw new Error('Invalid query format');     // → ValidationError
-
-// 2. Error factories — explicit code, concise
-import { notFound, validationError, forbidden, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-throw notFound('Item not found', { itemId });
-throw serviceUnavailable('API unavailable', { url }, { cause: err });
-
-// 3. McpError — full control over code and data
-import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-throw new McpError(JsonRpcErrorCode.DatabaseError, 'Connection failed', { pool: 'primary' });
+errors: [
+  { reason: 'note_missing', code: JsonRpcErrorCode.NotFound, when: 'No note matched the path' },
+  { reason: 'plugin_unreachable', code: JsonRpcErrorCode.ServiceUnavailable, when: 'Local REST API plugin is offline', retryable: true },
+],
+async handler(input, ctx) {
+  const note = await svc.getNote(input.path, ctx);
+  if (!note) throw ctx.fail('note_missing', `Note ${input.path} not found`);
+  return note;
+}
 ```
 
-Plain `Error` is fine for most cases. Use factories when the error code matters. See framework CLAUDE.md for the full auto-classification table and all available factories.
+Services don't have `ctx.fail` — they pass `data: { reason: 'note_missing' }` to a factory so the wire shape matches what `ctx.fail` produces:
+
+```ts
+// inside obsidian-service.ts
+throw notFound('Note not found', { reason: 'note_missing', path });
+```
+
+**Fallback for ad-hoc throws** (no contract entry fits, prototype tools, service-layer code without a contract): use error factories.
+
+```ts
+import { notFound, validationError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+throw notFound('Note not found', { path });
+throw serviceUnavailable('Local REST API unavailable', { url }, { cause: err });
+```
+
+For HTTP responses from the Local REST API, use `httpErrorFromResponse(response, { service: 'obsidian-rest' })` from `/utils` — maps the full status table (401/403/408/422/429/5xx) and captures body + `Retry-After`.
+
+Available factories: `notFound`, `validationError`, `forbidden`, `unauthorized`, `invalidParams`, `invalidRequest`, `conflict`, `rateLimited`, `timeout`, `serviceUnavailable`, `configurationError`, `internalError`, `serializationError`, `databaseError`. Plain `Error` is also auto-classified from message patterns (`'not found'` → `NotFound`, etc.). See framework CLAUDE.md and the `api-errors` skill for the full pattern table.
 
 ---
 

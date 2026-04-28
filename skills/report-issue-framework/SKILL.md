@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against @cyanheads/mcp-ts-core when you hit a framework issue. Use when a builder, utility, context method, or config behaves contrary to the documented API — not for server-specific application bugs.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: workflow
 ---
@@ -141,7 +141,7 @@ Format: `bug(<scope>): concise description`
 | `prompt` | Prompt builder, generate, args |
 | `context` | Context, logger, state, progress, elicit, sample |
 | `config` | AppConfig, parseConfig, env parsing |
-| `errors` | McpError, error factories, auto-classification |
+| `errors` | McpError, error factories, typed contracts (`errors[]` / `ctx.fail`), conformance lint, `httpErrorFromResponse`, auto-classification |
 | `auth` | Auth modes, scope checking, JWT/OAuth |
 | `storage` | StorageService, providers |
 | `transport` | stdio/http transport, SSE, session handling |

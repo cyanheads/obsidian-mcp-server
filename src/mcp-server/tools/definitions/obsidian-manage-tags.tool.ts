@@ -7,7 +7,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { listTagsFromContent, reconcileTags } from '@/services/obsidian/frontmatter-ops.js';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { TargetSchema } from './_shared/schemas.js';
@@ -74,6 +74,28 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       .describe('Operation-discriminated result payload.'),
   }),
   auth: ['tool:obsidian_manage_tags:write'],
+  errors: [
+    {
+      reason: 'tags_required',
+      code: JsonRpcErrorCode.ValidationError,
+      when: '`operation` is "add" or "remove" but `tags` was empty or omitted.',
+    },
+    {
+      reason: 'note_missing',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The vault path does not resolve to an existing note.',
+    },
+    {
+      reason: 'no_active_file',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `active` but no file is currently open in Obsidian.',
+    },
+    {
+      reason: 'periodic_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `periodic` but no matching periodic note exists.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();
@@ -93,9 +115,11 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
     }
 
     if (!input.tags || input.tags.length === 0) {
-      throw invalidParams('`tags` is required and must be non-empty for add/remove operations.', {
-        operation: input.operation,
-      });
+      throw ctx.fail(
+        'tags_required',
+        '`tags` is required and must be non-empty for add/remove operations.',
+        { operation: input.operation },
+      );
     }
 
     const reconciled = reconcileTags(note.content, input.tags, input.operation, input.location);

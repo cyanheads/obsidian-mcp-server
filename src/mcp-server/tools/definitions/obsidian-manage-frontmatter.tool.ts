@@ -6,7 +6,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { deleteFrontmatterKey } from '@/services/obsidian/frontmatter-ops.js';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { TargetSchema } from './_shared/schemas.js';
@@ -64,6 +64,28 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
       .describe('Operation-discriminated result payload.'),
   }),
   auth: ['tool:obsidian_manage_frontmatter:write'],
+  errors: [
+    {
+      reason: 'value_required',
+      code: JsonRpcErrorCode.ValidationError,
+      when: '`operation` is "set" but no `value` was supplied.',
+    },
+    {
+      reason: 'note_missing',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The vault path does not resolve to an existing note.',
+    },
+    {
+      reason: 'no_active_file',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `active` but no file is currently open in Obsidian.',
+    },
+    {
+      reason: 'periodic_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `periodic` but no matching periodic note exists.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();
@@ -85,7 +107,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
 
     if (input.operation === 'set') {
       if (input.value === undefined) {
-        throw invalidParams('`value` is required when operation is "set".', {
+        throw ctx.fail('value_required', '`value` is required when operation is "set".', {
           operation: input.operation,
         });
       }

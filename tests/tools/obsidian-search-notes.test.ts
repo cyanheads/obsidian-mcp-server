@@ -49,16 +49,19 @@ describe('obsidian_search_notes / text', () => {
     expect(out.result.hits[0]?.filename).toBe('Projects/A.md');
   });
 
-  it('throws InvalidParams when query is missing in text mode', async () => {
+  it('throws query_required (ValidationError) when query is missing in text mode', async () => {
     await expect(
       obsidianSearchNotes.handler(
         obsidianSearchNotes.input.parse({ mode: 'text', query: undefined }),
-        createMockContext(),
+        createMockContext({ errors: obsidianSearchNotes.errors }),
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'query_required' },
+    });
   });
 
-  it('rejects pathPrefix when the mode is not text', async () => {
+  it('throws path_prefix_invalid_mode when pathPrefix is used outside text mode', async () => {
     await expect(
       obsidianSearchNotes.handler(
         obsidianSearchNotes.input.parse({
@@ -66,11 +69,12 @@ describe('obsidian_search_notes / text', () => {
           query: 'TABLE x FROM ""',
           pathPrefix: 'Projects/',
         }),
-        createMockContext(),
+        createMockContext({ errors: obsidianSearchNotes.errors }),
       ),
     ).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('pathPrefix'),
+      data: { reason: 'path_prefix_invalid_mode' },
     });
   });
 
@@ -135,13 +139,16 @@ describe('obsidian_search_notes / jsonlogic', () => {
     expect(out.result.hits).toEqual([{ filename: 'A.md', result: true }]);
   });
 
-  it('throws InvalidParams when logic is omitted', async () => {
+  it('throws logic_required (ValidationError) when logic is omitted', async () => {
     await expect(
       obsidianSearchNotes.handler(
         obsidianSearchNotes.input.parse({ mode: 'jsonlogic' }),
-        createMockContext(),
+        createMockContext({ errors: obsidianSearchNotes.errors }),
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'logic_required' },
+    });
   });
 });
 

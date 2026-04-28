@@ -67,7 +67,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.7.6",
+    "@cyanheads/mcp-ts-core": "^0.8.1",
     "@types/js-yaml": "^4.0.9",
     "js-yaml": "^4.1.1",
     "pino-pretty": "^13.1.3",

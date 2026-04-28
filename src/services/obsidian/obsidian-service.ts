@@ -8,10 +8,10 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import {
   forbidden,
-  invalidParams,
   notFound,
   serviceUnavailable,
   unauthorized,
+  validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import { withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Agent, type Dispatcher, type RequestInit, fetch as undiciFetch } from 'undici';
@@ -304,7 +304,7 @@ export class ObsidianService {
         if (target.date) {
           const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(target.date);
           if (!m) {
-            throw invalidParams(`Invalid date '${target.date}', expected YYYY-MM-DD.`);
+            throw validationError(`Invalid date '${target.date}', expected YYYY-MM-DD.`);
           }
           const [, y, mo, d] = m;
           return `/periodic/${target.period}/${y}/${mo}/${d}/`;
@@ -400,7 +400,7 @@ export class ObsidianService {
         if (path.startsWith('/active/')) {
           throw notFound(
             'No file is currently active in Obsidian — open a file in the app first.',
-            data(),
+            data({ reason: 'no_active_file' }),
           );
         }
         if (path.startsWith('/periodic/')) {
@@ -410,15 +410,21 @@ export class ObsidianService {
           const suffix = dateMatch ? ` for ${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : '';
           throw notFound(
             `No ${period} note found${suffix}. Check that the Periodic Notes plugin is enabled and the note exists.`,
-            data(),
+            data({ reason: 'periodic_not_found' }),
           );
         }
-        throw notFound(`Not found: ${display}`, data());
+        if (path.startsWith('/commands/')) {
+          throw notFound(
+            `Unknown Obsidian command: ${display}. Use \`obsidian_list_commands\` to discover valid command IDs.`,
+            data({ reason: 'command_unknown' }),
+          );
+        }
+        throw notFound(`Not found: ${display}`, data({ reason: 'note_missing' }));
       }
       case 405:
-        throw invalidParams(
+        throw validationError(
           `${display} cannot accept this method (often: the path is a directory, not a file).`,
-          data(),
+          data({ reason: 'path_is_directory' }),
         );
       case 400: {
         const upstreamMsg = body?.message ?? `Bad request to ${display}`;
@@ -426,10 +432,13 @@ export class ObsidianService {
         // content" / "invalid-target" message when a PATCH names a section that
         // doesn't exist. Translate to actionable guidance.
         const isTargetMiss = /\bcould not be applied\b|\binvalid-target\b/i.test(upstreamMsg);
-        const message = isTargetMiss
-          ? `Section target not found in ${display}. Use \`obsidian_get_note\` with \`format: "document-map"\` to list available headings, blocks, and frontmatter fields. Nested headings need \`Parent::Child\` syntax.`
-          : upstreamMsg;
-        throw invalidParams(message, data());
+        if (isTargetMiss) {
+          throw validationError(
+            `Section target not found in ${display}. Use \`obsidian_get_note\` with \`format: "document-map"\` to list available headings, blocks, and frontmatter fields. Nested headings need \`Parent::Child\` syntax.`,
+            data({ reason: 'section_target_missing' }),
+          );
+        }
+        throw validationError(upstreamMsg, data());
       }
       default:
         if (res.status >= 500 && res.status < 600) {
@@ -490,7 +499,7 @@ function displayPath(urlPath: string): string {
       ? `${period} note for ${y}-${mo}-${d}`
       : `${period} note for the current period`;
   }
-  for (const prefix of ['/vault/', '/open/']) {
+  for (const prefix of ['/vault/', '/open/', '/commands/']) {
     if (decoded.startsWith(prefix)) {
       return decoded.slice(prefix.length).replace(/\/+$/, '') || decoded;
     }

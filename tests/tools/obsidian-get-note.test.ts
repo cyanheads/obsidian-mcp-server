@@ -169,14 +169,17 @@ describe('obsidian_get_note / format: section', () => {
     expect(out.result.valueText).toBeUndefined();
   });
 
-  it('throws InvalidParams when section is omitted', async () => {
+  it('throws section_required (ValidationError) when section is omitted', async () => {
     // No upstream interception — handler should fail before any HTTP call.
     const input = obsidianGetNote.input.parse({
       format: 'section',
       target: { type: 'path', path: 'Note.md' },
     });
-    await expect(obsidianGetNote.handler(input, createMockContext())).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+    await expect(
+      obsidianGetNote.handler(input, createMockContext({ errors: obsidianGetNote.errors })),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'section_required' },
     });
   });
 });

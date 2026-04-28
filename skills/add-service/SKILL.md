@@ -4,7 +4,7 @@ description: >
   Scaffold a new service integration. Use when the user asks to add a service, integrate an external API, or create a reusable domain module with its own initialization and state.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -115,6 +115,7 @@ async fetchItem(id: string, ctx: Context): Promise<Item> {
         `${this.baseUrl}/items/${id}`,
         10_000,
         ctx,
+        { signal: ctx.signal },
       );
       const text = await response.text();
       return this.parseResponse<Item>(text);
@@ -136,9 +137,37 @@ async fetchItem(id: string, ctx: Context): Promise<Item> {
 3. **Classify parse failures by content.** If the upstream returns HTTP 200 with an HTML error page, detect it and throw `ServiceUnavailable` (transient) instead of `SerializationError` (non-transient).
 4. **Exhausted retries say so.** `withRetry` automatically enriches the final error with attempt count — callers know retries were already attempted.
 
+### When you need finer-grained HTTP error classification
+
+`fetchWithTimeout` collapses every non-2xx into `ServiceUnavailable`. That's the safe default but it isn't always right — a `401` should be `Unauthorized`, a `429` should be `RateLimited` (and is retryable), a `408` should be `Timeout` (and is retryable). When you need the nuance, drop down to raw `fetch` + `httpErrorFromResponse`:
+
+```typescript
+import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
+
+async fetchItem(id: string, ctx: Context): Promise<Item> {
+  return withRetry(
+    async () => {
+      const response = await fetch(`${this.baseUrl}/items/${id}`, { signal: ctx.signal });
+      if (!response.ok) {
+        throw await httpErrorFromResponse(response, {
+          service: 'MyAPI',
+          data: { itemId: id },
+        });
+      }
+      return this.parseResponse<Item>(await response.text());
+    },
+    { operation: 'fetchItem', context: ctx, signal: ctx.signal },
+  );
+}
+```
+
+`httpErrorFromResponse` maps the full status table (401/403/408/422/429/5xx) to the appropriate `JsonRpcErrorCode`, captures the response body (truncated), and forwards `Retry-After` headers into `error.data.retryAfter`. The codes it produces line up with `withRetry`'s transient-code set, so retryable HTTP failures (429, 503, 504) are retried automatically and non-retryable ones (401, 404, 422) fail immediately.
+
 ### Response handler pattern
 
 ```typescript
+import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+
 parseResponse<T>(text: string): T {
   // Detect HTML error pages masquerading as successful responses
   if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
@@ -187,6 +216,30 @@ function normalizeRepo(raw: RawRepo): Repo {
   };
 }
 ```
+
+## Error Handling in Services
+
+Services don't declare `errors: [...]` contracts and don't have `ctx.fail` — that contract surface is tool/resource-only. Inside services:
+
+- **Throw via factories** when a specific code matters: `throw notFound(...)`, `throw rateLimited(...)`, `throw serviceUnavailable(...)`. The framework's auto-classifier catches anything else.
+- **Wrap risky pipelines in `ErrorHandler.tryCatch`** when you want structured logging + auto-classification without writing try/catch boilerplate. It always rethrows — never swallows. Useful for parsing untrusted input (JSON, config) or third-party SDK calls whose error types you don't control:
+
+  ```ts
+  import { ErrorHandler } from '@cyanheads/mcp-ts-core/utils';
+
+  const parsed = await ErrorHandler.tryCatch(
+    () => JSON.parse(rawConfig),
+    { operation: 'MyService.parseConfig', errorCode: JsonRpcErrorCode.ConfigurationError },
+  );
+  ```
+
+- **Tool/resource handlers bubble service errors unchanged** — the contract advertises the *advertised* failure surface, and any code thrown from a service still reaches the client correctly via the auto-classifier. The conformance lint scans handler source text only, so service-thrown codes aren't flagged.
+- **Carry contract `reason` via `data: { reason }`** when the calling tool declares an `errors[]` contract entry for this failure mode. Services can't call `ctx.fail`, but passing the reason in `data` flows through the auto-classifier untouched, so clients see the same `error.data.reason` they'd see from `ctx.fail` — no handler-side catch-and-rethrow needed:
+
+  ```ts
+  // tool declares: errors: [{ reason: 'empty_expression', code: JsonRpcErrorCode.ValidationError, when: '…' }]
+  throw validationError('Expression cannot be empty.', { reason: 'empty_expression' });
+  ```
 
 ## API Efficiency
 

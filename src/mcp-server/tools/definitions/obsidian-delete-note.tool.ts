@@ -6,7 +6,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { forbidden } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { TargetSchema } from './_shared/schemas.js';
 
@@ -22,6 +22,28 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
     deleted: z.boolean().describe('True when the file was removed.'),
   }),
   auth: ['tool:obsidian_delete_note:write'],
+  errors: [
+    {
+      reason: 'cancelled',
+      code: JsonRpcErrorCode.InvalidRequest,
+      when: 'User declined the deletion via interactive elicitation.',
+    },
+    {
+      reason: 'note_missing',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The vault path does not resolve to an existing note.',
+    },
+    {
+      reason: 'no_active_file',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `active` but no file is currently open in Obsidian.',
+    },
+    {
+      reason: 'periodic_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `periodic` but no matching periodic note exists.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();
@@ -37,7 +59,7 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
         }),
       );
       if (confirmed.action !== 'accept' || confirmed.content?.confirm !== true) {
-        throw forbidden('Deletion cancelled by user.', { path });
+        throw ctx.fail('cancelled', 'Deletion cancelled by user.', { path });
       }
     }
 
