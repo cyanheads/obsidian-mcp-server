@@ -235,6 +235,33 @@ describe('ObsidianService error classification', () => {
   });
 });
 
+describe('ObsidianService.probeAuthenticated', () => {
+  it('returns false on a non-2xx response', async () => {
+    pool.intercept({ path: '/vault/', method: 'GET' }).reply(401, {});
+    expect(await service.probeAuthenticated(ctx)).toBe(false);
+  });
+
+  it('returns false on a network error', async () => {
+    pool.intercept({ path: '/vault/', method: 'GET' }).reply(() => {
+      throw new TypeError('network kaboom');
+    });
+    expect(await service.probeAuthenticated(ctx)).toBe(false);
+  });
+
+  it('re-throws when the request was aborted', async () => {
+    const abortCtx = createMockContext();
+    const controller = new AbortController();
+    Object.defineProperty(abortCtx, 'signal', { value: controller.signal });
+    controller.abort(new Error('cancelled'));
+
+    pool.intercept({ path: '/vault/', method: 'GET' }).reply(() => {
+      throw new Error('cancelled');
+    });
+
+    await expect(service.probeAuthenticated(abortCtx)).rejects.toThrow(/cancelled/);
+  });
+});
+
 describe('ObsidianService search', () => {
   it('text search hits /search/simple/ with query + contextLength as query params', async () => {
     let seenPath = '';

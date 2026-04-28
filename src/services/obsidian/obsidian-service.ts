@@ -119,8 +119,9 @@ export class ObsidianService {
   /**
    * Probe whether the configured `OBSIDIAN_API_KEY` is accepted. Hits the
    * authenticated `/vault/` listing endpoint and reports `true` only on a 2xx
-   * response. Any error (401/403, network, timeout) yields `false` — the
-   * resource caller wants a boolean, not an exception.
+   * response. Network/auth errors yield `false` — the resource caller wants a
+   * boolean, not an exception. Aborts are re-thrown so cancellation/timeout
+   * doesn't masquerade as an auth failure.
    */
   async probeAuthenticated(ctx: Context): Promise<boolean> {
     try {
@@ -131,7 +132,8 @@ export class ObsidianService {
         signal: ctx.signal,
       });
       return res.ok;
-    } catch {
+    } catch (err) {
+      if (ctx.signal?.aborted) throw err;
       return false;
     }
   }
