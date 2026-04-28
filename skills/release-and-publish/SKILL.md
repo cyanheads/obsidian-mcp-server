@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GHCR). Runs the final verification gate, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit, annotated tag) is already complete — this skill is the post-wrapup publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.1"
+  version: "2.2"
   audience: external
   type: workflow
 ---
@@ -62,13 +62,11 @@ The user fixes locally and re-invokes. On re-invocation, already-published desti
 
 ### 1. Sanity-check wrapup outputs
 
-Read `package.json` → capture `version`. Then verify:
+Read `package.json` → capture `version`. Then use your git tools to verify:
 
-```bash
-git status --porcelain          # must be empty — clean working tree
-git describe --exact-match --tags HEAD 2>&1   # must equal v<version>
-git rev-parse --abbrev-ref HEAD  # note the branch name for step 3
-```
+- **Working tree is clean** — no uncommitted changes
+- **HEAD is tagged `v<version>`** — matches the `package.json` version
+- **Current branch name** — note it for step 3
 
 If working tree is dirty or HEAD isn't on `v<version>`, halt.
 
@@ -86,12 +84,7 @@ Any non-zero exit → halt with the failing command's output.
 
 ### 3. Push to origin
 
-```bash
-git push
-git push --tags
-```
-
-If the remote rejects either push, halt.
+Use your git tools to push commits and tags to origin. If the remote rejects either push, halt.
 
 ### 4. Publish to npm
 
@@ -139,7 +132,7 @@ Only if `Dockerfile` exists at the repo root (otherwise skip).
 
 Derive:
 
-- `OWNER/REPO` from `git remote get-url origin` (strip `.git`, handle both `https://github.com/<owner>/<repo>` and `git@github.com:<owner>/<repo>` forms)
+- `OWNER/REPO` from the origin remote URL — use your git tools to read it; strip `.git`, handle both `https://github.com/<owner>/<repo>` and `git@github.com:<owner>/<repo>` forms
 - `VERSION` from `package.json` (step 1)
 
 ```bash
@@ -167,8 +160,8 @@ Skip any destination that was skipped in its step.
 - [ ] `bun run devcheck` passes
 - [ ] `bun run rebuild` succeeds
 - [ ] `bun run test:all` (or `test`) passes
-- [ ] `git push` succeeds
-- [ ] `git push --tags` succeeds
+- [ ] Commits pushed to origin
+- [ ] Tags pushed to origin
 - [ ] `bun publish --access public` succeeds
 - [ ] `bun run publish-mcp` succeeds (if `server.json` present)
 - [ ] Docker buildx multi-arch push succeeds (if `Dockerfile` present)

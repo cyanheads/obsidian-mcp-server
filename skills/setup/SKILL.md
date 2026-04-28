@@ -4,7 +4,7 @@ description: >
   Post-init orientation for an MCP server built on @cyanheads/mcp-ts-core. Use after running `@cyanheads/mcp-ts-core init` to understand the project structure, conventions, and skill sync model. Also use when onboarding to an existing project for the first time.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: workflow
 ---
@@ -129,7 +129,7 @@ This step is the **bootstrap** — it creates the agent directory. From then on,
 After `bun install`, complete these one-time setup tasks:
 
 1. **Update dependencies to latest** — `bun update --latest`. The scaffolded `package.json` pins minimum versions from when the framework was published; updating ensures you start with the latest compatible releases.
-2. **Initialize git** — `git init && git add -A && git commit -m "chore: scaffold from @cyanheads/mcp-ts-core"`
+2. **Initialize git** — use your git tools: init the repo, stage all files, and commit with message `chore: scaffold from @cyanheads/mcp-ts-core`
 3. **Verify agent protocol placeholders** — if the `init` CLI was run without a `[name]` argument, `{{PACKAGE_NAME}}` may remain as a literal in `CLAUDE.md`/`AGENTS.md` and `package.json`. Replace it with the actual server name.
 
 ## Changelog Convention

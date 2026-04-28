@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: workflow
 ---
@@ -20,7 +20,7 @@ metadata:
 | Mode | Starting Point | First Step |
 |:-----|:---------------|:-----------|
 | **A — Full flow** | Lockfile is current; want to update | Step 1 |
-| **B — Post-update review** | User already ran `bun update --latest` + `bun run rebuild` + `bun run test` | Skip to Step 3 with the update output or `git diff bun.lock` |
+| **B — Post-update review** | User already ran `bun update --latest` + `bun run rebuild` + `bun run test` | Skip to Step 3 with the update output or a `bun.lock` diff |
 
 Both modes converge at Step 3 and end at Step 8.
 
@@ -40,7 +40,7 @@ Note: `bun update --latest` crosses semver majors; `bun update` alone respects r
 bun update --latest
 ```
 
-Capture the `↑ package old → new` lines from stdout — these feed Step 3. Alternatively, `git diff bun.lock` surfaces version deltas after the fact.
+Capture the `↑ package old → new` lines from stdout — these feed Step 3. Alternatively, diff `bun.lock` to surface version deltas after the fact.
 
 ### 3. Investigate changelogs
 
@@ -122,20 +122,22 @@ If no agent directory exists, skip Phase B — the project hasn't opted in to pe
 The `init` CLI scaffolds a fixed set of framework scripts into consumer projects — these underpin `bun run build`, `bun run devcheck`, `bun run lint:mcp`, `bun run tree`, and the changelog build. They drift silently when the framework updates them. Compare by content hash and overwrite on mismatch:
 
 ```bash
-for s in build-changelog.ts build.ts check-docs-sync.ts check-skills-sync.ts clean.ts devcheck.ts lint-mcp.ts tree.ts; do
-  src="node_modules/@cyanheads/mcp-ts-core/scripts/$s"
+for src in node_modules/@cyanheads/mcp-ts-core/scripts/*.ts; do
+  s=$(basename "$src")
   dst="scripts/$s"
-  [ -f "$src" ] || continue
-  if [ ! -f "$dst" ] || ! cmp -s "$src" "$dst"; then
+  if [ ! -f "$dst" ]; then
     cp "$src" "$dst"
-    echo "synced: $s"
+    echo "added: $s"
+  elif ! cmp -s "$src" "$dst"; then
+    cp "$src" "$dst"
+    echo "updated: $s"
   fi
 done
 ```
 
-Do not touch scripts in `scripts/` that aren't in the list above — those are project-specific (custom deploy, codegen, etc.).
+Scripts in `scripts/` that aren't present in the package directory are project-specific (custom deploy, codegen, etc.) — leave them alone. The package's `files:` field gates what ships into `node_modules/.../scripts/`, so enumerating that directory is the canonical "shipped scripts" set.
 
-If the consumer customized a framework script, the overwrite discards those changes. `git diff scripts/` surfaces the replacements immediately after the sync runs — review the diff before committing, and use `git restore scripts/<file>` if a specific local customization needs to be preserved.
+If the consumer customized a framework script, the overwrite discards those changes. After the sync runs, diff `scripts/` to surface replacements — review before committing. If a specific local customization needs to be preserved, revert that file using your git tools.
 
 **Report** which skills were added/updated in Phase A (with version deltas), which agent directories were refreshed in Phase B, and which scripts were resynced in Phase C. The user needs to know what new guidance and tooling is now in play.
 
@@ -195,7 +197,7 @@ Present a concise numbered summary to the user:
 - [ ] Adoption opportunities identified and applied
 - [ ] Project `skills/` synced from package (Phase A), with a change report
 - [ ] Agent skill directories (`.claude/skills/`, `.agents/skills/`, etc.) refreshed from project `skills/` (Phase B)
-- [ ] Framework `scripts/` resynced from package via content-hash compare (Phase C), with a change report; `git diff scripts/` reviewed before committing
+- [ ] Framework `scripts/` resynced from package via content-hash compare (Phase C), with a change report; `scripts/` diff reviewed before committing
 - [ ] `bun run rebuild` succeeds
 - [ ] `bun run devcheck` passes (includes audit + outdated)
 - [ ] `bun run test` passes
