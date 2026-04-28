@@ -47,7 +47,8 @@ function extractHeading(content: string, target: string): string {
   }
 
   const lines = content.split('\n');
-  let cursor = 0;
+  const bodyStart = frontmatterEndLine(lines);
+  let cursor = bodyStart;
   let parentLevel = 0;
 
   for (const part of parts) {
@@ -95,12 +96,13 @@ function extractHeading(content: string, target: string): string {
  */
 function extractBlock(content: string, blockId: string): string {
   const lines = content.split('\n');
+  const bodyStart = frontmatterEndLine(lines);
   const escaped = blockId.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
   const ref = new RegExp(`(^|\\s)\\^${escaped}\\s*$`);
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = bodyStart; i < lines.length; i++) {
     if (ref.test(lines[i] ?? '')) {
       let start = i;
-      while (start > 0) {
+      while (start > bodyStart) {
         const prev = lines[start - 1] ?? '';
         if (prev.trim() === '' || /^#{1,6}\s+/.test(prev)) break;
         start--;
@@ -109,4 +111,19 @@ function extractBlock(content: string, blockId: string): string {
     }
   }
   throw notFound(`Block reference '^${blockId}' not found.`, { blockId });
+}
+
+/**
+ * Return the line index where the document body starts, skipping a leading
+ * `---`/`---` YAML frontmatter block. Returns 0 when no frontmatter is present.
+ * Without this guard, heading and block extraction would scan inside the
+ * frontmatter and falsely match YAML comment lines or include the fence in a
+ * paragraph walk-back.
+ */
+function frontmatterEndLine(lines: string[]): number {
+  if (!/^---\s*$/.test(lines[0] ?? '')) return 0;
+  for (let i = 1; i < lines.length; i++) {
+    if (/^---\s*$/.test(lines[i] ?? '')) return i + 1;
+  }
+  return 0;
 }

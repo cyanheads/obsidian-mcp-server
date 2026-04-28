@@ -80,6 +80,28 @@ describe('extractSection / block', () => {
       }),
     ).toThrow(/not found/i);
   });
+
+  it('does not pull frontmatter into the block when no blank line follows the closing fence', () => {
+    const md = ['---', 'title: Foo', '---', 'A paragraph ^abc'].join('\n');
+    const value = extractSection(note(md), { type: 'block', target: 'abc' });
+    expect(value).toBe('A paragraph ^abc');
+  });
+});
+
+describe('extractSection / frontmatter boundary', () => {
+  it('does not match a YAML comment line as a heading', () => {
+    const md = [
+      '---',
+      '# this is a yaml comment',
+      'title: Foo',
+      '---',
+      '',
+      '# Real Heading',
+      'body',
+    ].join('\n');
+    const value = extractSection(note(md), { type: 'heading', target: 'Real Heading' });
+    expect(value).toBe(['# Real Heading', 'body'].join('\n'));
+  });
 });
 
 describe('extractSection / frontmatter', () => {
