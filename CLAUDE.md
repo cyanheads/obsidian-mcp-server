@@ -68,7 +68,7 @@ export const obsidianListTags = tool('obsidian_list_tags', {
   async handler(_input, ctx) {
     const svc = getObsidianService();
     const tags = await svc.listTags(ctx);
-    return { tags: tags.map((t) => ({ name: t.tag, count: t.count })) };
+    return { tags: tags.map((t) => ({ name: t.name, count: t.count })) };
   },
 
   // format() populates content[] — the markdown twin of structuredContent.

@@ -1,10 +1,11 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-04-28 00:25:37
+Generated on: 2026-04-28 04:51:05
 
 ```text
 obsidian-mcp-server/
 ├── .claude/
+├── .gemini/
 ├── .github/
 │   └── ISSUE_TEMPLATE/
 │       ├── bug_report.yml
@@ -108,7 +109,8 @@ obsidian-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── _shared/
-│   │           │   └── schemas.ts
+│   │           │   ├── schemas.ts
+│   │           │   └── suggest-paths.ts
 │   │           ├── index.ts
 │   │           ├── obsidian-append-to-note.tool.ts
 │   │           ├── obsidian-delete-note.tool.ts
@@ -156,7 +158,8 @@ obsidian-mcp-server/
 │   │   ├── obsidian-patch-note.test.ts
 │   │   ├── obsidian-replace-in-note.test.ts
 │   │   ├── obsidian-search-notes.test.ts
-│   │   └── obsidian-write-note.test.ts
+│   │   ├── obsidian-write-note.test.ts
+│   │   └── suggest-paths.test.ts
 │   └── helpers.ts
 ├── .dockerignore
 ├── .env.example
