@@ -76,5 +76,6 @@ docs/devdocs.md
 .mcp.json
 .claude/
 .agents/
+.gemini/
 .mcpregistry_github_token
 .mcpregistry_registry_token
