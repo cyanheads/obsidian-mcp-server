@@ -100,10 +100,19 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
 
     const reconciled = reconcileTags(note.content, input.tags, input.operation, input.location);
 
-    if (reconciled.applied.length > 0) {
-      await svc.writeNote(ctx, target, reconciled.content, 'markdown');
+    if (reconciled.applied.length === 0) {
+      return {
+        result: {
+          operation: input.operation,
+          path: note.path,
+          applied: reconciled.applied,
+          skipped: reconciled.skipped,
+          tags: note.tags,
+        },
+      };
     }
 
+    await svc.writeNote(ctx, target, reconciled.content, 'markdown');
     const after = await svc.getNoteJson(ctx, target);
     if (input.operation === 'add') {
       return {

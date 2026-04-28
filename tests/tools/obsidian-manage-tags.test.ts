@@ -92,16 +92,20 @@ describe('obsidian_manage_tags / add', () => {
     expect(out.result.tags).toEqual(['existing', 'fresh']);
   });
 
-  it('skips the upstream write when no tag changed', async () => {
-    // The reconciler reads the raw content (not the parsed frontmatter object),
-    // so the body must contain the YAML block for the existing tag to be visible.
+  it('skips both the write and the post-fetch when no tag changed', async () => {
     const body = ['---', 'tags: [existing]', '---', '', 'body'].join('\n');
     let putCalls = 0;
+    let getCalls = 0;
     harness
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson(body, { tags: ['existing'] }, ['existing']), {
-        headers: { 'content-type': 'application/json' },
+      .reply(() => {
+        getCalls++;
+        return {
+          statusCode: 200,
+          data: noteJson(body, { tags: ['existing'] }, ['existing']),
+          responseOptions: { headers: { 'content-type': 'application/json' } },
+        };
       });
     harness
       .current()
@@ -109,13 +113,6 @@ describe('obsidian_manage_tags / add', () => {
       .reply(() => {
         putCalls++;
         return { statusCode: 200, data: '' };
-      });
-    // Refetch after handler — same content because no write happened
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson(body, { tags: ['existing'] }, ['existing']), {
-        headers: { 'content-type': 'application/json' },
       });
 
     const out = await obsidianManageTags.handler(
@@ -129,6 +126,7 @@ describe('obsidian_manage_tags / add', () => {
     );
 
     expect(putCalls).toBe(0);
+    expect(getCalls).toBe(1);
     if (out.result.operation !== 'add') throw new Error('expected add branch');
     expect(out.result.applied).toEqual([]);
     expect(out.result.skipped).toEqual(['existing']);
