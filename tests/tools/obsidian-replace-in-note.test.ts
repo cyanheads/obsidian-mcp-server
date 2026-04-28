@@ -135,6 +135,115 @@ describe('obsidian_replace_in_note', () => {
     expect(out.totalReplacements).toBe(1);
   });
 
+  it('honors wholeWord in literal mode (avoids substring matches)', async () => {
+    let putBody = '';
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('cat scatter category cat.'), {
+        headers: { 'content-type': 'application/json' },
+      });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
+      .reply((opts) => {
+        putBody = String(opts.body ?? '');
+        return { statusCode: 200, data: '' };
+      });
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: 'cat', replace: 'dog', wholeWord: true }],
+      }),
+      createMockContext(),
+    );
+
+    expect(putBody).toBe('dog scatter category dog.');
+    expect(out.totalReplacements).toBe(2);
+  });
+
+  it('honors wholeWord in regex mode (wraps the pattern in \\b…\\b)', async () => {
+    let putBody = '';
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('foo foobar foo'), {
+        headers: { 'content-type': 'application/json' },
+      });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
+      .reply((opts) => {
+        putBody = String(opts.body ?? '');
+        return { statusCode: 200, data: '' };
+      });
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: 'fo+', replace: 'X', useRegex: true, wholeWord: true }],
+      }),
+      createMockContext(),
+    );
+
+    expect(putBody).toBe('X foobar X');
+    expect(out.totalReplacements).toBe(2);
+  });
+
+  it('honors flexibleWhitespace in literal mode (collapses runs of whitespace)', async () => {
+    let putBody = '';
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('the  quick\tbrown\nfox  jumps'), {
+        headers: { 'content-type': 'application/json' },
+      });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
+      .reply((opts) => {
+        putBody = String(opts.body ?? '');
+        return { statusCode: 200, data: '' };
+      });
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: 'quick brown', replace: 'slow red', flexibleWhitespace: true }],
+      }),
+      createMockContext(),
+    );
+
+    expect(putBody).toBe('the  slow red\nfox  jumps');
+    expect(out.totalReplacements).toBe(1);
+  });
+
+  it('keeps `$1` literal in literal mode with wholeWord (no capture-group expansion)', async () => {
+    let putBody = '';
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('cat sat'), { headers: { 'content-type': 'application/json' } });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
+      .reply((opts) => {
+        putBody = String(opts.body ?? '');
+        return { statusCode: 200, data: '' };
+      });
+
+    await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: 'cat', replace: 'dog$1', wholeWord: true }],
+      }),
+      createMockContext(),
+    );
+
+    expect(putBody).toBe('dog$1 sat');
+  });
+
   it('throws regex_invalid (ValidationError) on a malformed regex', async () => {
     harness
       .current()

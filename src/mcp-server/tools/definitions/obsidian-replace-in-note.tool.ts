@@ -16,6 +16,18 @@ const ReplacementSchema = z
     replace: z.string().describe('Replacement text. Empty string deletes matches.'),
     useRegex: z.boolean().default(false).describe('Treat `search` as an ECMAScript regex pattern.'),
     caseSensitive: z.boolean().default(true).describe('When false, match case-insensitively.'),
+    wholeWord: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Match only at word boundaries. Applies in both literal and regex modes — the search pattern is wrapped with `\\b…\\b`.',
+      ),
+    flexibleWhitespace: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Treat any run of whitespace in `search` as matching any whitespace in the body. Literal mode only — has no effect when `useRegex: true` (express it directly with `\\s+`).',
+      ),
     replaceAll: z.boolean().default(true).describe('When false, only the first match is replaced.'),
   })
   .describe('A single search/replace operation.');
@@ -83,9 +95,10 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
     for (const r of input.replacements) {
       let count = 0;
       if (r.useRegex) {
+        const pattern = r.wholeWord ? `\\b(?:${r.search})\\b` : r.search;
         let re: RegExp;
         try {
-          re = new RegExp(r.search, `${r.replaceAll ? 'g' : ''}${r.caseSensitive ? '' : 'i'}`);
+          re = new RegExp(pattern, `${r.replaceAll ? 'g' : ''}${r.caseSensitive ? '' : 'i'}`);
         } catch (err) {
           throw ctx.fail(
             'regex_invalid',
@@ -99,16 +112,25 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
         const matches = body.match(re);
         count = matches ? (re.global ? matches.length : 1) : 0;
         body = body.replace(re, r.replace);
+      } else if (r.wholeWord || r.flexibleWhitespace) {
+        // Literal-with-transformations: build a regex from the escaped needle.
+        // Use the callback overload so `$1`/`$&` in `r.replace` stay literal.
+        let escaped = r.search.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+        if (r.flexibleWhitespace) escaped = escaped.replace(/\s+/g, '\\s+');
+        if (r.wholeWord) escaped = `\\b${escaped}\\b`;
+        const re = new RegExp(escaped, `${r.replaceAll ? 'g' : ''}${r.caseSensitive ? '' : 'i'}`);
+        body = body.replace(re, () => {
+          count++;
+          return r.replace;
+        });
+      } else if (r.caseSensitive) {
+        body = replaceLiteral(body, r.search, r.replace, r.replaceAll, () => {
+          count++;
+        });
       } else {
-        if (r.caseSensitive) {
-          body = replaceLiteral(body, r.search, r.replace, r.replaceAll, () => {
-            count++;
-          });
-        } else {
-          body = replaceLiteralCaseInsensitive(body, r.search, r.replace, r.replaceAll, () => {
-            count++;
-          });
-        }
+        body = replaceLiteralCaseInsensitive(body, r.search, r.replace, r.replaceAll, () => {
+          count++;
+        });
       }
       perReplacement.push({ search: r.search, count });
       totalReplacements += count;
