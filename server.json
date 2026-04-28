@@ -33,10 +33,10 @@
         },
         {
           "name": "OBSIDIAN_BASE_URL",
-          "description": "Base URL of the Obsidian Local REST API. Default: HTTPS on 27124 (self-signed). Switch to http://127.0.0.1:27123 for the insecure HTTP port.",
+          "description": "Base URL of the Obsidian Local REST API. Default: http://127.0.0.1:27123 (enable \"Non-encrypted (HTTP) Server\" in plugin settings). Use https://127.0.0.1:27124 for the always-on HTTPS port (self-signed cert; pair with OBSIDIAN_VERIFY_SSL=false).",
           "format": "string",
           "isRequired": false,
-          "default": "https://127.0.0.1:27124"
+          "default": "http://127.0.0.1:27123"
         },
         {
           "name": "OBSIDIAN_VERIFY_SSL",
@@ -96,10 +96,10 @@
         },
         {
           "name": "OBSIDIAN_BASE_URL",
-          "description": "Base URL of the Obsidian Local REST API. Default: HTTPS on 27124 (self-signed). Switch to http://127.0.0.1:27123 for the insecure HTTP port.",
+          "description": "Base URL of the Obsidian Local REST API. Default: http://127.0.0.1:27123 (enable \"Non-encrypted (HTTP) Server\" in plugin settings). Use https://127.0.0.1:27124 for the always-on HTTPS port (self-signed cert; pair with OBSIDIAN_VERIFY_SSL=false).",
           "format": "string",
           "isRequired": false,
-          "default": "https://127.0.0.1:27124"
+          "default": "http://127.0.0.1:27123"
         },
         {
           "name": "OBSIDIAN_VERIFY_SSL",

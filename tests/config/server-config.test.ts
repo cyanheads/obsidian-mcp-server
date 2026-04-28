@@ -32,7 +32,7 @@ describe('getServerConfig', () => {
     const config = getServerConfig();
     expect(config).toMatchObject({
       apiKey: 'k',
-      baseUrl: 'https://127.0.0.1:27124',
+      baseUrl: 'http://127.0.0.1:27123',
       verifySsl: false,
       requestTimeoutMs: 30_000,
       enableCommands: false,
@@ -65,8 +65,8 @@ describe('getServerConfig', () => {
 
   it('honors a custom OBSIDIAN_BASE_URL', () => {
     vi.stubEnv('OBSIDIAN_API_KEY', 'k');
-    vi.stubEnv('OBSIDIAN_BASE_URL', 'http://127.0.0.1:27123');
-    expect(getServerConfig().baseUrl).toBe('http://127.0.0.1:27123');
+    vi.stubEnv('OBSIDIAN_BASE_URL', 'https://127.0.0.1:27124');
+    expect(getServerConfig().baseUrl).toBe('https://127.0.0.1:27124');
   });
 
   it('throws a configuration error mentioning OBSIDIAN_API_KEY when missing', () => {

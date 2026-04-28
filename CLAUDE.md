@@ -134,7 +134,7 @@ const envBoolean = z.preprocess((val) => {
 
 const ServerConfigSchema = z.object({
   apiKey: z.string().min(1).describe('Bearer token for the Obsidian Local REST API plugin.'),
-  baseUrl: z.string().url().default('https://127.0.0.1:27124'),
+  baseUrl: z.string().url().default('http://127.0.0.1:27123'),
   verifySsl: envBoolean.default(false),
   requestTimeoutMs: z.coerce.number().int().positive().default(30_000),
   enableCommands: envBoolean.default(false),

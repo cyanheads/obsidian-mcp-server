@@ -210,7 +210,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 OBSIDIAN_API_KEY=... bun run start:ht
 
 - [Bun v1.3.11](https://bun.sh/) or higher (or Node.js v22+).
 - The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin installed and enabled in your vault. Generate an API key in **Settings → Community Plugins → Local REST API** and copy it into `OBSIDIAN_API_KEY`.
-- The plugin defaults to HTTPS on port `27124` with a self-signed certificate — `OBSIDIAN_VERIFY_SSL` is `false` by default to match.
+- This server defaults to `http://127.0.0.1:27123` for simplicity. Enable **"Non-encrypted (HTTP) Server"** in the plugin settings to use it. To use the always-on HTTPS port instead, set `OBSIDIAN_BASE_URL=https://127.0.0.1:27124`; the plugin's self-signed cert is handled by `OBSIDIAN_VERIFY_SSL=false` (the default).
 
 ### Installation
 
@@ -244,8 +244,8 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 OBSIDIAN_API_KEY=... bun run start:ht
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `OBSIDIAN_API_KEY` | **Required.** Bearer token for the Obsidian Local REST API plugin. | — |
-| `OBSIDIAN_BASE_URL` | Base URL of the Local REST API plugin. Switch to `http://127.0.0.1:27123` for the insecure HTTP port. | `https://127.0.0.1:27124` |
-| `OBSIDIAN_VERIFY_SSL` | Verify the TLS certificate. Default `false` because the plugin uses a self-signed cert. When `false`, the service sets `NODE_TLS_REJECT_UNAUTHORIZED=0` process-wide — Bun's runtime ignores undici's per-dispatcher option, so that's the only reliable opt-out. | `false` |
+| `OBSIDIAN_BASE_URL` | Base URL of the Local REST API plugin. Use `https://127.0.0.1:27124` for the always-on HTTPS port (self-signed cert). | `http://127.0.0.1:27123` |
+| `OBSIDIAN_VERIFY_SSL` | Verify the TLS certificate. Default `false` because the plugin uses a self-signed cert. On Node, the dispatcher's `rejectUnauthorized` option handles this without any process-wide change. On Bun, the runtime ignores that option, so the service additionally sets `NODE_TLS_REJECT_UNAUTHORIZED=0` — that fallback is scoped to Bun only. | `false` |
 | `OBSIDIAN_REQUEST_TIMEOUT_MS` | Per-request timeout in milliseconds. | `30000` |
 | `OBSIDIAN_ENABLE_COMMANDS` | Opt-in flag for `obsidian_execute_command`. Off by default — Obsidian commands are opaque and can be destructive. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |

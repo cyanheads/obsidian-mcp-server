@@ -93,12 +93,12 @@ export class ObsidianService {
     /**
      * Bun's runtime ignores undici's per-dispatcher `connect.rejectUnauthorized`
      * option, so the only reliable opt-out under Bun is the process-wide
-     * `NODE_TLS_REJECT_UNAUTHORIZED=0` flag. Node honors both; Bun honors only
-     * the env var. Setting it here keeps the toggle next to the config that
-     * requested it. Default Obsidian Local REST API ships a self-signed cert,
-     * so most users run with `OBSIDIAN_VERIFY_SSL=false`.
+     * `NODE_TLS_REJECT_UNAUTHORIZED=0` flag. Node honors the dispatcher option
+     * (set below), so the env var fallback is scoped to Bun to avoid mutating
+     * process-wide TLS behavior on Node. Default Obsidian Local REST API ships
+     * a self-signed cert, so most users run with `OBSIDIAN_VERIFY_SSL=false`.
      */
-    if (!config.verifySsl) {
+    if (!config.verifySsl && typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') {
       process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     }
     this.#dispatcher = new Agent({

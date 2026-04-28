@@ -26,14 +26,14 @@ const ServerConfigSchema = z.object({
   baseUrl: z
     .string()
     .url()
-    .default('https://127.0.0.1:27124')
+    .default('http://127.0.0.1:27123')
     .describe(
-      'Base URL of the Obsidian Local REST API. HTTPS on 27124 (self-signed) is the default; switch to http://127.0.0.1:27123 for the insecure HTTP port.',
+      'Base URL of the Obsidian Local REST API. Defaults to http://127.0.0.1:27123 — enable "Non-encrypted (HTTP) Server" in the plugin settings to match. Use https://127.0.0.1:27124 to hit the always-on HTTPS port (self-signed cert; pair with OBSIDIAN_VERIFY_SSL=false).',
     ),
   verifySsl: envBoolean
     .default(false)
     .describe(
-      "Whether to verify the TLS certificate on the Obsidian endpoint. Defaults to false because the plugin uses a self-signed cert. When false, the service sets `NODE_TLS_REJECT_UNAUTHORIZED=0` process-wide — Bun's runtime ignores undici's per-dispatcher option and that's the only reliable opt-out.",
+      "Whether to verify the TLS certificate on the Obsidian endpoint. Defaults to false because the plugin uses a self-signed cert. On Node, the dispatcher's `rejectUnauthorized` option handles this without any process-wide change. On Bun, the runtime ignores that option, so the service additionally sets `NODE_TLS_REJECT_UNAUTHORIZED=0` — that fallback is scoped to Bun only.",
     ),
   requestTimeoutMs: z.coerce
     .number()
