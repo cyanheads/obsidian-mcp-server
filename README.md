@@ -29,7 +29,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | `obsidian_write_note` | Create or overwrite a note, or replace a single heading/block/frontmatter section in place. |
 | `obsidian_append_to_note` | Append content to a note, or to a specific heading/block/frontmatter section. |
 | `obsidian_patch_note` | Surgical `append` / `prepend` / `replace` against a heading, block reference, or frontmatter field. |
-| `obsidian_replace_in_note` | String or regex search-replace inside a single note, fetched and written back. |
+| `obsidian_replace_in_note` | Body-wide search-replace inside a single note. Literal or regex matching, with `wholeWord`, `flexibleWhitespace`, `caseSensitive`, `replaceAll`, and `$1`/`$&` capture groups. |
 | `obsidian_manage_frontmatter` | Atomic `get` / `set` / `delete` on a single frontmatter key. |
 | `obsidian_manage_tags` | Add, remove, or list tags — reconciles frontmatter `tags:` and inline `#tag` syntax. |
 | `obsidian_delete_note` | Permanently delete a note. Elicits human confirmation when the client supports it. |
@@ -53,7 +53,7 @@ Pair the document-map projection with `obsidian_patch_note` to discover edit tar
 
 Three search modes selected by `mode`:
 
-- `text` — substring match with surrounding context windows; optional `pathPrefix` filter
+- `text` — substring match with surrounding context windows; optional `pathPrefix` filter (text mode only — passing `pathPrefix` in `dataview` or `jsonlogic` mode is rejected with `path_prefix_invalid_mode`)
 - `dataview` — Dataview DQL (`TABLE …`) for path/date/metadata queries; `file.mtime`, `file.path`, etc. are queryable
 - `jsonlogic` — JSONLogic tree evaluated against `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`; custom `glob` and `regexp` operators
 
@@ -82,6 +82,22 @@ Surgical edits at a single document target.
 - Targets: heading path, block reference ID, or frontmatter field
 
 Use `obsidian_get_note` with `format: "document-map"` to discover what targets exist before patching.
+
+---
+
+### `obsidian_replace_in_note`
+
+Body-wide search-replace for edits that don't fit `obsidian_patch_note`'s structural targets. The note is fetched, replacements are applied sequentially (each sees the previous output), and the result is written back in a single `PUT`.
+
+Per-replacement options:
+
+- `useRegex` — treat `search` as an ECMAScript regex. With `useRegex: true`, the replacement honors `$1` / `$&` capture-group references.
+- `caseSensitive` — when `false`, match case-insensitively
+- `wholeWord` — wrap the pattern in `\b…\b`; works in both literal and regex modes
+- `flexibleWhitespace` — substitute any run of whitespace in `search` with `\s+`. Literal mode only — has no effect when `useRegex: true` (express it directly).
+- `replaceAll` — when `false`, only the first match is replaced
+
+Literal mode preserves `$1` / `$&` in the replacement verbatim — only `useRegex: true` expands capture-group references.
 
 ---
 
@@ -125,11 +141,12 @@ All resource data is also reachable via tools — `obsidian_get_note` for `obsid
 Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
 
 - Declarative tool and resource definitions — single file per primitive, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats
-- Pluggable auth: `none`, `jwt`, `oauth`
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
+- Unified error handling — handlers throw, framework catches, classifies, and formats. Tools advertise their failure surface via typed `errors[]` contracts.
+- Pluggable auth on the HTTP transport: `none`, `jwt`, `oauth`
 - Structured logging with optional OpenTelemetry tracing
 - STDIO and Streamable HTTP transports
+
+The server itself is stateless — every tool call hits the Local REST API directly. The framework's storage backends, request-state KV, and progress streams aren't used here; Obsidian is single-vault and there's nothing to persist between calls.
 
 Obsidian-specific:
 
@@ -139,7 +156,7 @@ Obsidian-specific:
 - Search across three modes: text, Dataview DQL, JSONLogic — with overflow indicator when results exceed the 100-hit cap
 - Optional human-in-the-loop confirmation for destructive deletes via `ctx.elicit`
 - Opt-in `obsidian_execute_command` for the command palette — registered only when explicitly enabled
-- Forgiving path resolution on read/open — silently retries case-mismatched paths against the canonical filename, throws `Conflict` on ambiguous case matches, and enriches `NotFound` with `Did you mean: …?` suggestions when only near-matches exist (delete is excluded — a destructive op shouldn't silently rewrite the target path)
+- Forgiving path resolution on `obsidian_get_note` and `obsidian_open_in_ui` — silently retries case-mismatched paths against the canonical filename, throws `Conflict` on ambiguous case matches, and enriches `NotFound` with `Did you mean: …?` suggestions when only near-matches exist. `obsidian_delete_note` is deliberately excluded — a destructive op shouldn't silently rewrite the target path.
 
 ## Getting started
 
@@ -181,11 +198,11 @@ Or with npx (no Bun required):
 }
 ```
 
-For Streamable HTTP, set the transport and start the server:
+For Streamable HTTP, set the transport and start the server. Inline env vars work for one-off runs; for repeated use, copy values into `.env` (see [`.env.example`](./.env.example)) and run `bun run start:http`.
 
 ```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 OBSIDIAN_API_KEY=... bun run start:http
-# Server listens at http://localhost:3010/mcp
+MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
+# Server listens at http://127.0.0.1:3010/mcp by default
 ```
 
 ### Prerequisites
@@ -231,10 +248,12 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 OBSIDIAN_API_KEY=... bun run start:ht
 | `OBSIDIAN_REQUEST_TIMEOUT_MS` | Per-request timeout in milliseconds. | `30000` |
 | `OBSIDIAN_ENABLE_COMMANDS` | Opt-in flag for `obsidian_execute_command`. Off by default — Obsidian commands are opaque and can be destructive. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
-| `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
+| `MCP_HTTP_HOST` | Host for the HTTP server. | `127.0.0.1` |
+| `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
+| `MCP_HTTP_ENDPOINT_PATH` | Endpoint path for the JSON-RPC handler. | `/mcp` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
+| `MCP_AUTH_SECRET_KEY` | **Required when `MCP_AUTH_MODE=jwt`.** ≥32-char shared secret used to verify incoming JWTs. | — |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
-| `STORAGE_PROVIDER_TYPE` | Storage backend. | `in-memory` |
 | `OTEL_ENABLED` | Enable OpenTelemetry. | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
