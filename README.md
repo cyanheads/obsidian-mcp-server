@@ -139,7 +139,7 @@ Obsidian-specific:
 - Search across three modes: text, Dataview DQL, JSONLogic — with overflow indicator when results exceed the 100-hit cap
 - Optional human-in-the-loop confirmation for destructive deletes via `ctx.elicit`
 - Opt-in `obsidian_execute_command` for the command palette — registered only when explicitly enabled
-- Forgiving path resolution on read/open/delete — silently retries case-mismatched paths against the canonical filename, throws `Conflict` on ambiguous case matches, and enriches `NotFound` with `Did you mean: …?` suggestions when only near-matches exist
+- Forgiving path resolution on read/open — silently retries case-mismatched paths against the canonical filename, throws `Conflict` on ambiguous case matches, and enriches `NotFound` with `Did you mean: …?` suggestions when only near-matches exist (delete is excluded — a destructive op shouldn't silently rewrite the target path)
 
 ## Getting started
 

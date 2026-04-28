@@ -9,7 +9,6 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { forbidden } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { TargetSchema } from './_shared/schemas.js';
-import { withCaseFallback } from './_shared/suggest-paths.js';
 
 export const obsidianDeleteNote = tool('obsidian_delete_note', {
   description:
@@ -28,17 +27,7 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
     const svc = getObsidianService();
     const { target } = input;
 
-    // Resolve the canonical path before showing the elicit prompt so the user
-    // sees the file we'll actually delete (case-fallback may correct typos).
-    let path: string;
-    if (target.type === 'path') {
-      const { resolvedPath } = await withCaseFallback(ctx, svc, target, (t) =>
-        svc.getNoteJson(ctx, t),
-      );
-      path = resolvedPath ?? target.path;
-    } else {
-      path = await svc.resolvePath(ctx, target);
-    }
+    const path = await svc.resolvePath(ctx, target);
 
     if (ctx.elicit) {
       const confirmed = await ctx.elicit(
@@ -52,7 +41,7 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
       }
     }
 
-    await svc.deleteNote(ctx, { type: 'path', path });
+    await svc.deleteNote(ctx, target);
     return { path, deleted: true };
   },
 
