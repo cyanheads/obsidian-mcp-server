@@ -31,7 +31,8 @@
     "test": "bunx vitest run",
     "start": "node dist/index.js",
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio bun ./dist/index.js",
-    "start:http": "MCP_TRANSPORT_TYPE=http bun ./dist/index.js"
+    "start:http": "MCP_TRANSPORT_TYPE=http bun ./dist/index.js",
+    "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish"
   },
   "keywords": [
     "mcp",
