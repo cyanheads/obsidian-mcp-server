@@ -10,7 +10,7 @@ import { obsidianDeleteNote } from './obsidian-delete-note.tool.js';
 import { obsidianExecuteCommand } from './obsidian-execute-command.tool.js';
 import { obsidianGetNote } from './obsidian-get-note.tool.js';
 import { obsidianListCommands } from './obsidian-list-commands.tool.js';
-import { obsidianListFiles } from './obsidian-list-files.tool.js';
+import { obsidianListNotes } from './obsidian-list-notes.tool.js';
 import { obsidianListTags } from './obsidian-list-tags.tool.js';
 import { obsidianManageFrontmatter } from './obsidian-manage-frontmatter.tool.js';
 import { obsidianManageTags } from './obsidian-manage-tags.tool.js';
@@ -23,7 +23,7 @@ import { obsidianWriteNote } from './obsidian-write-note.tool.js';
 /** Tools registered unconditionally on every server. */
 export const baseToolDefinitions = [
   obsidianGetNote,
-  obsidianListFiles,
+  obsidianListNotes,
   obsidianListTags,
   obsidianListCommands,
   obsidianSearchNotes,

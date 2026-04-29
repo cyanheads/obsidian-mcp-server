@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-04-28 04:51:05
+Generated on: 2026-04-29 00:01:19
 
 ```text
 obsidian-mcp-server/
@@ -28,6 +28,7 @@ obsidian-mcp-server/
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
+│   ├── split-changelog.ts
 │   └── tree.ts
 ├── skills/
 │   ├── add-app-tool/
@@ -117,7 +118,7 @@ obsidian-mcp-server/
 │   │           ├── obsidian-execute-command.tool.ts
 │   │           ├── obsidian-get-note.tool.ts
 │   │           ├── obsidian-list-commands.tool.ts
-│   │           ├── obsidian-list-files.tool.ts
+│   │           ├── obsidian-list-notes.tool.ts
 │   │           ├── obsidian-list-tags.tool.ts
 │   │           ├── obsidian-manage-frontmatter.tool.ts
 │   │           ├── obsidian-manage-tags.tool.ts
@@ -150,7 +151,7 @@ obsidian-mcp-server/
 │   │   ├── obsidian-execute-command.test.ts
 │   │   ├── obsidian-get-note.test.ts
 │   │   ├── obsidian-list-commands.test.ts
-│   │   ├── obsidian-list-files.test.ts
+│   │   ├── obsidian-list-notes.test.ts
 │   │   ├── obsidian-list-tags.test.ts
 │   │   ├── obsidian-manage-frontmatter.test.ts
 │   │   ├── obsidian-manage-tags.test.ts

@@ -1,27 +1,27 @@
 /**
- * @fileoverview Handler tests for obsidian_list_files.
- * @module tests/tools/obsidian-list-files.test
+ * @fileoverview Handler tests for obsidian_list_notes.
+ * @module tests/tools/obsidian-list-notes.test
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
-import { obsidianListFiles } from '@/mcp-server/tools/definitions/obsidian-list-files.tool.js';
+import { obsidianListNotes } from '@/mcp-server/tools/definitions/obsidian-list-notes.tool.js';
 import { setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
 const sampleFiles = ['Note.md', 'Sub/', 'Other.md', 'README.md', 'archive/'];
 
-describe('obsidian_list_files', () => {
+describe('obsidian_list_notes', () => {
   it('lists vault root and splits files vs. directories', async () => {
     harness
       .current()
       .pool.intercept({ path: '/vault/', method: 'GET' })
       .reply(200, { files: sampleFiles }, { headers: { 'content-type': 'application/json' } });
 
-    const out = await obsidianListFiles.handler(
-      obsidianListFiles.input.parse({}),
+    const out = await obsidianListNotes.handler(
+      obsidianListNotes.input.parse({}),
       createMockContext(),
     );
     expect(out.path).toBe('');
@@ -35,8 +35,8 @@ describe('obsidian_list_files', () => {
       .pool.intercept({ path: '/vault/', method: 'GET' })
       .reply(200, { files: sampleFiles }, { headers: { 'content-type': 'application/json' } });
 
-    const out = await obsidianListFiles.handler(
-      obsidianListFiles.input.parse({ extension: '.MD' }),
+    const out = await obsidianListNotes.handler(
+      obsidianListNotes.input.parse({ extension: '.MD' }),
       createMockContext(),
     );
     expect(out.files).toEqual(['Note.md', 'Other.md', 'README.md']);
@@ -48,8 +48,8 @@ describe('obsidian_list_files', () => {
       .pool.intercept({ path: '/vault/', method: 'GET' })
       .reply(200, { files: sampleFiles }, { headers: { 'content-type': 'application/json' } });
 
-    const out = await obsidianListFiles.handler(
-      obsidianListFiles.input.parse({ nameRegex: '^[Aa]' }),
+    const out = await obsidianListNotes.handler(
+      obsidianListNotes.input.parse({ nameRegex: '^[Aa]' }),
       createMockContext(),
     );
     expect(out.files).toEqual([]);
@@ -63,9 +63,9 @@ describe('obsidian_list_files', () => {
       .reply(200, { files: [] }, { headers: { 'content-type': 'application/json' } });
 
     await expect(
-      obsidianListFiles.handler(
-        obsidianListFiles.input.parse({ nameRegex: '[' }),
-        createMockContext({ errors: obsidianListFiles.errors }),
+      obsidianListNotes.handler(
+        obsidianListNotes.input.parse({ nameRegex: '[' }),
+        createMockContext({ errors: obsidianListNotes.errors }),
       ),
     ).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
@@ -79,8 +79,8 @@ describe('obsidian_list_files', () => {
       .pool.intercept({ path: '/vault/Projects/', method: 'GET' })
       .reply(200, { files: ['Plan.md'] }, { headers: { 'content-type': 'application/json' } });
 
-    const out = await obsidianListFiles.handler(
-      obsidianListFiles.input.parse({ path: '/Projects/' }),
+    const out = await obsidianListNotes.handler(
+      obsidianListNotes.input.parse({ path: '/Projects/' }),
       createMockContext(),
     );
     expect(out.files).toEqual(['Plan.md']);
@@ -88,9 +88,9 @@ describe('obsidian_list_files', () => {
   });
 });
 
-describe('obsidian_list_files / format()', () => {
+describe('obsidian_list_notes / format()', () => {
   it('renders both files and directories', () => {
-    const blocks = obsidianListFiles.format!({
+    const blocks = obsidianListNotes.format!({
       path: 'sub',
       files: ['a.md'],
       directories: ['nested'],

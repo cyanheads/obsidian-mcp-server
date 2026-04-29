@@ -1,17 +1,19 @@
 /**
- * @fileoverview obsidian_list_files — list files and subdirectories at a vault path.
+ * @fileoverview obsidian_list_notes — list notes (and subdirectories) at a vault path.
  * Splits the mixed `files[]` (entries ending in `/` are directories) into separate
- * arrays and applies optional extension/regex filters.
- * @module mcp-server/tools/definitions/obsidian-list-files.tool
+ * arrays and applies optional extension/regex filters. Named `_notes` rather than
+ * `_files` to disambiguate from agents' generic file-system tools (Read, Glob, LS) —
+ * a `_files` tool surface tempts agents to fish for non-vault paths through it.
+ * @module mcp-server/tools/definitions/obsidian-list-notes.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 
-export const obsidianListFiles = tool('obsidian_list_files', {
+export const obsidianListNotes = tool('obsidian_list_notes', {
   description:
-    'List files and subdirectories at a vault path. Defaults to vault root when `path` is omitted. Optional `extension` and `nameRegex` filters narrow the listing.',
+    'List notes and subdirectories at a vault path. Defaults to vault root when `path` is omitted. Optional `extension` and `nameRegex` filters narrow the listing. Returns all entries the upstream lists — markdown notes, attachments, canvas/excalidraw files — split into `files[]` and `directories[]`.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     path: z.string().optional().describe('Vault-relative directory path. Omit for the vault root.'),
@@ -43,7 +45,7 @@ export const obsidianListFiles = tool('obsidian_list_files', {
       .optional()
       .describe('Active filters that narrowed the listing, when any were applied.'),
   }),
-  auth: ['tool:obsidian_list_files:read'],
+  auth: ['tool:obsidian_list_notes:read'],
   errors: [
     {
       reason: 'regex_invalid',

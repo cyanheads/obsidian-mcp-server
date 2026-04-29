@@ -22,7 +22,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | Tool Name | Description |
 |:----------|:------------|
 | `obsidian_get_note` | Read a note as raw content, full structured form (content + frontmatter + tags + stat), structural document map, or a single section. |
-| `obsidian_list_files` | List files and subdirectories at a vault path with optional extension and name-regex filters. |
+| `obsidian_list_notes` | List notes and subdirectories at a vault path with optional extension and name-regex filters. Returns all entries the upstream lists (markdown, attachments, canvas, excalidraw) split into `files[]` and `directories[]`. |
 | `obsidian_list_tags` | List every tag found across the vault with usage counts, including hierarchical parents. |
 | `obsidian_list_commands` | List Obsidian command-palette commands available for execution. |
 | `obsidian_search_notes` | Search the vault by text, Dataview DQL, or JSONLogic — capped at 100 hits with overflow indicator. |
