@@ -57,7 +57,7 @@ Three search modes selected by `mode`:
 - `dataview` — Dataview DQL (`TABLE …`) for path/date/metadata queries; `file.mtime`, `file.path`, etc. are queryable
 - `jsonlogic` — JSONLogic tree evaluated against `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`; custom `glob` and `regexp` operators
 
-Results are capped at 100 hits. When the upstream returns more, an `excluded` indicator surfaces the overflow count and a hint to narrow the query.
+Results are capped at 100 hits. When the upstream returns more, an `excluded` indicator surfaces the overflow count and a hint to narrow the query. Text-mode hits are additionally clipped per file at `maxMatchesPerHit` (default 10) so a single match-heavy note can't blow the response budget — clipped hits carry `truncated: true` and `totalMatches`.
 
 ---
 

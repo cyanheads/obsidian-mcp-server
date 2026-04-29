@@ -1,7 +1,9 @@
 /**
  * @fileoverview obsidian_search_notes — text/dataview/jsonlogic search.
  * Caps results at 100 hits and surfaces an `excluded` indicator when more
- * were returned upstream.
+ * were returned upstream. Text-mode hits are additionally capped per file
+ * via `maxMatchesPerHit` so a single match-heavy note can't blow the
+ * response budget — clipped hits carry `truncated: true` and `totalMatches`.
  * @module mcp-server/tools/definitions/obsidian-search-notes.tool
  */
 
@@ -10,6 +12,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 
 const HIT_CAP = 100;
+const DEFAULT_MATCHES_PER_HIT = 10;
 const EXCLUSION_HINT =
   'Narrow your query (add filters or more specific terms) to surface the rest.';
 
@@ -31,7 +34,19 @@ const TextHitSchema = z
           })
           .describe('A single match within a file.'),
       )
-      .describe('Per-match context windows.'),
+      .describe('Per-match context windows. Capped per file by `maxMatchesPerHit`.'),
+    totalMatches: z
+      .number()
+      .optional()
+      .describe(
+        'Total matches in this file. Present only when `matches` was clipped to `maxMatchesPerHit`.',
+      ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when `matches` was clipped to `maxMatchesPerHit`. Use `obsidian_get_note` to read the full file when more context is needed.',
+      ),
   })
   .describe('A file with one or more text-search matches.');
 
@@ -55,7 +70,7 @@ export const obsidianSearchNotes = tool('obsidian_search_notes', {
 - \`dataview\`: a Dataview DQL query (\`TABLE …\`). Pass \`query\` as the DQL string. Use this for path/date/metadata filters; \`file.mtime\`, \`file.path\`, etc. are queryable.
 - \`jsonlogic\`: a JSONLogic tree evaluated over each note's NoteJson. Pass \`logic\` as a JSON object. Available \`var\` paths: \`path\` (string), \`content\` (string), \`frontmatter.<key>\` (any), \`tags\` (string[]), \`stat.ctime\` / \`stat.mtime\` / \`stat.size\` (number). Custom operators include \`glob\` and \`regexp\`.
 
-Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the overflow.`,
+Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the overflow. Text-mode hits are additionally clipped to \`maxMatchesPerHit\` matches per file (default ${DEFAULT_MATCHES_PER_HIT}); when clipped, the hit carries \`truncated: true\` and \`totalMatches\`.`,
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     mode: z
@@ -81,6 +96,14 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       .string()
       .optional()
       .describe('Filter returned filenames by prefix (text mode only, applied client-side).'),
+    maxMatchesPerHit: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        `Cap on match contexts returned per file in text mode. When clipped, the hit carries \`truncated: true\` and \`totalMatches\`. Default ${DEFAULT_MATCHES_PER_HIT}.`,
+      ),
   }),
   output: z.object({
     result: z
@@ -150,7 +173,9 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       const all = await svc.searchText(ctx, input.query, input.contextLength);
       const prefix = input.pathPrefix;
       const filtered = prefix ? all.filter((h) => h.filename.startsWith(prefix)) : all;
-      const capped = applyCap(filtered);
+      const matchCap = input.maxMatchesPerHit ?? DEFAULT_MATCHES_PER_HIT;
+      const clipped = filtered.map((h) => clipMatches(h, matchCap));
+      const capped = applyCap(clipped);
       return { result: { mode: 'text' as const, ...capped } };
     }
 
@@ -190,7 +215,11 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
     lines.push('');
     if (result.mode === 'text') {
       for (const h of result.hits) {
-        lines.push(`### ${h.filename}${h.score !== undefined ? ` (score: ${h.score})` : ''}`);
+        const score = h.score !== undefined ? ` (score: ${h.score})` : '';
+        const trunc = h.truncated
+          ? ` — truncated, showing first ${h.matches.length} of ${h.totalMatches} matches`
+          : '';
+        lines.push(`### ${h.filename}${score}${trunc}`);
         for (const m of h.matches) {
           lines.push(`- match[${m.match.start}–${m.match.end}]: ${truncate(m.context, 240)}`);
         }
@@ -215,6 +244,19 @@ function applyCap<T>(all: T[]): {
   return {
     hits: all.slice(0, HIT_CAP),
     excluded: { count: all.length - HIT_CAP, hint: EXCLUSION_HINT },
+  };
+}
+
+function clipMatches<T extends { matches: unknown[] }>(
+  hit: T,
+  cap: number,
+): T & { truncated?: boolean; totalMatches?: number } {
+  if (hit.matches.length <= cap) return hit;
+  return {
+    ...hit,
+    matches: hit.matches.slice(0, cap),
+    truncated: true,
+    totalMatches: hit.matches.length,
   };
 }
 

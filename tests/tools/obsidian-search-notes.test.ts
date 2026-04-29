@@ -78,6 +78,81 @@ describe('obsidian_search_notes / text', () => {
     });
   });
 
+  it('clips matches per hit at the default cap (10) and flags `truncated` + `totalMatches`', async () => {
+    const matches = Array.from({ length: 25 }, (_, i) => ({
+      context: `c${i}`,
+      match: { start: 0, end: 1 },
+    }));
+    harness
+      .current()
+      .pool.intercept({
+        path: (p) => (p as string).startsWith('/search/simple/'),
+        method: 'POST',
+      })
+      .reply(200, [{ filename: 'busy.md', matches }], {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const out = await obsidianSearchNotes.handler(
+      obsidianSearchNotes.input.parse({ mode: 'text', query: 'x' }),
+      createMockContext(),
+    );
+    if (out.result.mode !== 'text') throw new Error('expected text branch');
+    const hit = out.result.hits[0];
+    expect(hit?.matches).toHaveLength(10);
+    expect(hit?.truncated).toBe(true);
+    expect(hit?.totalMatches).toBe(25);
+  });
+
+  it('honors a caller-supplied `maxMatchesPerHit` override', async () => {
+    const matches = Array.from({ length: 8 }, (_, i) => ({
+      context: `c${i}`,
+      match: { start: 0, end: 1 },
+    }));
+    harness
+      .current()
+      .pool.intercept({
+        path: (p) => (p as string).startsWith('/search/simple/'),
+        method: 'POST',
+      })
+      .reply(200, [{ filename: 'note.md', matches }], {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const out = await obsidianSearchNotes.handler(
+      obsidianSearchNotes.input.parse({ mode: 'text', query: 'x', maxMatchesPerHit: 3 }),
+      createMockContext(),
+    );
+    if (out.result.mode !== 'text') throw new Error('expected text branch');
+    const hit = out.result.hits[0];
+    expect(hit?.matches).toHaveLength(3);
+    expect(hit?.truncated).toBe(true);
+    expect(hit?.totalMatches).toBe(8);
+  });
+
+  it('leaves `truncated` and `totalMatches` undefined when matches fit under the cap', async () => {
+    harness
+      .current()
+      .pool.intercept({
+        path: (p) => (p as string).startsWith('/search/simple/'),
+        method: 'POST',
+      })
+      .reply(
+        200,
+        [{ filename: 'small.md', matches: [{ context: 'c', match: { start: 0, end: 1 } }] }],
+        { headers: { 'content-type': 'application/json' } },
+      );
+
+    const out = await obsidianSearchNotes.handler(
+      obsidianSearchNotes.input.parse({ mode: 'text', query: 'x' }),
+      createMockContext(),
+    );
+    if (out.result.mode !== 'text') throw new Error('expected text branch');
+    const hit = out.result.hits[0];
+    expect(hit?.truncated).toBeUndefined();
+    expect(hit?.totalMatches).toBeUndefined();
+  });
+
   it('caps hits at 100 and reports the overflow in `excluded`', async () => {
     const many = Array.from({ length: 105 }, (_, i) => ({
       filename: `n${i}.md`,
@@ -182,6 +257,26 @@ describe('obsidian_search_notes / format()', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('```json');
     expect(text).toContain('"mtime": 1');
+  });
+
+  it('annotates truncated text hits with the "truncated, showing first N of M" indicator', () => {
+    const blocks = obsidianSearchNotes.format!({
+      result: {
+        mode: 'text',
+        hits: [
+          {
+            filename: 'busy.md',
+            matches: [{ context: 'snippet', match: { start: 0, end: 1 } }],
+            truncated: true,
+            totalMatches: 25,
+          },
+        ],
+        excluded: undefined,
+      },
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('truncated');
+    expect(text).toContain('first 1 of 25');
   });
 
   it('shows the excluded count and hint when results are capped', () => {
