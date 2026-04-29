@@ -79,21 +79,33 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       reason: 'tags_required',
       code: JsonRpcErrorCode.ValidationError,
       when: '`operation` is "add" or "remove" but `tags` was empty or omitted.',
+      recovery: 'Pass a non-empty `tags` array (without `#`), e.g. `["draft", "wip"]`.',
     },
     {
       reason: 'note_missing',
       code: JsonRpcErrorCode.NotFound,
       when: 'The vault path does not resolve to an existing note.',
+      recovery:
+        'Verify the path with obsidian_list_notes or use obsidian_search_notes to locate the note.',
     },
     {
       reason: 'no_active_file',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
+      recovery: 'Open a note in Obsidian or pass an explicit path target instead.',
     },
     {
       reason: 'periodic_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic` but no matching periodic note exists.',
+      recovery: 'Create the periodic note first or pass an explicit path target.',
+    },
+    {
+      reason: 'periodic_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
+      recovery:
+        "Enable the period in Obsidian's Periodic Notes plugin settings, or pass an explicit path target instead.",
     },
   ],
 
@@ -118,7 +130,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       throw ctx.fail(
         'tags_required',
         '`tags` is required and must be non-empty for add/remove operations.',
-        { operation: input.operation },
+        { operation: input.operation, ...ctx.recoveryFor('tags_required') },
       );
     }
 

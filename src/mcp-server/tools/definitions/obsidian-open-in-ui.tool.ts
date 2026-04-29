@@ -41,6 +41,8 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
       reason: 'note_missing',
       code: JsonRpcErrorCode.NotFound,
       when: '`failIfMissing: true` (default) and the path does not exist in the vault. Pass `failIfMissing: false` to allow Obsidian to create the file on open.',
+      recovery:
+        'Verify the path with obsidian_list_notes or pass failIfMissing false to create on open.',
     },
   ],
 
@@ -69,16 +71,18 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
       const reason = err instanceof McpError ? err.data?.reason : undefined;
       if (reason !== 'note_missing') throw err;
       const suggestions = (err instanceof McpError && (err.data?.suggestions as string[])) || [];
-      const hint =
-        suggestions.length > 0
-          ? ` Did you mean: ${suggestions.map((s) => `"${s}"`).join(', ')}?`
-          : '';
+      const hintParts: string[] = [];
+      if (suggestions.length > 0) {
+        hintParts.push(`Did you mean: ${suggestions.map((s) => `"${s}"`).join(', ')}?`);
+      }
+      hintParts.push('Pass failIfMissing: false to create on open.');
       throw ctx.fail(
         'note_missing',
-        `Cannot open '${input.path}' — file does not exist.${hint} Pass failIfMissing: false to create on open.`,
+        `Cannot open '${input.path}' — file does not exist.`,
         {
           path: input.path,
           ...(suggestions.length > 0 ? { suggestions } : {}),
+          recovery: { hint: hintParts.join(' ') },
         },
         { cause: err },
       );

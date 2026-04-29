@@ -81,8 +81,12 @@ describe('obsidian_open_in_ui', () => {
       ),
     ).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      message: expect.stringContaining('Did you mean: "n"?'),
-      data: { path: 'N.md', suggestions: ['n'], reason: 'note_missing' },
+      data: {
+        path: 'N.md',
+        suggestions: ['n'],
+        reason: 'note_missing',
+        recovery: { hint: expect.stringContaining('Did you mean: "n"?') },
+      },
     });
   });
 

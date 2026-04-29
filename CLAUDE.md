@@ -177,25 +177,33 @@ The framework also provides `ctx.state`, `ctx.sample`, and `ctx.progress`. They 
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, retryable? }]` on `tool()` / `resource()` to advertise the failure surface in `tools/list` (under `_meta['mcp-ts-core/errors']`) and receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring.
+**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required descriptive metadata (≥ 5 words, lint-validated) — it's the single source of truth for the recovery hint that flows to the wire. Spread `ctx.recoveryFor('reason')` into `data` to opt the contract recovery onto the wire (the framework mirrors `data.recovery.hint` into `content[]` text). Override with explicit `{ recovery: { hint: '...' } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring.
 
 ```ts
 errors: [
-  { reason: 'note_missing', code: JsonRpcErrorCode.NotFound, when: 'No note matched the path' },
-  { reason: 'plugin_unreachable', code: JsonRpcErrorCode.ServiceUnavailable, when: 'Local REST API plugin is offline', retryable: true },
+  { reason: 'note_missing', code: JsonRpcErrorCode.NotFound,
+    when: 'No note matched the path',
+    recovery: 'Verify the path with obsidian_list_notes or use obsidian_search_notes to locate the note.' },
+  { reason: 'plugin_unreachable', code: JsonRpcErrorCode.ServiceUnavailable,
+    when: 'Local REST API plugin is offline', retryable: true,
+    recovery: 'Confirm Obsidian is running with the Local REST API plugin enabled.' },
 ],
 async handler(input, ctx) {
   const note = await svc.getNote(input.path, ctx);
-  if (!note) throw ctx.fail('note_missing', `Note ${input.path} not found`);
+  // Static recovery — pulled from the contract via ctx.recoveryFor.
+  if (!note) throw ctx.fail('note_missing', `Note ${input.path} not found`, {
+    ...ctx.recoveryFor('note_missing'),
+  });
   return note;
 }
 ```
 
-Services don't have `ctx.fail` — they pass `data: { reason: 'note_missing' }` to a factory so the wire shape matches what `ctx.fail` produces:
+Services that accept `ctx` use the same resolver for parity. The Obsidian service threads `ctx` into `#throwForStatus` and spreads `ctx.recoveryFor(reason)` per status branch, so service-side throws carry the calling tool's contract recovery onto the wire:
 
 ```ts
 // inside obsidian-service.ts
-throw notFound('Note not found', { reason: 'note_missing', path });
+throw notFound(`Not found: ${display}`, data('note_missing'));
+// where data(reason) does: { path, reason, ...ctx.recoveryFor(reason), upstream? }
 ```
 
 **Fallback for ad-hoc throws** (no contract entry fits, prototype tools, service-layer code without a contract): use error factories.
@@ -306,8 +314,6 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting (Biome) |
 | `bun run lint:mcp` | Validate MCP definitions against the linter rules |
 | `bun run test` | Run Vitest tests |
-| `bun run dev:stdio` | Dev mode (stdio, watch) |
-| `bun run dev:http` | Dev mode (HTTP, watch) |
 | `bun run start:stdio` | Production mode (stdio) — requires `bun run build` first |
 | `bun run start:http` | Production mode (HTTP) — requires `bun run build` first |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` rollup from `changelog/<minor>.x/*.md` |

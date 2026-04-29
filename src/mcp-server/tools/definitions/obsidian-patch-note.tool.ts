@@ -46,21 +46,34 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
       reason: 'note_missing',
       code: JsonRpcErrorCode.NotFound,
       when: 'The vault path does not resolve to an existing note.',
+      recovery:
+        'Verify the path with obsidian_list_notes or use obsidian_search_notes to locate the note.',
     },
     {
       reason: 'no_active_file',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
+      recovery: 'Open a note in Obsidian or pass an explicit path target instead.',
     },
     {
       reason: 'periodic_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic` but no matching periodic note exists.',
+      recovery: 'Create the periodic note first or pass an explicit path target.',
+    },
+    {
+      reason: 'periodic_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
+      recovery:
+        "Enable the period in Obsidian's Periodic Notes plugin settings, or pass an explicit path target instead.",
     },
     {
       reason: 'section_target_missing',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The named heading/block/frontmatter field does not exist in the note. Use `obsidian_get_note` with `format: "document-map"` to discover available targets.',
+      recovery:
+        'Call obsidian_get_note with format document-map to discover the available targets.',
     },
   ],
 

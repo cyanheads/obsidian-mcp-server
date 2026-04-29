@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.7"
+  version: "2.8"
   audience: external
   type: workflow
 ---
@@ -83,7 +83,7 @@ The user-goal list shapes the tool surface; the operation list fills in the gaps
 | Primitive | Use when | Examples |
 |:----------|:---------|:--------|
 | **Tool** | The default. Any operation or data access an agent needs to accomplish the server's purpose. | Search, create, update, analyze, fetch-by-ID, list reference data |
-| **App Tool** | Tool whose results benefit from interactive HTML UI (data visualization, forms, rich rendering). Uses `appTool()` + paired `appResource()`. Hosts without MCP Apps support receive the text fallback from `format()`. | Dashboards, data explorers, interactive charts, form-based workflows |
+| **App Tool** | **Rare — default to a standard tool.** Only when a human will actively interact with the result in real time *and* the target client supports MCP Apps. Most clients are tool-only and most agent workflows are read-by-LLM, not viewed-by-human. App tools add an iframe + CSP, `app.ontoolresult`/`callServerTool` plumbing, host-context wiring, and a `format()` text twin that still has to be content-complete (since most clients only see that). Two surfaces to keep in sync, two failure modes per change. | Dense tabular state a human scrubs through; form-based human approval in an MCP Apps-capable client |
 | **Resource** | *Additionally* expose as a resource when the data is addressable by stable URI, read-only, and useful as injectable context. | Config, schemas, status, entity-by-ID lookups |
 | **Prompt** | Reusable message template that structures how the LLM approaches a task | Analysis framework, report template, review checklist |
 | **Neither** | Internal detail, admin-only, not useful to an LLM | Token refresh, webhook setup, migrations |
@@ -321,7 +321,9 @@ The pattern: name the shortcut for what it does (`text_search`, `name_search`), 
 
 #### Error design
 
-Errors are part of the tool's interface — design them during the design phase, not as an afterthought. Two aspects: **classification** (what error code) and **messaging** (what the LLM reads).
+Errors are part of the tool's interface — design them during the design phase, not as an afterthought. Three aspects: **the contract** (which failures are public), **classification** (what error code), and **messaging** (what the LLM reads).
+
+**Declare a typed contract for domain failures.** When a tool has known failure modes the agent should plan around (`no_match`, `queue_full`, `vendor_down`), enumerate them as `errors: [{ reason, code, when, retryable? }]` on the definition. The framework types `ctx.fail(reason, …)` against the declared reason union (typos become TS errors) and auto-populates `data.reason` on the thrown error for stable observability. The error reaches clients with parity across both surfaces — `structuredContent.error` (Claude Code) and `content[]` text (Claude Desktop). Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble from anywhere and don't need to be enumerated. See `api-errors` skill for the full pattern.
 
 **Classify errors by origin.** Different error sources need different codes and different recovery guidance. Map the failure modes for each tool during design:
 
@@ -333,7 +335,7 @@ Errors are part of the tool's interface — design them during the design phase,
 | **Auth/permissions** | Insufficient scopes, expired token | `Forbidden` / `Unauthorized` | Maybe — escalate or re-auth |
 | **Server internal** | Parse failure, missing config, unexpected state | `InternalError` | No — server-side issue |
 
-The framework auto-classifies many of these at runtime (HTTP status codes, JS error types, common patterns), but explicit classification in the handler gives better error messages. Use error factories (`notFound()`, `validationError()`, etc.) when you want a specific code; plain `throw new Error()` when the framework's auto-classification is good enough.
+The framework auto-classifies many of these at runtime (HTTP status codes, JS error types, common patterns), but explicit classification in the handler gives better error messages. For declared contract failures, throw via `ctx.fail('reason', …)`. For ad-hoc throws outside the contract, use error factories (`notFound()`, `validationError()`, etc.) when the code matters; plain `throw new Error()` when the framework's auto-classification is good enough.
 
 **Write error messages as recovery instructions.** The message is the agent's only signal for what to do next.
 
@@ -344,17 +346,24 @@ throw new Error('Not found');
 // Good — names both resolution options
 "No session working directory set. Please specify a 'path' or use 'git_set_working_dir' first."
 
-// Good — structured hint in error data
+// Good — structured hint in error data using the canonical `data.recovery.hint` shape.
+// The framework auto-mirrors `data.recovery.hint` into the content[] text as
+// `Recovery: <hint>` so format()-only clients (Claude Desktop) see the same
+// guidance structuredContent clients (Claude Code) read from `error.data.recovery.hint`.
 throw forbidden(
   "Cannot perform 'reset --hard' on protected branch 'main' without explicit confirmation.",
-  { branch: 'main', operation: 'reset --hard', hint: 'Set the confirmed parameter to true to proceed.' },
+  {
+    branch: 'main',
+    operation: 'reset --hard',
+    recovery: { hint: 'Set the confirmed parameter to true to proceed.' },
+  },
 );
 
 // Good — upstream error with actionable context
 throw notFound(`Paper '${id}' not found on arXiv. Verify the ID format (e.g., '2401.12345' or '2401.12345v2').`);
 ```
 
-**During design, list the expected failure modes for each tool.** Not every mode needs a custom message, but the common ones should have clear recovery guidance baked in. Include these in the tool's section of the design doc — they inform both the handler implementation and the error factory choices.
+**During design, list the expected failure modes for each tool** with the reason, code, and when-clause that will land in the contract. Include these in the tool's section of the design doc — they become the literal `errors: [...]` entries during scaffolding and inform recovery messaging. Not every failure needs a contract entry; baseline infrastructure errors (5xx, timeouts, validation) are fine to let bubble.
 
 #### Design table
 
@@ -367,7 +376,7 @@ Summarize each tool:
 | **Description** | Concrete capability statement. Add operational guidance (prerequisites, constraints, gotchas) when non-obvious. |
 | **Input schema** | `.describe()` on every field. Constrained types (enums, literals, regex). Explain costs/tradeoffs of parameter choices. |
 | **Output schema** | Designed for the LLM's next action. Include chaining IDs. Communicate filtering. Post-write state where useful. |
-| **Error messages** | Name what went wrong and what the LLM should do about it. Include hints for common recovery paths. |
+| **Errors** | Declare domain failure modes as a typed contract (`errors: [{ reason, code, when, retryable? }]`) so `ctx.fail` is type-checked and capable clients can preview failures via `tools/list`. Error messages name what went wrong and what the LLM should do about it. |
 | **Annotations** | `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`. Helps clients auto-approve safely. |
 | **Auth scopes** | `tool:<snake_tool_name>:<verb>` or `resource:<kebab-resource-name>:<verb>` (e.g., `tool:inventory_search:read`, `resource:echo-app-ui:read`). Domain-led `<domain>:<verb>` (e.g., `inventory:read`) is an acceptable alternative — pick one convention per server and stay consistent. Skip for read-only or stdio-only servers. |
 
@@ -399,7 +408,7 @@ Skip for purely data/action-oriented servers.
 
 **Server-as-service.** When the server IS the source of truth (knowledge graph, in-memory task tracker, local scratchpad, embedded inference wrapper), the resilience table below doesn't apply — there's no upstream to retry. The design questions shift to state management: what's tenant-scoped vs. global, what TTLs apply, what survives a restart, what the storage backend is. Plan persistence via `ctx.state` for tenant-scoped KV (auto-namespaced by `tenantId`), or use a `StorageService` provider directly when data must cross tenants. Service init still happens in `setup()`, accessed via `getMyService()` at request time. Calls within the server are local and synchronous-ish — the API-efficiency table below also doesn't apply.
 
-For services wrapping external APIs, plan the resilience layer. See `docs/service-resilience.md` for full rationale.
+For services wrapping external APIs, plan the resilience layer.
 
 | Concern | Decision |
 |:--------|:---------|
@@ -507,9 +516,9 @@ Execute the plan using the scaffolding skills:
 
 1. `add-service` for each service
 2. `add-tool` for each standard tool
-3. `add-app-tool` for each MCP Apps tool (creates paired tool + UI resource)
-4. `add-resource` for each standalone resource
-5. `add-prompt` for each prompt
+3. `add-resource` for each standalone resource
+4. `add-prompt` for each prompt
+5. `add-app-tool` *only if any app tools survived the design step* (rare — see the App Tool row in Step 3)
 6. `devcheck` after each addition
 
 ## Checklist
@@ -529,6 +538,7 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] Output schemas designed for LLM's next action — chaining IDs, post-write state, filtering communicated
 - [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data, not just a count or title
 - [ ] Error messages guide recovery — name what went wrong and what to do next
+- [ ] **If a tool has known domain failure modes:** typed error contract declared (`errors: [{ reason, code, when, retryable? }]`) so `ctx.fail` is type-checked and capable clients see failures via `tools/list`
 - [ ] Annotations set correctly (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
 - [ ] Design doc written to `docs/design.md`
 - [ ] Design confirmed with user (or user pre-authorized implementation)
@@ -537,7 +547,7 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] **If state-aware procedural guidance adds value:** instruction tool considered with `nextToolSuggestions` pre-filled from diagnostics
 - [ ] **If workflow tools have destructive modes:** destructive arm guarded by `ctx.elicit` when available, with `destructiveHint` annotation as fallback for non-interactive clients
 - [ ] **If a parameter determines blast radius:** safe default set (e.g., `mode: 'preview'`, `dryRun: true`, `confirmCount` required)
-- [ ] **If interactive UI adds value to results:** MCP Apps tool identified (with `format()` text fallback for non-app hosts)
+- [ ] **App tools default to no.** If one was proposed, verified there's a real human-in-the-loop in an MCP Apps-capable client justifying the iframe/CSP/`format()`-twin maintenance cost — otherwise dropped in favor of a standard tool
 - [ ] **If the server exposes resources:** URIs use `{param}` templates, pagination planned for large lists
 - [ ] **If the server has external deps or shared state:** service layer planned (or explicitly skipped with reasoning)
 - [ ] **If services wrap external APIs:** resilience planned (retry boundary, backoff, parse classification)

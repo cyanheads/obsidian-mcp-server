@@ -237,7 +237,7 @@ export class ObsidianService {
     });
     if (res.status === 404) return false;
     if (res.ok) return true;
-    return await this.#throwForStatus(res, url);
+    return await this.#throwForStatus(res, url, ctx);
   }
 
   // ── Listings ─────────────────────────────────────────────────────────────
@@ -370,7 +370,7 @@ export class ObsidianService {
           signal: ctx.signal,
         });
         if (!res.ok) {
-          await this.#throwForStatus(res, pathAndQuery);
+          await this.#throwForStatus(res, pathAndQuery, ctx);
         }
         return res;
       },
@@ -390,14 +390,14 @@ export class ObsidianService {
     );
   }
 
-  async #throwForStatus(res: UndiciResponse, path: string): Promise<never> {
+  async #throwForStatus(res: UndiciResponse, path: string, ctx: Context): Promise<never> {
     const text = await this.#readBodySafe(res);
     const body = parseJsonObject(text);
     const display = displayPath(path);
     const upstream = safeUpstream(body, text);
-    const data = (extra?: Record<string, unknown>) => ({
+    const data = (reason?: string) => ({
       path: display,
-      ...(extra ?? {}),
+      ...(reason !== undefined ? { reason, ...ctx.recoveryFor(reason) } : {}),
       ...(upstream ? { upstream } : {}),
     });
 
@@ -416,7 +416,7 @@ export class ObsidianService {
         if (path.startsWith('/active/')) {
           throw notFound(
             'No file is currently active in Obsidian — open a file in the app first.',
-            data({ reason: 'no_active_file' }),
+            data('no_active_file'),
           );
         }
         if (path.startsWith('/periodic/')) {
@@ -426,21 +426,21 @@ export class ObsidianService {
           const suffix = dateMatch ? ` for ${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : '';
           throw notFound(
             `No ${period} note found${suffix}. Check that the Periodic Notes plugin is enabled and the note exists.`,
-            data({ reason: 'periodic_not_found' }),
+            data('periodic_not_found'),
           );
         }
         if (path.startsWith('/commands/')) {
           throw notFound(
             `Unknown Obsidian command: ${display}. Use \`obsidian_list_commands\` to discover valid command IDs.`,
-            data({ reason: 'command_unknown' }),
+            data('command_unknown'),
           );
         }
-        throw notFound(`Not found: ${display}`, data({ reason: 'note_missing' }));
+        throw notFound(`Not found: ${display}`, data('note_missing'));
       }
       case 405:
         throw validationError(
           `${display} cannot accept this method (often: the path is a directory, not a file).`,
-          data({ reason: 'path_is_directory' }),
+          data('path_is_directory'),
         );
       case 400: {
         const upstreamMsg = body?.message ?? `Bad request to ${display}`;
@@ -451,8 +451,15 @@ export class ObsidianService {
         if (isTargetMiss) {
           throw validationError(
             `Section target not found in ${display}. Use \`obsidian_get_note\` with \`format: "document-map"\` to list available headings, blocks, and frontmatter fields. Nested headings need \`Parent::Child\` syntax.`,
-            data({ reason: 'section_target_missing' }),
+            data('section_target_missing'),
           );
+        }
+        // Periodic Notes plugin returns 400 with "Specified period is not enabled"
+        // when the requested period (daily/weekly/monthly/...) is disabled in the
+        // user's plugin settings. Distinct from periodic_not_found (404) — caller
+        // can enable it or fall back to an explicit path target.
+        if (path.startsWith('/periodic/') && /\bnot enabled\b/i.test(upstreamMsg)) {
+          throw validationError(upstreamMsg, data('periodic_disabled'));
         }
         throw validationError(upstreamMsg, data());
       }

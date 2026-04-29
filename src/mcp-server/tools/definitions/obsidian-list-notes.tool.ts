@@ -126,11 +126,14 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
       reason: 'regex_invalid',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied `nameRegex` is not a valid ECMAScript regex.',
+      recovery:
+        'Test the pattern (e.g. `^Project.*\\.md$`) in a JS regex tester, or omit nameRegex to disable filtering.',
     },
     {
       reason: 'note_missing',
       code: JsonRpcErrorCode.NotFound,
       when: 'The supplied `path` does not exist in the vault. Sub-directories that disappear mid-walk are silently skipped — only the root path surfaces this error.',
+      recovery: 'List a parent directory to find the correct casing or check the spelling.',
     },
   ],
 
@@ -146,7 +149,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
         throw ctx.fail(
           'regex_invalid',
           `Invalid nameRegex: ${(err as Error).message}`,
-          { nameRegex: input.nameRegex },
+          { nameRegex: input.nameRegex, ...ctx.recoveryFor('regex_invalid') },
           { cause: err },
         );
       }

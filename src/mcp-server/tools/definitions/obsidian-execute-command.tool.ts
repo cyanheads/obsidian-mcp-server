@@ -29,6 +29,7 @@ export const obsidianExecuteCommand = tool('obsidian_execute_command', {
       reason: 'command_unknown',
       code: JsonRpcErrorCode.NotFound,
       when: 'The supplied `commandId` is not registered in Obsidian. Use `obsidian_list_commands` to discover valid IDs.',
+      recovery: 'Call obsidian_list_commands to discover the registered command IDs.',
     },
   ],
 

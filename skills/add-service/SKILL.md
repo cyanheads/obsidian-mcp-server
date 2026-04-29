@@ -4,7 +4,7 @@ description: >
   Scaffold a new service integration. Use when the user asks to add a service, integrate an external API, or create a reusable domain module with its own initialization and state.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -237,9 +237,20 @@ Services don't declare `errors: [...]` contracts and don't have `ctx.fail` — t
 - **Carry contract `reason` via `data: { reason }`** when the calling tool declares an `errors[]` contract entry for this failure mode. Services can't call `ctx.fail`, but passing the reason in `data` flows through the auto-classifier untouched, so clients see the same `error.data.reason` they'd see from `ctx.fail` — no handler-side catch-and-rethrow needed:
 
   ```ts
-  // tool declares: errors: [{ reason: 'empty_expression', code: JsonRpcErrorCode.ValidationError, when: '…' }]
+  // tool declares: errors: [{ reason: 'empty_expression', code: JsonRpcErrorCode.ValidationError, when: '…', recovery: '…' }]
   throw validationError('Expression cannot be empty.', { reason: 'empty_expression' });
   ```
+
+- **Resolve contract `recovery` via `ctx.recoveryFor`** to land the contract's recovery hint on the wire without duplicating the string. Always-present on `Context`, returns `{}` when the calling tool has no matching reason — spread-safe regardless:
+
+  ```ts
+  throw validationError('Parse failed: ' + err.message, {
+    reason: 'parse_failed',
+    ...ctx.recoveryFor('parse_failed'),  // resolves from caller's contract
+  });
+  ```
+
+  The contract `recovery` (validated ≥5 words at lint time) is the single source of truth. Services that opt in via the resolver carry the same hint to the wire that handler-level `ctx.fail` callers do — no drift, no auto-population. For dynamic recovery (interpolating runtime values into the hint), pass an explicit `{ recovery: { hint: '…' } }` instead.
 
 ## API Efficiency
 

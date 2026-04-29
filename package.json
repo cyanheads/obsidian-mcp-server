@@ -1,6 +1,6 @@
 {
   "name": "obsidian-mcp-server",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "mcpName": "io.github.cyanheads/obsidian-mcp-server",
   "description": "MCP server for Obsidian vaults — read, write, search, and surgically edit notes, tags, and frontmatter via the Local REST API plugin. STDIO or Streamable HTTP.",
   "type": "module",
@@ -29,8 +29,6 @@
     "changelog:build": "bun run scripts/build-changelog.ts",
     "changelog:check": "bun run scripts/build-changelog.ts --check",
     "test": "bunx vitest run",
-    "dev:stdio": "MCP_TRANSPORT_TYPE=stdio bun --watch src/index.ts",
-    "dev:http": "MCP_TRANSPORT_TYPE=http bun --watch src/index.ts",
     "start": "node dist/index.js",
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio bun ./dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http bun ./dist/index.js"
@@ -67,7 +65,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.8.2",
+    "@cyanheads/mcp-ts-core": "^0.8.6",
     "@types/js-yaml": "^4.0.9",
     "js-yaml": "^4.1.1",
     "pino-pretty": "^13.1.3",

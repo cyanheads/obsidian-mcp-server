@@ -27,21 +27,33 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
       reason: 'cancelled',
       code: JsonRpcErrorCode.InvalidRequest,
       when: 'User declined the deletion via interactive elicitation.',
+      recovery: 'Re-run the tool when the user is ready to confirm deletion.',
     },
     {
       reason: 'note_missing',
       code: JsonRpcErrorCode.NotFound,
       when: 'The vault path does not resolve to an existing note.',
+      recovery:
+        'Verify the path with obsidian_list_notes or use obsidian_search_notes to locate the note.',
     },
     {
       reason: 'no_active_file',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
+      recovery: 'Open a note in Obsidian or pass an explicit path target instead.',
     },
     {
       reason: 'periodic_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic` but no matching periodic note exists.',
+      recovery: 'Pass an explicit path target — periodic notes must already exist.',
+    },
+    {
+      reason: 'periodic_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
+      recovery:
+        "Enable the period in Obsidian's Periodic Notes plugin settings, or pass an explicit path target instead.",
     },
   ],
 
@@ -59,7 +71,10 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
         }),
       );
       if (confirmed.action !== 'accept' || confirmed.content?.confirm !== true) {
-        throw ctx.fail('cancelled', 'Deletion cancelled by user.', { path });
+        throw ctx.fail('cancelled', 'Deletion cancelled by user.', {
+          path,
+          ...ctx.recoveryFor('cancelled'),
+        });
       }
     }
 

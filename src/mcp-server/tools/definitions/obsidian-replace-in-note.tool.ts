@@ -65,21 +65,34 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
       reason: 'regex_invalid',
       code: JsonRpcErrorCode.ValidationError,
       when: 'A `useRegex: true` replacement supplied a `search` pattern that is not a valid ECMAScript regex.',
+      recovery:
+        'Test the pattern in a JS regex tester, or set useRegex to false to match `search` as a literal string.',
     },
     {
       reason: 'note_missing',
       code: JsonRpcErrorCode.NotFound,
       when: 'The vault path does not resolve to an existing note.',
+      recovery:
+        'Verify the path with obsidian_list_notes or use obsidian_search_notes to locate the note.',
     },
     {
       reason: 'no_active_file',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
+      recovery: 'Open a note in Obsidian or pass an explicit path target instead.',
     },
     {
       reason: 'periodic_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic` but no matching periodic note exists.',
+      recovery: 'Create the periodic note first or pass an explicit path target.',
+    },
+    {
+      reason: 'periodic_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
+      recovery:
+        "Enable the period in Obsidian's Periodic Notes plugin settings, or pass an explicit path target instead.",
     },
   ],
 
@@ -103,7 +116,7 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
           throw ctx.fail(
             'regex_invalid',
             `Invalid regex '${r.search}': ${(err as Error).message}`,
-            { search: r.search },
+            { search: r.search, ...ctx.recoveryFor('regex_invalid') },
             { cause: err },
           );
         }

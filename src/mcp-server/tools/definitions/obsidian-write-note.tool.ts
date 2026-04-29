@@ -48,6 +48,7 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       reason: 'file_exists',
       code: JsonRpcErrorCode.Conflict,
       when: 'Whole-file write was attempted against an existing note and `overwrite` was not set to `true`.',
+      recovery: 'Retry with overwrite true or use obsidian_patch_note for in-place edits.',
     },
   ],
 
@@ -75,11 +76,12 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
     const exists = await svc.noteExists(ctx, target);
     if (exists && !input.overwrite) {
       const path = await svc.resolvePath(ctx, target);
-      throw ctx.fail(
-        'file_exists',
-        `Note '${path}' already exists. To modify it in place, use \`obsidian_patch_note\` (surgical section edits), \`obsidian_append_to_note\` (append content), or \`obsidian_replace_in_note\` (search-and-replace). To replace the entire file, retry with \`overwrite: true\`.`,
-        { path },
-      );
+      throw ctx.fail('file_exists', `Note '${path}' already exists.`, {
+        path,
+        recovery: {
+          hint: 'To modify in place, use obsidian_patch_note (surgical section edits), obsidian_append_to_note (append content), or obsidian_replace_in_note (search-and-replace). To replace the entire file, retry with overwrite: true.',
+        },
+      });
     }
 
     await svc.writeNote(ctx, target, input.content, input.contentType);

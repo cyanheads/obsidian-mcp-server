@@ -142,16 +142,21 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       reason: 'path_prefix_invalid_mode',
       code: JsonRpcErrorCode.ValidationError,
       when: '`pathPrefix` was provided in a non-text mode (only `text` supports prefix filtering).',
+      recovery: 'Drop pathPrefix or switch mode to text for prefix filtering.',
     },
     {
       reason: 'query_required',
       code: JsonRpcErrorCode.ValidationError,
       when: '`query` is missing for `text` or `dataview` mode (required for both).',
+      recovery:
+        'Pass `query` — search terms for text mode (e.g. "TODO"), or DQL like "TABLE WHERE file.mtime > date(today)" for dataview mode.',
     },
     {
       reason: 'logic_required',
       code: JsonRpcErrorCode.ValidationError,
       when: '`logic` is missing for `jsonlogic` mode.',
+      recovery:
+        'Pass a JSONLogic tree as `logic`, e.g. `{"glob": [{"var": "path"}, "Projects/*.md"]}`.',
     },
   ],
 
@@ -161,6 +166,7 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
     if (input.pathPrefix && input.mode !== 'text') {
       throw ctx.fail('path_prefix_invalid_mode', '`pathPrefix` is only valid in text mode.', {
         mode: input.mode,
+        ...ctx.recoveryFor('path_prefix_invalid_mode'),
       });
     }
 
@@ -168,6 +174,7 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       if (!input.query) {
         throw ctx.fail('query_required', '`query` is required for text mode.', {
           mode: input.mode,
+          ...ctx.recoveryFor('query_required'),
         });
       }
       const all = await svc.searchText(ctx, input.query, input.contextLength);
@@ -183,6 +190,7 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       if (!input.query) {
         throw ctx.fail('query_required', '`query` (DQL string) is required for dataview mode.', {
           mode: input.mode,
+          ...ctx.recoveryFor('query_required'),
         });
       }
       const all = await svc.searchDataview(ctx, input.query);
@@ -193,6 +201,7 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
     if (!input.logic) {
       throw ctx.fail('logic_required', '`logic` (JSONLogic tree) is required for jsonlogic mode.', {
         mode: input.mode,
+        ...ctx.recoveryFor('logic_required'),
       });
     }
     const all = await svc.searchJsonLogic(ctx, input.logic);

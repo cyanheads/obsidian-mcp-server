@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.sample`, `ctx.progress`), and when to use each.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: reference
 ---
@@ -26,7 +26,7 @@ interface Context {
   // Identity & tracing
   readonly requestId: string;       // Unique per request, auto-generated
   readonly timestamp: string;       // ISO 8601 request start time
-  readonly tenantId?: string;       // From JWT 'tid' claim; 'default' in stdio mode
+  readonly tenantId?: string;       // JWT 'tid' claim; 'default' for stdio and HTTP+MCP_AUTH_MODE=none
   readonly traceId?: string;        // OTEL trace ID (present when OTEL enabled)
   readonly spanId?: string;         // OTEL span ID (present when OTEL enabled)
   readonly auth?: AuthContext;      // Parsed auth claims (clientId, scopes, sub)
@@ -41,6 +41,10 @@ interface Context {
   readonly elicit?: (message: string, schema: z.ZodObject<z.ZodRawShape>) => Promise<ElicitResult>;
   readonly sample?: (messages: SamplingMessage[], opts?: SamplingOpts) => Promise<CreateMessageResult>;
 
+  // Resource notifications — present when transport supports them
+  readonly notifyResourceListChanged?: () => void;
+  readonly notifyResourceUpdated?: (uri: string) => void;
+
   // Cancellation
   readonly signal: AbortSignal;
 
@@ -49,8 +53,14 @@ interface Context {
 
   // Raw URI — present only for resource handlers
   readonly uri?: URL;
+
+  // Opt-in contract resolver — always present (returns {} when no contract is attached
+  // or the reason is unknown), strictly typed on HandlerContext<R> against declared reasons.
+  recoveryFor(reason: string): { recovery: { hint: string } } | {};
 }
 ```
+
+> **`ctx.fail` is on `HandlerContext<R>`, not `Context`.** When a definition declares `errors: [...]`, the handler receives `HandlerContext<R> = Context & { fail: TypedFail<R>; recoveryFor: TypedRecoveryFor<R> }` — both the typed `fail` and the strictly-typed `recoveryFor` live on the intersection. The bare `Context.recoveryFor` is the loose, always-present resolver. See [`ctx.fail`](#ctxfail) and [`ctx.recoveryFor`](#ctxrecoveryfor) below.
 
 ### Identity fields
 
@@ -58,7 +68,7 @@ interface Context {
 |:------|:--------------|:-------|
 | `requestId` | Yes | Auto-generated UUID per request |
 | `timestamp` | Yes | ISO 8601, request start |
-| `tenantId` | In stdio (as `'default'`); from JWT `tid` claim in HTTP | JWT / stdio default |
+| `tenantId` | Stdio and HTTP+`MCP_AUTH_MODE=none` (as `'default'`); JWT `tid` claim in HTTP+`jwt`/`oauth` | JWT / single-tenant default |
 | `traceId` | When OTEL enabled | OTEL trace context |
 | `spanId` | When OTEL enabled | OTEL trace context |
 | `auth` | When auth enabled | Parsed JWT claims |
@@ -152,7 +162,7 @@ if (page.cursor) { /* more pages available */ }
 
 ### Behavior notes
 
-- Throws `McpError(InvalidRequest)` if `tenantId` is missing (won't happen in stdio mode — defaults to `'default'`).
+- Throws `McpError(InvalidRequest)` if `tenantId` is missing. Won't happen in stdio (any auth mode) or HTTP+`MCP_AUTH_MODE=none` — both default to `'default'`. Can happen in HTTP+`MCP_AUTH_MODE=jwt`/`oauth` when the token lacks a `tid` claim (intentional fail-closed: distinct authenticated callers must not silently share state).
 - Keys are tenant-prefixed internally; handlers never need to namespace manually.
 - **Workers persistence:** The `in-memory` provider loses data on cold starts. Use `cloudflare-kv`, `cloudflare-r2`, or `cloudflare-d1` for durable storage in Workers.
 
@@ -223,7 +233,7 @@ if (ctx.sample) {
 interface SamplingOpts {
   includeContext?: 'none' | 'thisServer' | 'allServers';
   maxTokens?: number;
-  modelPreferences?: Record<string, unknown>;
+  modelPreferences?: ModelPreferences;
   stopSequences?: string[];
   temperature?: number;
 }
@@ -320,13 +330,122 @@ Prefer `params` (the extracted URI template variables) over parsing `ctx.uri` ma
 
 ---
 
+## `ctx.fail`
+
+Present only when the definition declares an `errors[]` contract. Builds an `McpError` keyed by the contract's `reason` union, so the resulting code is consistent with what the tool advertises in `tools/list`.
+
+```ts
+export const fetchItems = tool('fetch_items', {
+  description: 'Fetch items by ID.',
+  errors: [
+    { reason: 'no_match', code: JsonRpcErrorCode.NotFound, when: 'No items matched' },
+    { reason: 'queue_full', code: JsonRpcErrorCode.RateLimited, when: 'Local queue at capacity', retryable: true },
+  ],
+  input: z.object({ ids: z.array(z.string()).describe('Item IDs') }),
+  output: z.object({ items: z.array(ItemSchema).describe('Resolved items') }),
+  async handler(input, ctx) {
+    if (queue.full()) throw ctx.fail('queue_full');
+    const items = await fetch(input.ids);
+    if (items.length === 0) throw ctx.fail('no_match', `No items match ${input.ids.length} IDs`, { ids: input.ids });
+    // ctx.fail('typo')   ← TypeScript error: 'typo' isn't in the contract
+    return { items };
+  },
+});
+```
+
+### Signature
+
+```ts
+// TypedFail<R> — R is the union of declared `reason` strings, derived from the
+// definition's `errors: [...]` const tuple via the framework's `ReasonOf<E>`.
+ctx.fail(
+  reason: R,                         // union of declared reason strings
+  message?: string,                  // defaults to the contract entry's `when` text
+  data?: Record<string, unknown>,    // merged into err.data; cannot override `reason`
+  options?: { cause?: unknown },     // ES2022 cause chain
+): McpError
+```
+
+### Behavior
+
+| Aspect | Detail |
+|:-------|:-------|
+| Code resolution | `code` comes from the matching contract entry — never from the caller. The thrown `McpError.code` always equals what's advertised in `tools/list`. |
+| Default message | When `message` is omitted, the contract entry's `when` text is used. |
+| `data.reason` | Auto-populated from the contract entry. Caller-supplied `data.reason` **cannot** override it — the framework spreads caller data first and writes `reason` last so observers see a stable identifier. |
+| Cause chains | Pass `{ cause: e }` to preserve the original error — `pino-pretty` and observability platforms render the chain automatically. |
+| Unknown reason | If the type-system guard is bypassed (JS caller, stale contract), `ctx.fail` returns an `McpError(InternalError)` with `data.reason` and `data.declaredReasons` set so the bug is loud rather than silent. |
+
+### Without a contract
+
+When the definition has no `errors[]` field, `ctx` is plain `Context` and `ctx.fail` is absent. Throw `McpError` directly (or via factory):
+
+```ts
+import { notFound, rateLimited } from '@cyanheads/mcp-ts-core/errors';
+
+async handler(input, ctx) {
+  if (queue.full()) throw rateLimited('Queue at capacity');
+  const items = await fetch(input.ids);
+  if (items.length === 0) throw notFound(`No items match ${input.ids.length} IDs`);
+  return { items };
+}
+```
+
+The contract is opt-in. See `skills/api-errors/SKILL.md` for the full type-driven pattern, lint rules, and baseline-codes guidance.
+
+---
+
+## `ctx.recoveryFor`
+
+Always present on `Context`. Resolves the contract `recovery` for a given reason and returns the canonical wire shape `{ recovery: { hint } }`, ready to spread into `data`. The first member of a planned **family of opt-in resolution helpers** (future: `troubleshootingFor`, `userMessageFor`, …).
+
+```ts
+async handler(input, ctx) {
+  // Static recovery — pulled from the contract entry, no string duplication.
+  if (queue.full()) throw ctx.fail('queue_full', undefined, { ...ctx.recoveryFor('queue_full') });
+
+  // Dynamic recovery — interpolate runtime context, override the contract default.
+  if (!matched) throw ctx.fail('no_match', `No items for "${input.query}"`, {
+    recovery: { hint: `Try a broader query than "${input.query}", or check spelling.` },
+  });
+}
+```
+
+### Signature
+
+```ts
+// Loose (always present on Context — works without a contract attached):
+ctx.recoveryFor(reason: string): { recovery: { hint: string } } | {}
+
+// Strict (HandlerContext<R> when the definition declares errors[]):
+ctx.recoveryFor(reason: R): { recovery: { hint: string } }
+```
+
+### Behavior
+
+| Aspect | Detail |
+|:-------|:-------|
+| No contract attached | Returns `{}` — spread is a no-op. Always safe. |
+| Unknown reason | Returns `{}` (TS prevents this for typed callers; runtime is loose for JS / stale contracts). |
+| Declared reason | Returns `{ recovery: { hint: <contract.recovery> } }` — spread into `data`. |
+| Override | Caller can override by spreading `recoveryFor` first then writing `recovery: { hint: '...' }` after — last write wins. |
+| Service usage | Services that accept `ctx: Context` can spread `ctx.recoveryFor('reason')` directly; the no-op fallback means they don't need to know which tool called them. |
+
+### Why opt-in resolution, not auto-population
+
+The framework never injects `data.recovery.hint` without an explicit signal at the throw site. Authors opt in by typing `ctx.recoveryFor('reason')` — the same way `ctx.fail('reason')` opts into resolving the contract `code`. The contract is the single source of truth for the recovery hint; the resolver is a typed lookup keyed by the same reason the author already typed. No magic, no hidden transformation.
+
+The `≥5 words` lint rule on contract `recovery` (validated at lint time) makes this load-bearing — every `ctx.recoveryFor` call site benefits from the thoughtfulness the contract enforced.
+
+---
+
 ## Quick reference
 
 | Property | Type | Present when |
 |:---------|:-----|:-------------|
 | `ctx.requestId` | `string` | Always |
 | `ctx.timestamp` | `string` | Always |
-| `ctx.tenantId` | `string \| undefined` | Always in stdio (`'default'`); HTTP with auth |
+| `ctx.tenantId` | `string \| undefined` | Stdio (`'default'`); HTTP+`MCP_AUTH_MODE=none` (`'default'`); HTTP+`jwt`/`oauth` (JWT `tid` claim — undefined if absent) |
 | `ctx.traceId` | `string \| undefined` | OTEL enabled |
 | `ctx.spanId` | `string \| undefined` | OTEL enabled |
 | `ctx.auth` | `AuthContext \| undefined` | Auth enabled |
@@ -335,5 +454,9 @@ Prefer `params` (the extracted URI template variables) over parsing `ctx.uri` ma
 | `ctx.signal` | `AbortSignal` | Always |
 | `ctx.elicit` | `function \| undefined` | Client supports elicitation |
 | `ctx.sample` | `function \| undefined` | Client supports sampling |
+| `ctx.notifyResourceListChanged` | `function \| undefined` | Transport supports resource notifications |
+| `ctx.notifyResourceUpdated` | `function \| undefined` | Transport supports resource notifications |
 | `ctx.progress` | `ContextProgress \| undefined` | Tool defined with `task: true` |
 | `ctx.uri` | `URL \| undefined` | Resource handlers only |
+| `ctx.fail` | `(reason, msg?, data?, opts?) => McpError` | Definition declares `errors[]` contract |
+| `ctx.recoveryFor` | `(reason) => { recovery: { hint } } \| {}` | Always (no-op when no contract); strictly typed on `HandlerContext<R>` |
