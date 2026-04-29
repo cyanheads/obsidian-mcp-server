@@ -80,8 +80,9 @@ export async function withCaseFallback<T>(
     if (probe.extInsensitive.length === 0) throw err;
     const suggestions = probe.extInsensitive.slice(0, MAX_SUGGESTIONS);
     const list = suggestions.map((s) => `"${s}"`).join(', ');
+    const prefix = err.message.replace(/[.!?]?\s*$/, '');
     throw notFound(
-      `${err.message} Did you mean: ${list}?`,
+      `${prefix}. Did you mean: ${list}?`,
       { ...(err.data ?? {}), suggestions },
       { cause: err },
     );
