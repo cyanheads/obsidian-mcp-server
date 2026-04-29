@@ -1,0 +1,47 @@
+name: Feature Request
+description: Suggest a new feature or improvement for obsidian-mcp-server
+labels: ["enhancement"]
+# assignees: ["your-github-username"]  # uncomment to auto-assign new issues
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Secondary labels.** `enhancement` is applied automatically — also add one or more of the following in the sidebar if they apply:
+        - `performance` — improves memory, CPU, latency, or resource usage
+        - `security` — hardens the security posture
+        - `breaking-change` — will break public API; requires a major bump
+
+        If a label doesn't exist in this repo yet, create it once: `gh label create <name>`.
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What problem does this solve? Who benefits?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe the expected behavior or API change. Include example code if possible.
+      render: typescript
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What you tried or considered instead, and why it fell short.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Related issues, prior art, links, or anything else relevant.
+    validations:
+      required: false

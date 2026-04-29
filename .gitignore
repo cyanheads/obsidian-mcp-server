@@ -1,172 +1,81 @@
-# Operating System Files
+# =============================================================================
+# OPERATING SYSTEM FILES
+# =============================================================================
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
 
-# IDE and Editor Files
+# =============================================================================
+# IDE AND EDITOR FILES
+# =============================================================================
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 *.swp
 *.swo
 *~
-*.sublime-workspace
-*.sublime-project
+.history/
 
-# TypeScript
-*.tsbuildinfo
-.tscache/
-*.js.map
-*.tgz
-.npm
-.eslintcache
-.rollup.cache
-*.mjs.map
-*.cjs.map
-*.d.ts.map
-*.d.ts
-!*.d.ts.template
-.pnp.js
-.pnp.cjs
-.pnp.mjs
-.pnp.json
-.pnp.ts
-
-# Demo and Example Directories
-demo/
-demos/
-example/
-examples/
-samples/
-.sample-env
-sample.*
-!sample.template.*
-
-# Node.js
+# =============================================================================
+# NODE.JS & PACKAGE MANAGERS
+# =============================================================================
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
+# =============================================================================
+# TYPESCRIPT & BUILD
+# =============================================================================
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.venv
-venv/
-ENV/
+*.tsbuildinfo
+.tsbuildinfo
+.tsbuildinfo.scripts
+*.js.map
+*.d.ts.map
+*.tgz
 
-# Java
-*.class
+# =============================================================================
+# TESTING & COVERAGE
+# =============================================================================
+coverage/
+!coverage/coverage-final.json
+
+# =============================================================================
+# LOGS & DATABASES
+# =============================================================================
 *.log
-*.jar
-*.war
-*.nar
-*.ear
-*.zip
-*.tar.gz
-*.rar
-hs_err_pid*
-target/
-.gradle/
-build/
-
-# Ruby
-*.gem
-*.rbc
-/.config
-/coverage/
-/InstalledFiles
-/pkg/
-/spec/reports/
-/spec/examples.txt
-/test/tmp/
-/test/version_tmp/
-/tmp/
-.byebug_history
-
-# Compiled Files
-*.com
-*.class
-*.dll
-*.exe
-*.o
-*.so
-
-# Package Files
-*.7z
-*.dmg
-*.gz
-*.iso
-*.rar
-*.tar
-*.zip
-
-# Logs and Databases
-*.log
-*.sql
 *.sqlite
 *.sqlite3
+logs/
 
-# Build and Distribution
-dist/
-build/
-out/
-
-# Testing
-coverage/
-.nyc_output/
-
-# Cache
+# =============================================================================
+# CACHE & TEMPORARY FILES
+# =============================================================================
 .cache/
 .parcel-cache/
 
-# Misc
-.DS_Store
+# =============================================================================
+# ENVIRONMENT & CONFIGURATION
+# =============================================================================
+.env
 .env.local
-.env.development.local
-.env.test.local
-.env.production.local
-*.bak
-*.swp
-*.swo
-*~
-.history/
+.env.*.local
+.wrangler
+worker-configuration.d.ts
+
+# =============================================================================
+# APPLICATION SPECIFIC
+# =============================================================================
+.storage/
 repomix-output*
-mcp-servers.json
-mcp-config.json
-
-# Generated Documentation
+data/
 docs/api/
-
-logs/
+docs/devdocs.md
+.mcp.json
+.claude/
+.agents/
+.gemini/
+.mcpregistry_github_token
+.mcpregistry_registry_token

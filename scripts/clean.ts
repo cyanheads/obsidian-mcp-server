@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /**
  * @fileoverview Utility script to clean build artifacts and temporary directories.
  * @module scripts/clean
@@ -8,107 +6,86 @@
  *   Works on all platforms using Node.js path normalization.
  *
  * @example
- * // Add to package.json:
- * // "scripts": {
- * //   "clean": "ts-node --esm scripts/clean.ts",
- * //   "rebuild": "npm run clean && npm run build"
- * // }
+ * // Default directories (dist, logs):
+ * // bun run scripts/clean.ts
  *
- * // Run with default directories:
- * // npm run clean
- *
- * // Run with custom directories:
- * // ts-node --esm scripts/clean.ts temp coverage
+ * // Custom directories:
+ * // bun run scripts/clean.ts temp coverage
  */
+import { readdir, rm } from 'node:fs/promises';
+import { resolve, sep } from 'node:path';
 
-import { rm, access } from "fs/promises";
-import { join } from "path";
-
-/**
- * Represents the result of a clean operation for a single directory.
- * @property dir - The name of the directory targeted for cleaning.
- * @property status - Indicates if the cleaning was successful or skipped.
- * @property reason - If skipped, the reason why.
- */
 interface CleanResult {
   dir: string;
-  status: "success" | "skipped";
   reason?: string;
+  status: 'cleaned' | 'skipped' | 'error';
 }
 
 /**
- * Asynchronously checks if a directory exists at the given path.
- * @param dirPath - The absolute or relative path to the directory.
- * @returns A promise that resolves to `true` if the directory exists, `false` otherwise.
+ * Validates that a resolved path stays within the project root.
+ * Rejects absolute paths, '..' traversal, and paths that escape cwd.
  */
-async function directoryExists(dirPath: string): Promise<boolean> {
-  try {
-    await access(dirPath);
-    return true;
-  } catch {
-    return false;
+function validatePath(dir: string, root: string): string {
+  if (!dir || dir.trim() === '') {
+    throw new Error('Empty directory name not allowed');
   }
+  if (/^[a-zA-Z]:/.test(dir) || dir.startsWith('/') || dir.startsWith('\\')) {
+    throw new Error(`Absolute paths not allowed: ${dir}`);
+  }
+  if (dir.split(/[/\\]/).includes('..')) {
+    throw new Error(`Path traversal not allowed: ${dir}`);
+  }
+  const resolved = resolve(root, dir);
+  if (!resolved.startsWith(root + sep)) {
+    throw new Error(`Path escapes project root: ${dir}`);
+  }
+  return resolved;
 }
 
-/**
- * Main function to perform the cleaning operation.
- * It reads command line arguments for target directories or uses defaults ('dist', 'logs').
- * Reports the status of each cleaning attempt.
- */
 const clean = async (): Promise<void> => {
   try {
-    let dirsToClean: string[] = ["dist", "logs"];
+    const root = process.cwd();
     const args = process.argv.slice(2);
+    const buildInfoFiles = (await readdir(root)).filter((f) => f.endsWith('.tsbuildinfo'));
+    const dirsToClean = [...new Set(args.length > 0 ? args : ['dist', 'logs', ...buildInfoFiles])];
 
-    if (args.length > 0) {
-      dirsToClean = args;
-    }
+    console.log(`Cleaning directories: ${dirsToClean.join(', ')}`);
 
-    console.log(`Attempting to clean directories: ${dirsToClean.join(", ")}`);
-
-    const results = await Promise.allSettled(
+    const results = await Promise.all(
       dirsToClean.map(async (dir): Promise<CleanResult> => {
-        const dirPath = join(process.cwd(), dir);
-
         try {
-          const exists = await directoryExists(dirPath);
-
-          if (!exists) {
-            return { dir, status: "skipped", reason: "does not exist" };
-          }
-
-          await rm(dirPath, { recursive: true, force: true });
-          return { dir, status: "success" };
+          const dirPath = validatePath(dir, root);
+          await rm(dirPath, { recursive: true });
+          return { dir, status: 'cleaned' };
         } catch (error) {
-          // Rethrow to be caught by Promise.allSettled's rejection case
-          throw error;
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            return { dir, status: 'skipped', reason: 'does not exist' };
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          return { dir, status: 'error', reason: message };
         }
       }),
     );
 
-    results.forEach((result) => {
-      if (result.status === "fulfilled") {
-        const { dir, status, reason } = result.value;
-        if (status === "success") {
-          console.log(`Successfully cleaned directory: ${dir}`);
-        } else {
-          console.log(`Skipped cleaning directory ${dir}: ${reason}.`);
-        }
+    let hasErrors = false;
+    for (const { dir, status, reason } of results) {
+      if (status === 'cleaned') {
+        console.log(`  ✓ ${dir}`);
+      } else if (status === 'skipped') {
+        console.log(`  - ${dir} (${reason})`);
       } else {
-        // The error here is the actual error object from the rejected promise
-        console.error(
-          `Error cleaning a directory (details below):\n`,
-          result.reason,
-        );
+        console.error(`  ✗ ${dir}: ${reason}`);
+        hasErrors = true;
       }
-    });
-  } catch (error) {
-    console.error(
-      "An unexpected error occurred during the clean script execution:",
-      error instanceof Error ? error.message : error,
-    );
+    }
+
+    if (hasErrors) {
+      process.exit(1);
+    }
+  } catch (error: unknown) {
+    console.error('Clean script failed:', error instanceof Error ? error.message : error);
     process.exit(1);
   }
 };
 
-clean();
+void clean();
