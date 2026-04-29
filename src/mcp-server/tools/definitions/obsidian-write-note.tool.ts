@@ -5,12 +5,13 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schemas.js';
 
 export const obsidianWriteNote = tool('obsidian_write_note', {
   description:
-    'Create or overwrite a note. With `section` provided, replaces just that heading/block/frontmatter section in place; otherwise overwrites the whole file (creating it if missing). Idempotent — repeated calls with the same input converge on the same result. For heading sections, `content` is the new body; the heading line itself is preserved automatically and a leading duplicate heading is stripped.',
+    'Create or overwrite a note. With `section` provided, replaces just that heading/block/frontmatter section in place; otherwise writes the whole file. Whole-file writes refuse to clobber an existing note unless `overwrite: true` is set — read the note first and prefer `obsidian_patch_note` / `obsidian_append_to_note` / `obsidian_replace_in_note` for in-place edits. For heading sections, `content` is the new body; the heading line itself is preserved automatically and a leading duplicate heading is stripped.',
   annotations: { idempotentHint: true, destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -23,14 +24,32 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       'Optional sub-document target. When set, only this section is replaced; rest of the note is untouched.',
     ),
     contentType: ContentTypeSchema,
+    overwrite: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Whole-file mode only (ignored when `section` is set). When `false` (default), the call fails with `file_exists` if the target note already exists — read it first and use `obsidian_patch_note` / `obsidian_append_to_note` / `obsidian_replace_in_note` for in-place edits, or retry with `overwrite: true` for a deliberate full replacement.',
+      ),
   }),
   output: z.object({
     path: z.string().describe('Resolved vault-relative path of the note that was written.'),
     sectionTargeted: z
       .boolean()
       .describe('True when only a section was replaced; false for full-file writes.'),
+    created: z
+      .boolean()
+      .describe(
+        'True when the write created a new file. False when it replaced an existing one or targeted a section.',
+      ),
   }),
   auth: ['tool:obsidian_write_note:write'],
+  errors: [
+    {
+      reason: 'file_exists',
+      code: JsonRpcErrorCode.Conflict,
+      when: 'Whole-file write was attempted against an existing note and `overwrite` was not set to `true`.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();
@@ -50,20 +69,32 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
         applyIfContentPreexists: true,
       });
       const path = await svc.resolvePath(ctx, target);
-      return { path, sectionTargeted: true };
+      return { path, sectionTargeted: true, created: false };
+    }
+
+    const exists = await svc.noteExists(ctx, target);
+    if (exists && !input.overwrite) {
+      const path = await svc.resolvePath(ctx, target);
+      throw ctx.fail(
+        'file_exists',
+        `Note '${path}' already exists. To modify it in place, use \`obsidian_patch_note\` (surgical section edits), \`obsidian_append_to_note\` (append content), or \`obsidian_replace_in_note\` (search-and-replace). To replace the entire file, retry with \`overwrite: true\`.`,
+        { path },
+      );
     }
 
     await svc.writeNote(ctx, target, input.content, input.contentType);
     const path = await svc.resolvePath(ctx, target);
-    return { path, sectionTargeted: false };
+    return { path, sectionTargeted: false, created: !exists };
   },
 
   format: (result) => [
     {
       type: 'text',
-      text: [`**Wrote ${result.path}**`, `*Section targeted:* ${result.sectionTargeted}`].join(
-        '\n',
-      ),
+      text: [
+        `**${result.created ? 'Created' : 'Wrote'} ${result.path}**`,
+        `*Section targeted:* ${result.sectionTargeted}`,
+        `*Created:* ${result.created}`,
+      ].join('\n'),
     },
   ],
 });

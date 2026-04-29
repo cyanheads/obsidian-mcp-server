@@ -6,14 +6,14 @@
     "url": "https://github.com/cyanheads/obsidian-mcp-server",
     "source": "github"
   },
-  "version": "3.0.0",
+  "version": "3.1.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "obsidian-mcp-server",
       "runtimeHint": "node",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "packageArguments": [
         {
           "type": "positional",
@@ -54,7 +54,7 @@
         },
         {
           "name": "OBSIDIAN_ENABLE_COMMANDS",
-          "description": "Opt-in flag for obsidian_execute_command. Off by default — Obsidian commands are opaque and can be destructive.",
+          "description": "Opt-in flag for the command-palette pair (obsidian_list_commands + obsidian_execute_command). Off by default — Obsidian commands are opaque and can be destructive.",
           "format": "string",
           "isRequired": false,
           "default": "false"
@@ -76,7 +76,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "obsidian-mcp-server",
       "runtimeHint": "node",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "packageArguments": [
         {
           "type": "positional",
@@ -117,7 +117,7 @@
         },
         {
           "name": "OBSIDIAN_ENABLE_COMMANDS",
-          "description": "Opt-in flag for obsidian_execute_command. Off by default — Obsidian commands are opaque and can be destructive.",
+          "description": "Opt-in flag for the command-palette pair (obsidian_list_commands + obsidian_execute_command). Off by default — Obsidian commands are opaque and can be destructive.",
           "format": "string",
           "isRequired": false,
           "default": "false"

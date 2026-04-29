@@ -6,14 +6,8 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import {
-  forbidden,
-  notFound,
-  serviceUnavailable,
-  unauthorized,
-  validationError,
-} from '@cyanheads/mcp-ts-core/errors';
-import { withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { forbidden, notFound, unauthorized, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Agent, type Dispatcher, type RequestInit, fetch as undiciFetch } from 'undici';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import type {
@@ -222,6 +216,28 @@ export class ObsidianService {
   async deleteNote(ctx: Context, target: NoteTarget): Promise<void> {
     const url = this.#targetToPath(target);
     await this.#request(ctx, url, { method: 'DELETE' });
+  }
+
+  /**
+   * Probe whether a note exists at the target. Returns `true` on 2xx,
+   * `false` on 404. Any other status (auth, server) is surfaced through the
+   * normal error classifier so callers don't silently proceed past an actual
+   * problem (e.g. treating a 401 as "doesn't exist" and overwriting blindly).
+   *
+   * Bypasses `#request` retries: a HEAD probe should never be retried — a
+   * 404 is the answer, not a transient failure.
+   */
+  async noteExists(ctx: Context, target: NoteTarget): Promise<boolean> {
+    const url = this.#targetToPath(target);
+    const res = await this.#fetch(`${this.#config.baseUrl}${url}`, {
+      method: 'HEAD',
+      headers: { Authorization: `Bearer ${this.#config.apiKey}` },
+      dispatcher: this.#dispatcher,
+      signal: ctx.signal,
+    });
+    if (res.status === 404) return false;
+    if (res.ok) return true;
+    return await this.#throwForStatus(res, url);
   }
 
   // ── Listings ─────────────────────────────────────────────────────────────
@@ -440,17 +456,24 @@ export class ObsidianService {
         }
         throw validationError(upstreamMsg, data());
       }
-      default:
-        if (res.status >= 500 && res.status < 600) {
-          throw serviceUnavailable(
-            `Obsidian Local REST API returned ${res.status}: ${body?.message ?? 'upstream error'}`,
-            data({ status: res.status }),
-          );
-        }
-        throw serviceUnavailable(
-          `Unexpected status ${res.status} from Obsidian Local REST API`,
-          data({ status: res.status }),
-        );
+      default: {
+        /**
+         * Unhandled 4xx and all 5xx — route through the framework helper so we
+         * get the canonical status→code mapping (500/501→InternalError,
+         * 502/503→ServiceUnavailable, 504→Timeout) and Retry-After capture.
+         * Body has already been consumed above, so disable the helper's read
+         * and pass the truncated body in via `data`.
+         */
+        const truncated = text ? (text.length > 500 ? `${text.slice(0, 500)}…` : text) : undefined;
+        throw await httpErrorFromResponse(res, {
+          service: 'Obsidian Local REST API',
+          captureBody: false,
+          data: {
+            ...data(),
+            ...(truncated !== undefined ? { body: truncated } : {}),
+          },
+        });
+      }
     }
   }
 

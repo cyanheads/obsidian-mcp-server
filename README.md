@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![Version](https://img.shields.io/badge/Version-3.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![Version](https://img.shields.io/badge/Version-3.1.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -24,9 +24,9 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | `obsidian_get_note` | Read a note as raw content, full structured form (content + frontmatter + tags + stat), structural document map, or a single section. |
 | `obsidian_list_notes` | List notes and subdirectories at a vault path with a recursive walk (default depth 2 — structural overview; max 20) bounded by a 1000-entry cap. Optional `extension` and `nameRegex` filters apply across the tree; regex-filtered directories are skipped without recursing into them. Returns flat `entries[]` plus a box-drawing tree in the rendered output; per-directory `truncated: true` flags where the depth limit cut off recursion. |
 | `obsidian_list_tags` | List every tag found across the vault with usage counts, including hierarchical parents. |
-| `obsidian_list_commands` | List Obsidian command-palette commands available for execution. |
+| `obsidian_list_commands` | List Obsidian command-palette commands available for execution. **Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`** (paired with `obsidian_execute_command`). |
 | `obsidian_search_notes` | Search the vault by text, Dataview DQL, or JSONLogic — capped at 100 hits with overflow indicator. |
-| `obsidian_write_note` | Create or overwrite a note, or replace a single heading/block/frontmatter section in place. |
+| `obsidian_write_note` | Create a note, replace a single section in place, or — with `overwrite: true` — clobber an existing file. Refuses whole-file writes against an existing path by default. |
 | `obsidian_append_to_note` | Append content to a note, or to a specific heading/block/frontmatter section. |
 | `obsidian_patch_note` | Surgical `append` / `prepend` / `replace` against a heading, block reference, or frontmatter field. |
 | `obsidian_replace_in_note` | Body-wide search-replace inside a single note. Literal or regex matching, with `wholeWord`, `flexibleWhitespace`, `caseSensitive`, `replaceAll`, and `$1`/`$&` capture groups. |
@@ -63,12 +63,12 @@ Results are capped at 100 hits. When the upstream returns more, an `excluded` in
 
 ### `obsidian_write_note`
 
-Idempotent create/overwrite with optional in-place section replacement.
+Create or surgically replace, with a protective default against accidental whole-file overwrites.
 
-- Without `section` — full-file `PUT`, creates the file if missing
-- With `section` — `PATCH`-with-replace against the named heading/block/frontmatter field, leaving the rest of the file untouched
+- Without `section` — full-file `PUT`. **Refuses to clobber an existing file** unless `overwrite: true` is set. The `file_exists` (`Conflict`) error suggests `obsidian_patch_note` / `obsidian_append_to_note` / `obsidian_replace_in_note` for in-place edits.
+- With `section` — `PATCH`-with-replace against the named heading/block/frontmatter field, leaving the rest of the file untouched. The `overwrite` flag is ignored in section mode.
 
-Repeated calls with the same input converge on the same result.
+The output reports `created: true` when the call brought a new file into existence; `false` when it replaced an existing one or targeted a section.
 
 ---
 
@@ -122,7 +122,7 @@ Permanently delete a note. When the client supports `elicit`, the server request
 
 Dispatch an Obsidian command-palette command by ID (discoverable via `obsidian_list_commands`). Behavior is command-dependent — some commands open UI, others delete files or close the vault.
 
-**Off by default.** Register only when the operator sets `OBSIDIAN_ENABLE_COMMANDS=true`; the tool is omitted from the surface otherwise.
+**Off by default.** Both `obsidian_execute_command` and its discovery partner `obsidian_list_commands` register only when the operator sets `OBSIDIAN_ENABLE_COMMANDS=true`; both are omitted from the surface otherwise.
 
 ---
 
@@ -155,7 +155,7 @@ Obsidian-specific:
 - Tag reconciliation across both representations: frontmatter `tags:` array and inline `#tag` syntax (skipping fenced code blocks)
 - Search across three modes: text, Dataview DQL, JSONLogic — with overflow indicator when results exceed the 100-hit cap
 - Optional human-in-the-loop confirmation for destructive deletes via `ctx.elicit`
-- Opt-in `obsidian_execute_command` for the command palette — registered only when explicitly enabled
+- Opt-in command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`) — registered only when `OBSIDIAN_ENABLE_COMMANDS=true`
 - Forgiving path resolution on `obsidian_get_note` and `obsidian_open_in_ui` — silently retries case-mismatched paths against the canonical filename, throws `Conflict` on ambiguous case matches, and enriches `NotFound` with `Did you mean: …?` suggestions when only near-matches exist. `obsidian_delete_note` is deliberately excluded — a destructive op shouldn't silently rewrite the target path.
 
 ## Getting started
@@ -246,7 +246,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | `OBSIDIAN_BASE_URL` | Base URL of the Local REST API plugin. Use `https://127.0.0.1:27124` for the always-on HTTPS port (self-signed cert). | `http://127.0.0.1:27123` |
 | `OBSIDIAN_VERIFY_SSL` | Verify the TLS certificate. Default `false` because the plugin uses a self-signed cert. On Node, the dispatcher's `rejectUnauthorized` option handles this without any process-wide change. On Bun, the runtime ignores that option, so the service additionally sets `NODE_TLS_REJECT_UNAUTHORIZED=0` — that fallback is scoped to Bun only. | `false` |
 | `OBSIDIAN_REQUEST_TIMEOUT_MS` | Per-request timeout in milliseconds. | `30000` |
-| `OBSIDIAN_ENABLE_COMMANDS` | Opt-in flag for `obsidian_execute_command`. Off by default — Obsidian commands are opaque and can be destructive. | `false` |
+| `OBSIDIAN_ENABLE_COMMANDS` | Opt-in flag for the command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`). Off by default — Obsidian commands are opaque and can be destructive. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_HOST` | Host for the HTTP server. | `127.0.0.1` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |

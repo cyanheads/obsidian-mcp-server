@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "2.0"
   audience: external
   type: workflow
 ---
@@ -148,16 +148,28 @@ If the consumer customized a framework script, the overwrite discards those chan
 
 Apply the findings from Steps 3 and 4. Framework changes and third-party library changes have different adoption defaults — the asymmetry is deliberate.
 
-**Framework changes (`@cyanheads/mcp-ts-core`) — default adopt.**
+**Framework changes (`@cyanheads/mcp-ts-core`) — auto-adopt every applicable site, in this pass.**
 
-The consumer opted into the framework; its templates, skills, scripts, linter rules, and conventions are authoritative. Adopt directly unless the change genuinely conflicts with a documented local override.
+The consumer opted into the framework; its templates, skills, scripts, linter rules, conventions, and new APIs that supersede local code are authoritative. Adopt them now — not as a follow-up.
 
 - **Breaking changes** — fix call sites. Not optional.
 - **Deprecations** — migrate now, while context is fresh.
 - **New linter rules** — if the rule now flags existing code, fix the code; don't silence the rule.
-- **New utilities that supersede local code** — swap them in. The point of the framework is to centralize.
+- **New utilities that supersede local code** — swap them in. The point of the framework is to centralize. This applies even when the local helper has richer messages or branch handling — port the domain detail onto the framework path; don't leave the local helper as-is. (E.g., `httpErrorFromResponse` replacing a project-local `throwForStatus`: keep the per-route message map, but route it through the framework utility.)
 - **New conventions** (template changes, new config keys, renamed env vars) — adopt and update `.env.example`, server config schema, `server.json`, and README if user-facing.
-- **New framework features that don't match existing use cases** — skip; those are for future features, not retroactive refactors.
+- **New patterns that match existing surfaces** — refactor *every* matching site in this pass. Examples: typed error contracts (`errors[]` + `ctx.fail`) on tools that already throw domain-specific failures; factory adoption (`notFound()`, `validationError()`, …) replacing ad-hoc `new McpError(...)`; new logging/observability hooks supplanting bespoke logging. If the framework added a pattern that fits N tools/services, do all N — partial adoption fragments the surface and rots faster.
+- **New framework features that don't match existing use cases** — skip. These are for future features, not retroactive refactors. "Don't match" means *the surface doesn't exist in this server* (e.g., a new Speech API in a non-speech server) — not "I'd have to touch a few files."
+
+**Hard rule — invalid framework deferrals.**
+
+| ❌ Not a valid reason to defer | ✅ Valid reason to defer |
+|:-------------------------------|:-------------------------|
+| "Larger change than fits this pass" | Code-commented or `CLAUDE.md`-documented local override that intentionally diverges from the framework convention |
+| "Marginal benefit / leaving as-is" | Breaking change with multiple migration paths that need user input |
+| "Per-tool refactor — worth doing as a focused follow-up" | Feature genuinely doesn't apply (the surface doesn't exist in this server) |
+| "Existing helper has rich domain messages we'd lose" | — (port the messages onto the framework path) |
+
+If you find yourself writing the left-column phrasing in Step 8's "Open decisions", stop and adopt it instead. Cost/benefit reasoning belongs to third-party changes only.
 
 **Third-party library changes — default cost/benefit.**
 
@@ -189,7 +201,7 @@ Present a concise numbered summary to the user:
 3. **Features adopted** — new framework APIs now in use
 4. **Skills synced** — added/updated with versions (Phase A) and agent directories refreshed (Phase B)
 5. **New/changed skills available** — skills that appeared in Phase A for the first time or had materially-changed step sequences. Frame as "consider running when the time is right" rather than immediate actions; the user decides when to invoke them.
-6. **Open decisions** — genuinely ambiguous items: breaking changes with multiple migration paths, framework changes that conflict with a documented local override, third-party adoptions where the cost/benefit is close
+6. **Open decisions** — genuinely ambiguous items only. Valid: breaking changes with multiple migration paths needing user input, framework changes that conflict with a code-commented or `CLAUDE.md`-documented local override, third-party adoptions where cost/benefit is close. **Not valid:** framework adoptions deferred for scope, effort, or marginal-benefit reasoning — those were already adopted in Step 6 and belong under "Features adopted." If this section is empty, that's the expected outcome of a clean framework upgrade.
 7. **Status** — rebuild / devcheck / test results
 
 ## Checklist
@@ -197,7 +209,7 @@ Present a concise numbered summary to the user:
 - [ ] Update applied (`bun update --latest`) — Mode A, or already done by user — Mode B
 - [ ] `changelog` skill invoked for each updated package
 - [ ] Framework CHANGELOG reviewed if `@cyanheads/mcp-ts-core` was updated
-- [ ] Adoption opportunities identified and applied
+- [ ] Every applicable framework adoption opportunity applied in this pass — no scope/effort/marginal-benefit deferrals; third-party adoptions evaluated on cost/benefit
 - [ ] Project `skills/` synced from package (Phase A), with a change report
 - [ ] Agent skill directories (`.claude/skills/`, `.agents/skills/`, etc.) refreshed from project `skills/` (Phase B)
 - [ ] Framework `scripts/` resynced from package via content-hash compare (Phase C), with a change report; `scripts/` diff reviewed before committing

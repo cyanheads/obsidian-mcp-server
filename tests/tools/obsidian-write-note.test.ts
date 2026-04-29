@@ -12,20 +12,22 @@ import { setupHarness } from '../helpers.js';
 const harness = setupHarness();
 
 describe('obsidian_write_note (whole file)', () => {
-  it('PUTs the body with text/markdown when no section is given', async () => {
+  it('PUTs the body with text/markdown when the note does not exist', async () => {
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'HEAD' })
+      .reply(() => ({ statusCode: 404, data: '' }));
+
     let seenMethod = '';
     let seenBody = '';
     let seenContentType = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/Note.md', method: 'PUT' })
-      .reply((opts) => {
-        seenMethod = opts.method as string;
-        seenBody = String(opts.body ?? '');
-        const headers = opts.headers as Record<string, string>;
-        seenContentType = headers['content-type'] ?? headers['Content-Type'] ?? '';
-        return { statusCode: 200, data: '' };
-      });
+    pool.intercept({ path: '/vault/Note.md', method: 'PUT' }).reply((opts) => {
+      seenMethod = opts.method as string;
+      seenBody = String(opts.body ?? '');
+      const headers = opts.headers as Record<string, string>;
+      seenContentType = headers['content-type'] ?? headers['Content-Type'] ?? '';
+      return { statusCode: 200, data: '' };
+    });
 
     const out = await obsidianWriteNote.handler(
       obsidianWriteNote.input.parse({
@@ -38,7 +40,59 @@ describe('obsidian_write_note (whole file)', () => {
     expect(seenMethod).toBe('PUT');
     expect(seenBody).toBe('fresh body');
     expect(seenContentType).toBe('text/markdown');
-    expect(out).toEqual({ path: 'Note.md', sectionTargeted: false });
+    expect(out).toEqual({ path: 'Note.md', sectionTargeted: false, created: true });
+  });
+
+  it('refuses to clobber an existing note when overwrite is false', async () => {
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'HEAD' })
+      .reply(() => ({ statusCode: 200, data: '' }));
+
+    let putCalled = false;
+    pool.intercept({ path: '/vault/Note.md', method: 'PUT' }).reply(() => {
+      putCalled = true;
+      return { statusCode: 200, data: '' };
+    });
+
+    await expect(
+      obsidianWriteNote.handler(
+        obsidianWriteNote.input.parse({
+          target: { type: 'path', path: 'Note.md' },
+          content: 'replacement',
+        }),
+        createMockContext({ errors: obsidianWriteNote.errors }),
+      ),
+    ).rejects.toMatchObject({
+      data: expect.objectContaining({ reason: 'file_exists', path: 'Note.md' }),
+    });
+
+    expect(putCalled).toBe(false);
+  });
+
+  it('overwrites an existing note when overwrite is true', async () => {
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'HEAD' })
+      .reply(() => ({ statusCode: 200, data: '' }));
+
+    let seenBody = '';
+    pool.intercept({ path: '/vault/Note.md', method: 'PUT' }).reply((opts) => {
+      seenBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+
+    const out = await obsidianWriteNote.handler(
+      obsidianWriteNote.input.parse({
+        target: { type: 'path', path: 'Note.md' },
+        content: 'replacement',
+        overwrite: true,
+      }),
+      createMockContext(),
+    );
+
+    expect(seenBody).toBe('replacement');
+    expect(out).toEqual({ path: 'Note.md', sectionTargeted: false, created: false });
   });
 });
 
@@ -116,15 +170,17 @@ describe('obsidian_write_note (section)', () => {
   });
 
   it('uses application/json when contentType is "json"', async () => {
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'HEAD' })
+      .reply(() => ({ statusCode: 404, data: '' }));
+
     let seenContentType = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/Note.md', method: 'PUT' })
-      .reply((opts) => {
-        const headers = opts.headers as Record<string, string>;
-        seenContentType = headers['content-type'] ?? headers['Content-Type'] ?? '';
-        return { statusCode: 200, data: '' };
-      });
+    pool.intercept({ path: '/vault/Note.md', method: 'PUT' }).reply((opts) => {
+      const headers = opts.headers as Record<string, string>;
+      seenContentType = headers['content-type'] ?? headers['Content-Type'] ?? '';
+      return { statusCode: 200, data: '' };
+    });
 
     await obsidianWriteNote.handler(
       obsidianWriteNote.input.parse({
@@ -139,13 +195,15 @@ describe('obsidian_write_note (section)', () => {
 });
 
 describe('obsidian_write_note / format()', () => {
-  it('renders the path and sectionTargeted', () => {
+  it('renders the path, sectionTargeted, and created fields', () => {
     const blocks = obsidianWriteNote.format!({
       path: 'A.md',
       sectionTargeted: true,
+      created: false,
     });
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('A.md');
     expect(text).toMatch(/Section targeted:\*?\s*true/);
+    expect(text).toMatch(/Created:\*?\s*false/);
   });
 });

@@ -1,6 +1,6 @@
 /**
  * @fileoverview obsidian_list_commands — list Obsidian command-palette commands.
- * Always available; surfaces the command surface even when execution is gated.
+ * Gated behind `OBSIDIAN_ENABLE_COMMANDS=true` alongside `obsidian_execute_command`.
  * @module mcp-server/tools/definitions/obsidian-list-commands.tool
  */
 

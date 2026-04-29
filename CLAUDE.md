@@ -34,7 +34,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **Check `ctx.elicit`** for presence before calling — used by `obsidian_delete_note` to confirm destructive ops.
 - **All Obsidian access goes through `getObsidianService()`.** No direct `fetch()` calls to the Local REST API in tools/resources — the service centralizes auth, TLS, timeouts, and `ctx.signal` propagation.
 - **Secrets in env vars only.** `OBSIDIAN_API_KEY` is required; never hardcoded.
-- **`obsidian_execute_command` is opt-in.** Registered only when `OBSIDIAN_ENABLE_COMMANDS=true` — Obsidian commands are opaque and can be destructive.
+- **Command-palette tools are opt-in.** `obsidian_list_commands` and `obsidian_execute_command` are registered together only when `OBSIDIAN_ENABLE_COMMANDS=true` — Obsidian commands are opaque and can be destructive.
 
 ---
 
@@ -228,8 +228,8 @@ src/
   mcp-server/
     tools/definitions/
       _shared/schemas.ts                # Shared TargetSchema + SectionSchema reused across tools
-      index.ts                          # baseToolDefinitions[] + conditional obsidianExecuteCommand
-      obsidian-*.tool.ts                # 14 tool definitions (13 base + 1 opt-in)
+      index.ts                          # baseToolDefinitions[] + conditional commandToolDefinitions[]
+      obsidian-*.tool.ts                # 14 tool definitions (12 base + 2 opt-in command-palette pair)
     resources/definitions/
       index.ts                          # allResourceDefinitions[]
       obsidian-vault-note.resource.ts   # obsidian://vault/{+path}
@@ -359,6 +359,6 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
 - [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
-- [ ] Registered in `createApp()` arrays (directly or via barrel exports). Conditional registration (e.g. `obsidianExecuteCommand` behind `OBSIDIAN_ENABLE_COMMANDS`) happens in `src/index.ts`, not in the barrel
+- [ ] Registered in `createApp()` arrays (directly or via barrel exports). Conditional registration (e.g. `commandToolDefinitions` behind `OBSIDIAN_ENABLE_COMMANDS`) happens in `src/index.ts`, not in the barrel
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] `bun run devcheck` passes

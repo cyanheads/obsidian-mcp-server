@@ -12,13 +12,13 @@ import { allPromptDefinitions } from '@/mcp-server/prompts/definitions/index.js'
 import { allResourceDefinitions } from '@/mcp-server/resources/definitions/index.js';
 import {
   baseToolDefinitions,
-  obsidianExecuteCommand,
+  commandToolDefinitions,
 } from '@/mcp-server/tools/definitions/index.js';
 import { initObsidianService } from '@/services/obsidian/obsidian-service.js';
 
 const config = getServerConfig();
 const tools = config.enableCommands
-  ? [...baseToolDefinitions, obsidianExecuteCommand]
+  ? [...baseToolDefinitions, ...commandToolDefinitions]
   : baseToolDefinitions;
 
 await createApp({

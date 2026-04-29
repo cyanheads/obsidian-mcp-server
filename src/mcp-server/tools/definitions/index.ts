@@ -1,7 +1,9 @@
 /**
- * @fileoverview Tool registration barrel. `obsidian_execute_command` is exported
- * separately so callers can decide whether to register it based on the
- * `OBSIDIAN_ENABLE_COMMANDS` flag — keeping this module free of eager config reads.
+ * @fileoverview Tool registration barrel. The command-palette pair
+ * (`obsidian_list_commands` + `obsidian_execute_command`) is exported
+ * separately so callers can decide whether to register them based on the
+ * `OBSIDIAN_ENABLE_COMMANDS` flag — keeping this module free of eager
+ * config reads.
  * @module mcp-server/tools/definitions/index
  */
 
@@ -25,7 +27,6 @@ export const baseToolDefinitions = [
   obsidianGetNote,
   obsidianListNotes,
   obsidianListTags,
-  obsidianListCommands,
   obsidianSearchNotes,
   obsidianWriteNote,
   obsidianAppendToNote,
@@ -37,4 +38,5 @@ export const baseToolDefinitions = [
   obsidianOpenInUi,
 ];
 
-export { obsidianExecuteCommand };
+/** Command-palette tools — registered only when `OBSIDIAN_ENABLE_COMMANDS=true`. */
+export const commandToolDefinitions = [obsidianListCommands, obsidianExecuteCommand];

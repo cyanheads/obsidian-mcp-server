@@ -44,7 +44,7 @@ const ServerConfigSchema = z.object({
   enableCommands: envBoolean
     .default(false)
     .describe(
-      'Opt-in flag for obsidian_execute_command. Off by default — Obsidian commands are opaque and can be destructive.',
+      'Opt-in flag for the command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`). Off by default — Obsidian commands are opaque and can be destructive.',
     ),
 });
 

@@ -292,6 +292,17 @@ describe('ObsidianService error classification', () => {
       data: { reason: 'section_target_missing' },
     });
   });
+
+  it('routes 500 through the framework helper as InternalError (not retried)', async () => {
+    pool.intercept({ path: '/vault/x.md', method: 'GET' }).reply(500, { message: 'kaboom' });
+
+    await expect(service.getNoteContent(ctx, { type: 'path', path: 'x.md' })).rejects.toMatchObject(
+      {
+        code: JsonRpcErrorCode.InternalError,
+        message: expect.stringContaining('Obsidian Local REST API'),
+      },
+    );
+  });
 });
 
 describe('ObsidianService.probeAuthenticated', () => {

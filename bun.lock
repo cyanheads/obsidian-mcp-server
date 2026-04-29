@@ -5,20 +5,20 @@
     "": {
       "name": "obsidian-mcp-server",
       "dependencies": {
-        "@cyanheads/mcp-ts-core": "^0.8.1",
-        "@types/js-yaml": "^4.0.9",
-        "js-yaml": "^4.1.1",
-        "pino-pretty": "^13.1.3",
-        "undici": "^8.1.0",
+        "@cyanheads/mcp-ts-core": "latest",
+        "@types/js-yaml": "latest",
+        "js-yaml": "latest",
+        "pino-pretty": "latest",
+        "undici": "latest",
       },
       "devDependencies": {
-        "@biomejs/biome": "^2.4.13",
-        "@types/node": "^25.6.0",
-        "depcheck": "^1.4.7",
-        "ignore": "^7.0.5",
-        "tsc-alias": "^1.8.16",
-        "typescript": "^6.0.3",
-        "vitest": "^4.1.5",
+        "@biomejs/biome": "latest",
+        "@types/node": "latest",
+        "depcheck": "latest",
+        "ignore": "latest",
+        "tsc-alias": "latest",
+        "typescript": "latest",
+        "vitest": "latest",
       },
     },
   },
@@ -59,7 +59,7 @@
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.4.13", "", { "os": "win32", "cpu": "x64" }, "sha512-tTcMkXyBrmHi9BfrD2VNHs/5rYIUKETqsBlYOvSAABwBkJhSDVb5e7wPukftsQbO3WzQkXe6kaztC6WtUOXSoQ=="],
 
-    "@cyanheads/mcp-ts-core": ["@cyanheads/mcp-ts-core@0.8.1", "", { "dependencies": { "@hono/mcp": "^0.2.5", "@hono/node-server": "^2.0.0", "@modelcontextprotocol/ext-apps": "^1.7.1", "@modelcontextprotocol/sdk": "^1.29.0", "@opentelemetry/api": "^1.9.1", "dotenv": "^17.4.2", "hono": "^4.12.15", "jose": "^6.2.3", "pino": "^10.3.1", "zod": "^4.3.6" }, "peerDependencies": { "@hono/otel": "^1.1.1", "@opentelemetry/exporter-metrics-otlp-http": "^0.215.0", "@opentelemetry/exporter-trace-otlp-http": "^0.215.0", "@opentelemetry/instrumentation-http": "^0.215.0", "@opentelemetry/instrumentation-pino": "^0.61.0", "@opentelemetry/resources": "^2.7.0", "@opentelemetry/sdk-metrics": "^2.7.0", "@opentelemetry/sdk-node": "^0.215.0", "@opentelemetry/sdk-trace-node": "^2.7.0", "@opentelemetry/semantic-conventions": "^1.40.0", "@supabase/supabase-js": "^2.103.3", "chrono-node": "^2.9.0", "defuddle": "^0.18.1", "diff": "latest", "fast-xml-parser": "latest", "js-yaml": "^4.1.1", "linkedom": "^0.18.12", "node-cron": "^4.2.1", "openai": "^6.34.0", "papaparse": "^5.5.3", "partial-json": "^0.1.7", "pdf-lib": "^1.17.1", "sanitize-html": "^2.17.3", "unpdf": "^1.6.0", "validator": "^13.15.35" }, "optionalPeers": ["@hono/otel", "@opentelemetry/exporter-metrics-otlp-http", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/instrumentation-http", "@opentelemetry/instrumentation-pino", "@opentelemetry/resources", "@opentelemetry/sdk-metrics", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/semantic-conventions", "@supabase/supabase-js", "chrono-node", "defuddle", "diff", "fast-xml-parser", "js-yaml", "linkedom", "node-cron", "openai", "papaparse", "partial-json", "pdf-lib", "sanitize-html", "unpdf", "validator"], "bin": { "mcp-ts-core": "dist/cli/init.js" } }, "sha512-uqGlgv9cC81Hrcq3bfYfPHda8Pv4D6fg+9fKt6t2zm6pqtd7J3+Ve9aFdvUIZdnMzRzJUMQvz5WvHTaLWO7SxA=="],
+    "@cyanheads/mcp-ts-core": ["@cyanheads/mcp-ts-core@0.8.2", "", { "dependencies": { "@hono/mcp": "^0.2.5", "@hono/node-server": "^2.0.0", "@modelcontextprotocol/ext-apps": "^1.7.1", "@modelcontextprotocol/sdk": "^1.29.0", "@opentelemetry/api": "^1.9.1", "dotenv": "^17.4.2", "hono": "^4.12.15", "jose": "^6.2.3", "pino": "^10.3.1", "zod": "^4.3.6" }, "peerDependencies": { "@hono/otel": "^1.1.1", "@opentelemetry/exporter-metrics-otlp-http": "^0.215.0", "@opentelemetry/exporter-trace-otlp-http": "^0.215.0", "@opentelemetry/instrumentation-http": "^0.215.0", "@opentelemetry/instrumentation-pino": "^0.61.0", "@opentelemetry/resources": "^2.7.0", "@opentelemetry/sdk-metrics": "^2.7.0", "@opentelemetry/sdk-node": "^0.215.0", "@opentelemetry/sdk-trace-node": "^2.7.0", "@opentelemetry/semantic-conventions": "^1.40.0", "@supabase/supabase-js": "^2.103.3", "chrono-node": "^2.9.0", "defuddle": "^0.18.1", "diff": "latest", "fast-xml-parser": "latest", "js-yaml": "^4.1.1", "linkedom": "^0.18.12", "node-cron": "^4.2.1", "openai": "^6.34.0", "papaparse": "^5.5.3", "partial-json": "^0.1.7", "pdf-lib": "^1.17.1", "sanitize-html": "^2.17.3", "unpdf": "^1.6.0", "validator": "^13.15.35" }, "optionalPeers": ["@hono/otel", "@opentelemetry/exporter-metrics-otlp-http", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/instrumentation-http", "@opentelemetry/instrumentation-pino", "@opentelemetry/resources", "@opentelemetry/sdk-metrics", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/semantic-conventions", "@supabase/supabase-js", "chrono-node", "defuddle", "diff", "fast-xml-parser", "js-yaml", "linkedom", "node-cron", "openai", "papaparse", "partial-json", "pdf-lib", "sanitize-html", "unpdf", "validator"], "bin": { "mcp-ts-core": "dist/cli/init.js" } }, "sha512-MMSvIYGZC6Mq547QBdsHbxAxrzbmTQBRiOPqiVx5pOGtlBgHQfxB03TKv0nVkWUUKIYDGHCyeYVish88iDMS4A=="],
 
     "@emnapi/core": ["@emnapi/core@1.10.0", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.1", "tslib": "^2.4.0" } }, "sha512-yq6OkJ4p82CAfPl0u9mQebQHKPJkY7WrIuk205cTYnYe+k2Z8YBh11FrbRG/H6ihirqcacOgl2BIO8oyMQLeXw=="],
 
