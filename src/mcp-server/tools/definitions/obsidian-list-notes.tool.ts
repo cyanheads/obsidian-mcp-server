@@ -1,12 +1,14 @@
 /**
  * @fileoverview obsidian_list_notes — recursive vault listing with bounded depth.
- * Walks the vault tree DFS up to `depth` levels (default 3), applying optional
+ * Walks the vault tree DFS up to `depth` levels (default 2 — top-level + their
+ * immediate children, the structural-overview sweet spot), applying optional
  * extension and nameRegex filters across the walk, and renders both a flat
  * `entries[]` array (for programmatic consumption) and a box-drawing tree view
  * in `format()` (for LLM consumption — tree views are easier to scan than flat
  * paths). Hard cap at {@link ENTRY_CAP} entries protects against runaway HTTP
  * fan-out on large vaults; per-directory `truncated: true` flags signal where
- * the depth limit cut off recursion.
+ * the depth limit cut off recursion. Drill deeper by passing a higher `depth`,
+ * narrowing with `path`, or filtering with `extension`/`nameRegex`.
  *
  * Named `_notes` rather than `_files` to disambiguate from agents' generic
  * file-system tools (Read, Glob, LS) — a `_files` tool surface tempts agents
@@ -19,7 +21,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService, type ObsidianService } from '@/services/obsidian/obsidian-service.js';
 
-const DEFAULT_DEPTH = 3;
+const DEFAULT_DEPTH = 2;
 const MAX_DEPTH = 20;
 const ENTRY_CAP = 1000;
 const ENTRY_CAP_HINT = `Walk stopped at ${ENTRY_CAP} entries. Narrow with \`extension\`/\`nameRegex\`, list a deeper subdirectory, or lower \`depth\`.`;
@@ -59,7 +61,7 @@ const EntrySchema = z
   .describe('A single entry in the listing.');
 
 export const obsidianListNotes = tool('obsidian_list_notes', {
-  description: `List notes and subdirectories at a vault path. Defaults to vault root when \`path\` is omitted. Walks the directory tree up to \`depth\` levels (default ${DEFAULT_DEPTH}, max ${MAX_DEPTH}); pass \`depth: 1\` for a flat single-directory listing. Optional \`extension\` and \`nameRegex\` filters apply across the whole walk. Returns flat \`entries[]\` (each with \`path\`, \`type\`, optional \`truncated\`) plus a tree view in the rendered output. Capped at ${ENTRY_CAP} entries per call — when reached, walking stops and \`excluded\` is set.`,
+  description: `List notes and subdirectories at a vault path. Defaults to vault root when \`path\` is omitted. Walks the directory tree up to \`depth\` levels (default ${DEFAULT_DEPTH} — top-level entries plus their immediate children, a structural overview; max ${MAX_DEPTH}). Pass \`depth: 1\` for a flat single-directory listing, or bump higher to walk deeper. Optional \`extension\` and \`nameRegex\` filters apply across the whole walk. Returns flat \`entries[]\` (each with \`path\`, \`type\`, optional \`truncated\`) plus a tree view in the rendered output. Capped at ${ENTRY_CAP} entries per call — when reached, walking stops and \`excluded\` is set; drill deeper by narrowing \`path\` to a subdirectory or applying filters.`,
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     path: z.string().optional().describe('Vault-relative directory path. Omit for the vault root.'),
@@ -82,7 +84,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
       .max(MAX_DEPTH)
       .optional()
       .describe(
-        `How many directory levels to walk. \`1\` lists the target directory only with no recursion. Default ${DEFAULT_DEPTH}.`,
+        `How many directory levels to walk. \`1\` = target directory only (no recursion); \`${DEFAULT_DEPTH}\` (default) = target plus its immediate children — a structural overview; bump higher to drill in. Prefer narrowing \`path\` to a subdirectory over a high \`depth\` on the vault root.`,
       ),
   }),
   output: z.object({

@@ -22,7 +22,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | Tool Name | Description |
 |:----------|:------------|
 | `obsidian_get_note` | Read a note as raw content, full structured form (content + frontmatter + tags + stat), structural document map, or a single section. |
-| `obsidian_list_notes` | List notes and subdirectories at a vault path with a recursive walk (default depth 3, max 20) bounded by a 1000-entry cap. Optional `extension` and `nameRegex` filters apply across the tree; regex-filtered directories are skipped without recursing into them. Returns flat `entries[]` plus a box-drawing tree in the rendered output; per-directory `truncated: true` flags where the depth limit cut off recursion. |
+| `obsidian_list_notes` | List notes and subdirectories at a vault path with a recursive walk (default depth 2 — structural overview; max 20) bounded by a 1000-entry cap. Optional `extension` and `nameRegex` filters apply across the tree; regex-filtered directories are skipped without recursing into them. Returns flat `entries[]` plus a box-drawing tree in the rendered output; per-directory `truncated: true` flags where the depth limit cut off recursion. |
 | `obsidian_list_tags` | List every tag found across the vault with usage counts, including hierarchical parents. |
 | `obsidian_list_commands` | List Obsidian command-palette commands available for execution. |
 | `obsidian_search_notes` | Search the vault by text, Dataview DQL, or JSONLogic — capped at 100 hits with overflow indicator. |

@@ -50,7 +50,29 @@ describe('obsidian_list_notes / non-recursive (depth: 1)', () => {
 });
 
 describe('obsidian_list_notes / recursive walk', () => {
-  it('walks the default depth (3) across nested subdirectories', async () => {
+  it('uses default depth 2 when `depth` is omitted (top-level + immediate children)', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/', method: 'GET' }).reply(200, { files: ['A.md', 'Projects/'] });
+    pool
+      .intercept({ path: '/vault/Projects/', method: 'GET' })
+      .reply(200, { files: ['Plan.md', 'notes/'] });
+    // Note: no intercept for /vault/Projects/notes/ — depth 2 must NOT walk it.
+
+    const out = await obsidianListNotes.handler(
+      obsidianListNotes.input.parse({}),
+      createMockContext(),
+    );
+    expect(out.appliedFilters.depth).toBe(2);
+    expect(out.entries.map((e) => e.path)).toEqual([
+      'A.md',
+      'Projects',
+      'Projects/Plan.md',
+      'Projects/notes',
+    ]);
+    expect(out.entries.find((e) => e.path === 'Projects/notes')?.truncated).toBe(true);
+  });
+
+  it('walks deeper when `depth: 3` is requested', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/', method: 'GET' }).reply(200, { files: ['A.md', 'Projects/'] });
     pool
@@ -61,7 +83,7 @@ describe('obsidian_list_notes / recursive walk', () => {
       .reply(200, { files: ['deep.md'] });
 
     const out = await obsidianListNotes.handler(
-      obsidianListNotes.input.parse({}),
+      obsidianListNotes.input.parse({ depth: 3 }),
       createMockContext(),
     );
     expect(out.appliedFilters.depth).toBe(3);
