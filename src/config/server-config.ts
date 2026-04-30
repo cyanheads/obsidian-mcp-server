@@ -46,6 +46,11 @@ const ServerConfigSchema = z.object({
     .describe(
       'Opt-in flag for the command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`). Off by default — Obsidian commands are opaque and can be destructive.',
     ),
+  readOnly: envBoolean
+    .default(false)
+    .describe(
+      'When true, only read-only tools are registered — all tools that create, modify, or delete notes are disabled. Useful for shared or public-facing deployments where vault mutation must be prevented.',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -59,6 +64,7 @@ export function getServerConfig(): ServerConfig {
     verifySsl: 'OBSIDIAN_VERIFY_SSL',
     requestTimeoutMs: 'OBSIDIAN_REQUEST_TIMEOUT_MS',
     enableCommands: 'OBSIDIAN_ENABLE_COMMANDS',
+    readOnly: 'OBSIDIAN_READ_ONLY',
   });
   return _config;
 }
