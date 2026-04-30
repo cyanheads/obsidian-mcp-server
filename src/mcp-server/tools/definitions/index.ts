@@ -22,12 +22,16 @@ import { obsidianReplaceInNote } from './obsidian-replace-in-note.tool.js';
 import { obsidianSearchNotes } from './obsidian-search-notes.tool.js';
 import { obsidianWriteNote } from './obsidian-write-note.tool.js';
 
-/** Tools registered unconditionally on every server. */
-export const baseToolDefinitions = [
+/** Read-only tools — always registered, even in read-only mode. */
+export const readOnlyToolDefinitions = [
   obsidianGetNote,
   obsidianListNotes,
   obsidianListTags,
   obsidianSearchNotes,
+];
+
+/** Write tools — tools that create, modify, or delete notes. Excluded when `OBSIDIAN_READ_ONLY=true`. */
+export const writeToolDefinitions = [
   obsidianWriteNote,
   obsidianAppendToNote,
   obsidianPatchNote,
@@ -37,6 +41,9 @@ export const baseToolDefinitions = [
   obsidianDeleteNote,
   obsidianOpenInUi,
 ];
+
+/** Tools registered unconditionally on every server (read-only mode respects the split). */
+export const baseToolDefinitions = [...readOnlyToolDefinitions, ...writeToolDefinitions];
 
 /** Command-palette tools — registered only when `OBSIDIAN_ENABLE_COMMANDS=true`. */
 export const commandToolDefinitions = [obsidianListCommands, obsidianExecuteCommand];

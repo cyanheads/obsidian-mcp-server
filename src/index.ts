@@ -11,15 +11,18 @@ import { getServerConfig } from '@/config/server-config.js';
 import { allPromptDefinitions } from '@/mcp-server/prompts/definitions/index.js';
 import { allResourceDefinitions } from '@/mcp-server/resources/definitions/index.js';
 import {
-  baseToolDefinitions,
   commandToolDefinitions,
+  readOnlyToolDefinitions,
+  writeToolDefinitions,
 } from '@/mcp-server/tools/definitions/index.js';
 import { initObsidianService } from '@/services/obsidian/obsidian-service.js';
 
 const config = getServerConfig();
-const tools = config.enableCommands
-  ? [...baseToolDefinitions, ...commandToolDefinitions]
-  : baseToolDefinitions;
+const tools = [
+  ...readOnlyToolDefinitions,
+  ...(config.readOnly ? [] : writeToolDefinitions),
+  ...(config.enableCommands && !config.readOnly ? commandToolDefinitions : []),
+];
 
 await createApp({
   tools,
