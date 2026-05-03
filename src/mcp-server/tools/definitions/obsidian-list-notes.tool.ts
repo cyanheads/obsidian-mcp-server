@@ -130,6 +130,13 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
         'Test the pattern (e.g. `^Project.*\\.md$`) in a JS regex tester, or omit nameRegex to disable filtering.',
     },
     {
+      reason: 'path_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The supplied `path` is outside OBSIDIAN_READ_PATHS (root listings always pass; specific subdirectories must be readable).',
+      recovery:
+        'List a directory inside the configured read scope, or omit `path` to list from the vault root. The error data echoes the active scope.',
+    },
+    {
       reason: 'note_missing',
       code: JsonRpcErrorCode.NotFound,
       when: 'The supplied `path` does not exist in the vault. Sub-directories that disappear mid-walk are silently skipped — only the root path surfaces this error.',
@@ -262,13 +269,20 @@ async function walkVault(
 
     const fullPath = dir ? `${dir}/${name}` : name;
     const entry: Entry = { path: fullPath, type: isDir ? 'directory' : 'file' };
-    if (isDir && currentDepth >= opts.depth) entry.truncated = true;
+    /**
+     * Mark a subdir truncated when (a) we hit the depth cap, OR (b) policy
+     * blocks reading it — the listing surfaces it (operator can see it
+     * exists) but we don't try to walk inside, which would throw
+     * `path_forbidden` mid-walk and abort the whole listing.
+     */
+    const policyBlocked = isDir && !svc.policy.isReadable(fullPath);
+    if (isDir && (currentDepth >= opts.depth || policyBlocked)) entry.truncated = true;
 
     state.entries.push(entry);
     if (isDir) state.totalDirs++;
     else state.totalFiles++;
 
-    if (isDir && currentDepth < opts.depth) {
+    if (isDir && currentDepth < opts.depth && !policyBlocked) {
       await walkVault(svc, ctx, fullPath, currentDepth + 1, state, opts);
       if (state.cappedByEntries) return;
     }

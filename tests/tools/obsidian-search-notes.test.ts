@@ -5,9 +5,14 @@
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { obsidianSearchNotes } from '@/mcp-server/tools/definitions/obsidian-search-notes.tool.js';
-import { setupHarness } from '../helpers.js';
+import {
+  type ObsidianFetch,
+  ObsidianService,
+  setObsidianService,
+} from '@/services/obsidian/obsidian-service.js';
+import { makeTestConfig, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -290,5 +295,70 @@ describe('obsidian_search_notes / format()', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('Excluded 5');
     expect(text).toContain('Narrow your query.');
+  });
+});
+
+describe('obsidian_search_notes — path-policy post-filter', () => {
+  afterEach(() => {
+    setObsidianService(undefined);
+  });
+
+  it('drops text hits outside readPaths silently (no excluded indicator)', async () => {
+    const fetchImpl: ObsidianFetch = async (url) => {
+      const u = new URL(url);
+      if (u.pathname.startsWith('/search/simple/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              filename: 'public/a.md',
+              score: 1,
+              matches: [{ context: 'a', match: { start: 0, end: 1 } }],
+            },
+            {
+              filename: 'secret/b.md',
+              score: 1,
+              matches: [{ context: 'b', match: { start: 0, end: 1 } }],
+            },
+            {
+              filename: 'public/sub/c.md',
+              score: 1,
+              matches: [{ context: 'c', match: { start: 0, end: 1 } }],
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      throw new Error(`unexpected ${u.pathname}`);
+    };
+    const svc = new ObsidianService(makeTestConfig({ readPaths: ['public'] }), fetchImpl);
+    setObsidianService(svc);
+
+    const out = await obsidianSearchNotes.handler(
+      obsidianSearchNotes.input.parse({ mode: 'text', query: 'x' }),
+      createMockContext(),
+    );
+    if (out.result.mode !== 'text') throw new Error('expected text branch');
+    expect(out.result.hits.map((h) => h.filename)).toEqual(['public/a.md', 'public/sub/c.md']);
+    expect(out.result.excluded).toBeUndefined();
+  });
+
+  it('filters dataview hits against readPaths', async () => {
+    const fetchImpl: ObsidianFetch = async () =>
+      new Response(
+        JSON.stringify([
+          { filename: 'public/a.md', result: 1 },
+          { filename: 'secret/b.md', result: 2 },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    const svc = new ObsidianService(makeTestConfig({ readPaths: ['public'] }), fetchImpl);
+    setObsidianService(svc);
+
+    const out = await obsidianSearchNotes.handler(
+      obsidianSearchNotes.input.parse({ mode: 'dataview', query: 'TABLE x FROM ""' }),
+      createMockContext(),
+    );
+    if (out.result.mode !== 'dataview') throw new Error('expected dataview branch');
+    expect(out.result.hits.map((h) => h.filename)).toEqual(['public/a.md']);
   });
 });

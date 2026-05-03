@@ -38,6 +38,13 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
   auth: ['tool:obsidian_open_in_ui:write'],
   errors: [
     {
+      reason: 'path_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The target path is outside OBSIDIAN_READ_PATHS (and OBSIDIAN_WRITE_PATHS, since write paths imply read access).',
+      recovery:
+        'Use a path inside the configured read scope. The error data echoes the active scope; check the server startup banner for the active configuration.',
+    },
+    {
       reason: 'note_missing',
       code: JsonRpcErrorCode.NotFound,
       when: '`failIfMissing: true` (default) and the path does not exist in the vault. Pass `failIfMissing: false` to allow Obsidian to create the file on open.',

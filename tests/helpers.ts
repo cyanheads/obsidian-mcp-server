@@ -29,6 +29,9 @@ export function makeTestConfig(overrides: Partial<ServerConfig> = {}): ServerCon
     verifySsl: false,
     requestTimeoutMs: 5_000,
     enableCommands: false,
+    readPaths: undefined,
+    writePaths: undefined,
+    readOnly: false,
     ...overrides,
   };
 }

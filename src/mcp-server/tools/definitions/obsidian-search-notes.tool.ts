@@ -170,6 +170,14 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       });
     }
 
+    /**
+     * Path-policy post-filter: reads outside OBSIDIAN_READ_PATHS are dropped
+     * silently, before the per-mode cap. The `excluded` overflow indicator
+     * counts hits trimmed by the cap, not hits dropped by the policy — leaking
+     * the dropped count would defeat the gate.
+     */
+    const policy = svc.policy;
+
     if (input.mode === 'text') {
       if (!input.query) {
         throw ctx.fail('query_required', '`query` is required for text mode.', {
@@ -179,9 +187,10 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       }
       const all = await svc.searchText(ctx, input.query, input.contextLength);
       const prefix = input.pathPrefix;
-      const filtered = prefix ? all.filter((h) => h.filename.startsWith(prefix)) : all;
+      const prefixed = prefix ? all.filter((h) => h.filename.startsWith(prefix)) : all;
+      const allowed = policy.filterReadable(prefixed);
       const matchCap = input.maxMatchesPerHit ?? DEFAULT_MATCHES_PER_HIT;
-      const clipped = filtered.map((h) => clipMatches(h, matchCap));
+      const clipped = allowed.map((h) => clipMatches(h, matchCap));
       const capped = applyCap(clipped);
       return { result: { mode: 'text' as const, ...capped } };
     }
@@ -194,7 +203,8 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
         });
       }
       const all = await svc.searchDataview(ctx, input.query);
-      const capped = applyCap(all);
+      const allowed = policy.filterReadable(all);
+      const capped = applyCap(allowed);
       return { result: { mode: 'dataview' as const, ...capped } };
     }
 
@@ -205,7 +215,8 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       });
     }
     const all = await svc.searchJsonLogic(ctx, input.logic);
-    const capped = applyCap(all);
+    const allowed = policy.filterReadable(all);
+    const capped = applyCap(allowed);
     return { result: { mode: 'jsonlogic' as const, ...capped } };
   },
 

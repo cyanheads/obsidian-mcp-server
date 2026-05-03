@@ -6,14 +6,14 @@
     "url": "https://github.com/cyanheads/obsidian-mcp-server",
     "source": "github"
   },
-  "version": "3.1.1",
+  "version": "3.1.2",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "obsidian-mcp-server",
       "runtimeHint": "node",
-      "version": "3.1.1",
+      "version": "3.1.2",
       "packageArguments": [
         {
           "type": "positional",
@@ -60,6 +60,25 @@
           "default": "false"
         },
         {
+          "name": "OBSIDIAN_READ_PATHS",
+          "description": "Optional comma-separated vault-relative folder allowlist for reads. Prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault. Write paths are implicitly readable. Example: 'public/,projects/'.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "OBSIDIAN_WRITE_PATHS",
+          "description": "Optional comma-separated vault-relative folder allowlist for writes. Same syntax as OBSIDIAN_READ_PATHS. Unset = full vault. Example: 'projects/,scratch/'.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "OBSIDIAN_READ_ONLY",
+          "description": "Global read-only kill switch. When true, every write is denied regardless of OBSIDIAN_WRITE_PATHS, and the command-palette pair is suppressed (commands can mutate). Useful for shared or public-facing deployments.",
+          "format": "string",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -76,7 +95,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "obsidian-mcp-server",
       "runtimeHint": "node",
-      "version": "3.1.1",
+      "version": "3.1.2",
       "packageArguments": [
         {
           "type": "positional",
@@ -118,6 +137,25 @@
         {
           "name": "OBSIDIAN_ENABLE_COMMANDS",
           "description": "Opt-in flag for the command-palette pair (obsidian_list_commands + obsidian_execute_command). Off by default — Obsidian commands are opaque and can be destructive.",
+          "format": "string",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
+          "name": "OBSIDIAN_READ_PATHS",
+          "description": "Optional comma-separated vault-relative folder allowlist for reads. Prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault. Write paths are implicitly readable. Example: 'public/,projects/'.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "OBSIDIAN_WRITE_PATHS",
+          "description": "Optional comma-separated vault-relative folder allowlist for writes. Same syntax as OBSIDIAN_READ_PATHS. Unset = full vault. Example: 'projects/,scratch/'.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "OBSIDIAN_READ_ONLY",
+          "description": "Global read-only kill switch. When true, every write is denied regardless of OBSIDIAN_WRITE_PATHS, and the command-palette pair is suppressed (commands can mutate). Useful for shared or public-facing deployments.",
           "format": "string",
           "isRequired": false,
           "default": "false"

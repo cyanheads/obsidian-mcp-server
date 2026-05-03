@@ -5,6 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schemas.js';
 
@@ -33,6 +34,15 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
       .describe('True when the append went to a section; false for whole-file appends.'),
   }),
   auth: ['tool:obsidian_append_to_note:write'],
+  errors: [
+    {
+      reason: 'path_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes.',
+      recovery:
+        'Use a path inside the configured write scope, or unset OBSIDIAN_READ_ONLY. The error data echoes the active scope; check the server startup banner for the active configuration.',
+    },
+  ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();

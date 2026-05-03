@@ -4,7 +4,7 @@ description: >
   Cloudflare Workers deployment using `createWorkerHandler` from `@cyanheads/mcp-ts-core/worker`. Covers the full handler signature, binding types, CloudflareBindings extensibility, runtime compatibility guards, and wrangler.toml requirements.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: reference
 ---
@@ -171,3 +171,9 @@ export function getServerConfig() {
 **`in-memory` storage is volatile.** Data stored with the `in-memory` provider is lost between cold starts and is not shared across Worker instances. Use `cloudflare-kv`, `cloudflare-r2`, or `cloudflare-d1` for any state that must persist or be shared.
 
 **Node-only utilities throw in Workers.** `scheduler` (`node-cron`), `sanitizePath` (fs-based), and `filesystem` storage provider all throw `ConfigurationError` when called from a Worker. Guard with `runtimeCaps.isNode` or avoid entirely.
+
+**DataCanvas is unavailable in Workers.** DuckDB has no V8-isolate build, so `core.canvas` is always `undefined` on Workers. Setting `CANVAS_PROVIDER_TYPE=duckdb` (the only non-default value) in `wrangler.toml` triggers a fail-closed `ConfigurationError` at init time:
+
+> `DuckDB canvas requires Node.js or Bun. Set CANVAS_PROVIDER_TYPE=none or omit it for Cloudflare Workers deployment.`
+
+Leave the env unset (or set to `none`) for Worker deployments. Tools that conditionally use canvas should check `if (!ctx.core.canvas) { ... }` and surface a clear "feature unavailable on this deployment" message. See `api-canvas` for the full DataCanvas reference.

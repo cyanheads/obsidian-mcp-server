@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-04-29 02:37:41
+Generated on: 2026-05-03 21:24:39
 
 ```text
 obsidian-mcp-server/
@@ -45,6 +45,8 @@ obsidian-mcp-server/
 │   ├── add-tool/
 │   │   └── SKILL.md
 │   ├── api-auth/
+│   │   └── SKILL.md
+│   ├── api-canvas/
 │   │   └── SKILL.md
 │   ├── api-config/
 │   │   └── SKILL.md

@@ -34,7 +34,8 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **Check `ctx.elicit`** for presence before calling — used by `obsidian_delete_note` to confirm destructive ops.
 - **All Obsidian access goes through `getObsidianService()`.** No direct `fetch()` calls to the Local REST API in tools/resources — the service centralizes auth, TLS, timeouts, and `ctx.signal` propagation.
 - **Secrets in env vars only.** `OBSIDIAN_API_KEY` is required; never hardcoded.
-- **Command-palette tools are opt-in.** `obsidian_list_commands` and `obsidian_execute_command` are registered together only when `OBSIDIAN_ENABLE_COMMANDS=true` — Obsidian commands are opaque and can be destructive.
+- **Command-palette tools are opt-in.** `obsidian_list_commands` and `obsidian_execute_command` are callable only when `OBSIDIAN_ENABLE_COMMANDS=true` — Obsidian commands are opaque and can be destructive. When the flag is unset, the entry point wraps both with `disabledTool()` so they're absent from `tools/list` (LLM can't invoke) but visible in the operator-facing manifest with a hint to enable them.
+- **Path-policy gating goes through `PathPolicy`.** Every path-taking method on `ObsidianService` calls `policy.assertReadable` / `assertWritable` before the upstream HTTP call; `obsidian_search_notes` post-filters hits via `svc.policy.filterReadable`. Don't bypass this — `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_READ_ONLY` are the single chokepoint, and `path_forbidden` is declared on every path-taking tool's `errors[]` contract.
 
 ---
 
@@ -138,6 +139,10 @@ const ServerConfigSchema = z.object({
   verifySsl: envBoolean.default(false),
   requestTimeoutMs: z.coerce.number().int().positive().default(30_000),
   enableCommands: envBoolean.default(false),
+  /** Path-policy allowlists — comma-separated, prefix-based, case-insensitive. Unset = full vault. */
+  readPaths: envPathList,
+  writePaths: envPathList,
+  readOnly: envBoolean.default(false),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -148,6 +153,9 @@ export function getServerConfig() {
     verifySsl: 'OBSIDIAN_VERIFY_SSL',
     requestTimeoutMs: 'OBSIDIAN_REQUEST_TIMEOUT_MS',
     enableCommands: 'OBSIDIAN_ENABLE_COMMANDS',
+    readPaths: 'OBSIDIAN_READ_PATHS',
+    writePaths: 'OBSIDIAN_WRITE_PATHS',
+    readOnly: 'OBSIDIAN_READ_ONLY',
   });
   return _config;
 }
@@ -287,6 +295,7 @@ Available skills:
 | `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
 | `report-issue-local` | File a bug or feature request against this server's own repo via `gh` CLI |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
+| `api-canvas` | DataCanvas SQL workspace (Tier 3, DuckDB) — not used by this server |
 | `api-config` | AppConfig, parseConfig, env vars |
 | `api-context` | Context interface, logger, state, progress |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |

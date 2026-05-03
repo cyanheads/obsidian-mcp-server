@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![Version](https://img.shields.io/badge/Version-3.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![Version](https://img.shields.io/badge/Version-3.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -126,6 +126,29 @@ Dispatch an Obsidian command-palette command by ID (discoverable via `obsidian_l
 
 ---
 
+## Path policy (folder-scoped permissions)
+
+Three optional env vars gate which vault paths each tool can target. **Default unset = full vault** for both reads and writes — backwards compatible.
+
+| Goal | Config |
+|:---|:---|
+| Default (current behavior) | all unset |
+| Read everywhere, write only in `projects/` and `scratch/` | `OBSIDIAN_WRITE_PATHS=projects/,scratch/` |
+| Read only `public/`, write only `public/inbox/` | `OBSIDIAN_READ_PATHS=public/`, `OBSIDIAN_WRITE_PATHS=public/inbox/` |
+| Read-only deployment — no writes anywhere | `OBSIDIAN_READ_ONLY=true` |
+
+**Matching is prefix-based with implicit recursion**, case-insensitive, with trailing slashes normalized. `projects/` matches `projects/a.md`, `projects/sub/b.md`, etc.
+
+**Write paths are implicitly readable** — you can't sanely edit what you can't see. So a read passes when the target matches `READ_PATHS` *or* `WRITE_PATHS`.
+
+**`OBSIDIAN_READ_ONLY=true` short-circuits before the path checks** — every write is denied regardless of `WRITE_PATHS`, and the command-palette pair is unregistered regardless of `OBSIDIAN_ENABLE_COMMANDS` (commands can mutate).
+
+Denies are typed `path_forbidden` (JSON-RPC code `Forbidden`) with the active scope echoed back in `data.recovery.hint` and `data.activeScope`, so the LLM can self-correct without inspecting server logs. Search results from `obsidian_search_notes` are filtered against `READ_PATHS` silently — surfacing a "we hid N hits" indicator would defeat the gate.
+
+The startup banner logs the active scope so operators can verify their config at boot.
+
+---
+
 ## Resources
 
 | Type | URI | Description |
@@ -155,6 +178,7 @@ Obsidian-specific:
 - Tag reconciliation across both representations: frontmatter `tags:` array and inline `#tag` syntax (skipping fenced code blocks)
 - Search across three modes: text, Dataview DQL, JSONLogic — with overflow indicator when results exceed the 100-hit cap
 - Optional human-in-the-loop confirmation for destructive deletes via `ctx.elicit`
+- Folder-scoped read/write permissions via `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` and a global `OBSIDIAN_READ_ONLY` kill switch — denies are typed `path_forbidden` with the active scope echoed back in the error data
 - Opt-in command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`) — registered only when `OBSIDIAN_ENABLE_COMMANDS=true`
 - Forgiving path resolution on `obsidian_get_note` and `obsidian_open_in_ui` — silently retries case-mismatched paths against the canonical filename, throws `Conflict` on ambiguous case matches, and enriches `NotFound` with `Did you mean: …?` suggestions when only near-matches exist. `obsidian_delete_note` is deliberately excluded — a destructive op shouldn't silently rewrite the target path.
 
@@ -247,6 +271,9 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | `OBSIDIAN_VERIFY_SSL` | Verify the TLS certificate. Default `false` because the plugin uses a self-signed cert. On Node, the dispatcher's `rejectUnauthorized` option handles this without any process-wide change. On Bun, the runtime ignores that option, so the service additionally sets `NODE_TLS_REJECT_UNAUTHORIZED=0` — that fallback is scoped to Bun only. | `false` |
 | `OBSIDIAN_REQUEST_TIMEOUT_MS` | Per-request timeout in milliseconds. | `30000` |
 | `OBSIDIAN_ENABLE_COMMANDS` | Opt-in flag for the command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`). Off by default — Obsidian commands are opaque and can be destructive. | `false` |
+| `OBSIDIAN_READ_PATHS` | Comma-separated vault-relative folder allowlist for read operations. Prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault. Write paths are implicitly readable. | unset |
+| `OBSIDIAN_WRITE_PATHS` | Comma-separated vault-relative folder allowlist for write operations. Same syntax as `OBSIDIAN_READ_PATHS`. Unset = full vault. | unset |
+| `OBSIDIAN_READ_ONLY` | Global kill switch. When `true`, denies every write regardless of `OBSIDIAN_WRITE_PATHS`, and suppresses the `OBSIDIAN_ENABLE_COMMANDS` pair (commands can mutate). | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_HOST` | Host for the HTTP server. | `127.0.0.1` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |

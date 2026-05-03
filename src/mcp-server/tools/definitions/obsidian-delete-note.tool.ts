@@ -24,6 +24,13 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
   auth: ['tool:obsidian_delete_note:write'],
   errors: [
     {
+      reason: 'path_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes.',
+      recovery:
+        'Use a path inside the configured write scope, or unset OBSIDIAN_READ_ONLY. The error data echoes the active scope; check the server startup banner for the active configuration.',
+    },
+    {
       reason: 'cancelled',
       code: JsonRpcErrorCode.InvalidRequest,
       when: 'User declined the deletion via interactive elicitation.',

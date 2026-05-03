@@ -10,6 +10,7 @@ import { forbidden, notFound, unauthorized, validationError } from '@cyanheads/m
 import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Agent, type Dispatcher, type RequestInit, fetch as undiciFetch } from 'undici';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
+import { PathPolicy } from './path-policy.js';
 import type {
   DocumentMap,
   FileListing,
@@ -76,6 +77,7 @@ export class ObsidianService {
   readonly #config: ServerConfig;
   readonly #dispatcher: Dispatcher;
   readonly #fetch: ObsidianFetch;
+  readonly #policy: PathPolicy;
 
   /**
    * @param config - Validated server config (api key, base URL, TLS, timeouts).
@@ -84,6 +86,7 @@ export class ObsidianService {
    */
   constructor(config: ServerConfig, fetchImpl?: ObsidianFetch) {
     this.#config = config;
+    this.#policy = new PathPolicy(config);
     /**
      * Bun's runtime ignores undici's per-dispatcher `connect.rejectUnauthorized`
      * option, so the only reliable opt-out under Bun is the process-wide
@@ -101,6 +104,11 @@ export class ObsidianService {
       bodyTimeout: config.requestTimeoutMs,
     });
     this.#fetch = fetchImpl ?? (undiciFetch as ObsidianFetch);
+  }
+
+  /** Path-policy accessor — used by `obsidian_search_notes` to filter hits. */
+  get policy(): PathPolicy {
+    return this.#policy;
   }
 
   // ── Status ───────────────────────────────────────────────────────────────
@@ -135,6 +143,25 @@ export class ObsidianService {
   // ── Notes ────────────────────────────────────────────────────────────────
 
   async getNoteContent(ctx: Context, target: NoteTarget): Promise<string> {
+    if (target.type === 'path') {
+      this.#policy.assertReadable(target.path);
+      const url = this.#targetToPath(target);
+      const res = await this.#request(ctx, url, {
+        method: 'GET',
+        headers: { Accept: 'text/markdown' },
+      });
+      return await res.text();
+    }
+    /**
+     * Non-path target with restrictions: route via JSON to learn the resolved
+     * path, gate it, then return the content. Costs a single JSON fetch
+     * instead of the markdown one — only paid by users who configured a path
+     * scope.
+     */
+    if (!this.#policy.isUnrestricted) {
+      const note = await this.getNoteJson(ctx, target);
+      return note.content;
+    }
     const url = this.#targetToPath(target);
     const res = await this.#request(ctx, url, {
       method: 'GET',
@@ -144,12 +171,14 @@ export class ObsidianService {
   }
 
   async getNoteJson(ctx: Context, target: NoteTarget): Promise<NoteJson> {
-    const url = this.#targetToPath(target);
-    const res = await this.#request(ctx, url, {
-      method: 'GET',
-      headers: { Accept: NOTE_JSON_ACCEPT },
-    });
-    return (await res.json()) as NoteJson;
+    if (target.type === 'path') {
+      this.#policy.assertReadable(target.path);
+    }
+    const note = await this.#rawGetNoteJson(ctx, target);
+    if (target.type !== 'path') {
+      this.#policy.assertReadable(note.path);
+    }
+    return note;
   }
 
   /**
@@ -163,12 +192,24 @@ export class ObsidianService {
   }
 
   async getDocumentMap(ctx: Context, target: NoteTarget): Promise<DocumentMap> {
-    const url = this.#targetToPath(target);
-    const res = await this.#request(ctx, url, {
-      method: 'GET',
-      headers: { Accept: DOCUMENT_MAP_ACCEPT },
-    });
-    return (await res.json()) as DocumentMap;
+    if (target.type === 'path') {
+      this.#policy.assertReadable(target.path);
+      return this.#rawGetDocumentMap(ctx, target);
+    }
+    if (this.#policy.isUnrestricted) {
+      return this.#rawGetDocumentMap(ctx, target);
+    }
+    /**
+     * Restricted + non-path: parallel-fetch the document map and resolve the
+     * path so we can gate. If the gate denies, the parallel fetch result is
+     * discarded — acceptable cost given the rarity of this configuration.
+     */
+    const [path, map] = await Promise.all([
+      this.resolvePath(ctx, target),
+      this.#rawGetDocumentMap(ctx, target),
+    ]);
+    this.#policy.assertReadable(path);
+    return map;
   }
 
   async writeNote(
@@ -177,7 +218,8 @@ export class ObsidianService {
     content: string,
     contentType: 'markdown' | 'json' = 'markdown',
   ): Promise<void> {
-    const url = this.#targetToPath(target);
+    const safe = await this.#gateAsWrite(ctx, target);
+    const url = this.#targetToPath(safe);
     await this.#request(ctx, url, {
       method: 'PUT',
       headers: { 'Content-Type': contentType === 'json' ? 'application/json' : 'text/markdown' },
@@ -191,7 +233,8 @@ export class ObsidianService {
     content: string,
     contentType: 'markdown' | 'json' = 'markdown',
   ): Promise<void> {
-    const url = this.#targetToPath(target);
+    const safe = await this.#gateAsWrite(ctx, target);
+    const url = this.#targetToPath(safe);
     await this.#request(ctx, url, {
       method: 'POST',
       headers: { 'Content-Type': contentType === 'json' ? 'application/json' : 'text/markdown' },
@@ -205,7 +248,8 @@ export class ObsidianService {
     content: string,
     headers: PatchHeaders,
   ): Promise<void> {
-    const url = this.#targetToPath(target);
+    const safe = await this.#gateAsWrite(ctx, target);
+    const url = this.#targetToPath(safe);
     await this.#request(ctx, url, {
       method: 'PATCH',
       headers: this.#buildPatchHeaders(headers),
@@ -214,7 +258,8 @@ export class ObsidianService {
   }
 
   async deleteNote(ctx: Context, target: NoteTarget): Promise<void> {
-    const url = this.#targetToPath(target);
+    const safe = await this.#gateAsWrite(ctx, target);
+    const url = this.#targetToPath(safe);
     await this.#request(ctx, url, { method: 'DELETE' });
   }
 
@@ -226,6 +271,10 @@ export class ObsidianService {
    *
    * Bypasses `#request` retries: a HEAD probe should never be retried — a
    * 404 is the answer, not a transient failure.
+   *
+   * Does **not** apply path-policy gating itself — currently called only by
+   * `obsidian_write_note`'s overwrite check, which already gates the target as
+   * a write before reaching here. External callers must gate before invoking.
    */
   async noteExists(ctx: Context, target: NoteTarget): Promise<boolean> {
     const url = this.#targetToPath(target);
@@ -244,9 +293,19 @@ export class ObsidianService {
 
   async listFiles(ctx: Context, dirPath?: string): Promise<FileListing> {
     let url = '/vault/';
+    let normalized = '';
     if (dirPath) {
-      const normalized = dirPath.replace(/^\/+|\/+$/g, '');
+      normalized = dirPath.replace(/^\/+|\/+$/g, '');
       if (normalized) url = `/vault/${encodeVaultPath(normalized)}/`;
+    }
+    /**
+     * Gate the directory itself when it's non-empty — root listings always
+     * pass so users can navigate into their scope. Children aren't filtered
+     * here; the per-file read gate on `getNoteContent` etc. catches access to
+     * out-of-scope individual notes.
+     */
+    if (normalized) {
+      this.#policy.assertReadable(normalized);
     }
     const res = await this.#request(ctx, url, { method: 'GET' });
     return (await res.json()) as RawFileListing;
@@ -300,6 +359,8 @@ export class ObsidianService {
   }
 
   async openInUi(ctx: Context, path: string, opts?: { newLeaf?: boolean }): Promise<void> {
+    /** Gated as a read — opening a note in the UI doesn't mutate its content. */
+    this.#policy.assertReadable(path);
     const params = new URLSearchParams();
     if (opts?.newLeaf) params.set('newLeaf', 'true');
     const qs = params.toString();
@@ -309,6 +370,46 @@ export class ObsidianService {
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
+
+  /**
+   * Resolve a write target to a gated path target. For path inputs, gates
+   * `target.path` as a write before any upstream call. For non-path inputs
+   * (`active` / `periodic`) when restrictions are active, a JSON resolution
+   * fetch happens first (without gating, since the user has write authority
+   * on the resolved path or fails here), then the resolved path is gated.
+   */
+  async #gateAsWrite(ctx: Context, target: NoteTarget): Promise<NoteTarget> {
+    if (target.type === 'path') {
+      this.#policy.assertWritable(target.path);
+      return target;
+    }
+    if (this.#policy.isUnrestricted) {
+      return target;
+    }
+    const note = await this.#rawGetNoteJson(ctx, target);
+    this.#policy.assertWritable(note.path);
+    return { type: 'path', path: note.path };
+  }
+
+  /** Raw NoteJson fetch — bypasses path-policy. Used by gate helpers to learn the resolved path. */
+  async #rawGetNoteJson(ctx: Context, target: NoteTarget): Promise<NoteJson> {
+    const url = this.#targetToPath(target);
+    const res = await this.#request(ctx, url, {
+      method: 'GET',
+      headers: { Accept: NOTE_JSON_ACCEPT },
+    });
+    return (await res.json()) as NoteJson;
+  }
+
+  /** Raw document-map fetch — bypasses path-policy. Caller must gate. */
+  async #rawGetDocumentMap(ctx: Context, target: NoteTarget): Promise<DocumentMap> {
+    const url = this.#targetToPath(target);
+    const res = await this.#request(ctx, url, {
+      method: 'GET',
+      headers: { Accept: DOCUMENT_MAP_ACCEPT },
+    });
+    return (await res.json()) as DocumentMap;
+  }
 
   #targetToPath(target: NoteTarget): string {
     switch (target.type) {

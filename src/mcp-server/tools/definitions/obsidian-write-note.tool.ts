@@ -50,6 +50,13 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       when: 'Whole-file write was attempted against an existing note and `overwrite` was not set to `true`.',
       recovery: 'Retry with overwrite true or use obsidian_patch_note for in-place edits.',
     },
+    {
+      reason: 'path_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes.',
+      recovery:
+        'Use a path inside the configured write scope, or unset OBSIDIAN_READ_ONLY. The error data echoes the active scope; check the server startup banner for the active configuration.',
+    },
   ],
 
   async handler(input, ctx) {

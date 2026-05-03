@@ -1,9 +1,10 @@
 /**
- * @fileoverview Tool registration barrel. The command-palette pair
- * (`obsidian_list_commands` + `obsidian_execute_command`) is exported
- * separately so callers can decide whether to register them based on the
- * `OBSIDIAN_ENABLE_COMMANDS` flag — keeping this module free of eager
- * config reads.
+ * @fileoverview Tool registration barrel. Tools are split into read-only and
+ * write groups so the entry point can wrap the write set with `disabledTool()`
+ * when `OBSIDIAN_READ_ONLY=true`. The command-palette pair is exported
+ * separately so the entry point wraps it with `disabledTool()` when either
+ * `OBSIDIAN_ENABLE_COMMANDS=false` or `OBSIDIAN_READ_ONLY=true` — keeping this
+ * module free of eager config reads.
  * @module mcp-server/tools/definitions/index
  */
 
@@ -22,12 +23,17 @@ import { obsidianReplaceInNote } from './obsidian-replace-in-note.tool.js';
 import { obsidianSearchNotes } from './obsidian-search-notes.tool.js';
 import { obsidianWriteNote } from './obsidian-write-note.tool.js';
 
-/** Tools registered unconditionally on every server. */
-export const baseToolDefinitions = [
+/** Read-only tools — always registered, even with `OBSIDIAN_READ_ONLY=true`. */
+export const readToolDefinitions = [
   obsidianGetNote,
   obsidianListNotes,
   obsidianListTags,
   obsidianSearchNotes,
+  obsidianOpenInUi,
+];
+
+/** Write tools — wrapped with `disabledTool()` when `OBSIDIAN_READ_ONLY=true`. */
+export const writeToolDefinitions = [
   obsidianWriteNote,
   obsidianAppendToNote,
   obsidianPatchNote,
@@ -35,8 +41,10 @@ export const baseToolDefinitions = [
   obsidianManageFrontmatter,
   obsidianManageTags,
   obsidianDeleteNote,
-  obsidianOpenInUi,
 ];
 
-/** Command-palette tools — registered only when `OBSIDIAN_ENABLE_COMMANDS=true`. */
+/** Combined base set — preserves the previous registration order. */
+export const baseToolDefinitions = [...readToolDefinitions, ...writeToolDefinitions];
+
+/** Command-palette tools — opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`; suppressed by `OBSIDIAN_READ_ONLY=true`. */
 export const commandToolDefinitions = [obsidianListCommands, obsidianExecuteCommand];

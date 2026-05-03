@@ -76,6 +76,13 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
   auth: ['tool:obsidian_manage_tags:write'],
   errors: [
     {
+      reason: 'path_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: '`list` requires the path to be readable; `add`/`remove` require it to be inside OBSIDIAN_WRITE_PATHS, with OBSIDIAN_READ_ONLY=false.',
+      recovery:
+        'Use a path inside the configured scope, or unset OBSIDIAN_READ_ONLY for writes. The error data echoes the active scope; check the server startup banner for the active configuration.',
+    },
+    {
       reason: 'tags_required',
       code: JsonRpcErrorCode.ValidationError,
       when: '`operation` is "add" or "remove" but `tags` was empty or omitted.',

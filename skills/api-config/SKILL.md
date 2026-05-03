@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: reference
 ---
@@ -98,6 +98,24 @@ Activated when `OAUTH_PROXY_AUTHORIZATION_URL` or `OAUTH_PROXY_TOKEN_URL` is set
 |:--------|:-----------------|:--------|:------|
 | `STORAGE_PROVIDER_TYPE` | `storage.providerType` | `in-memory` | `in-memory` \| `filesystem` \| `supabase` \| `cloudflare-r2` \| `cloudflare-kv` \| `cloudflare-d1`; aliases: `mem`, `fs` |
 | `STORAGE_FILESYSTEM_PATH` | `storage.filesystemPath` | `./.storage` | Used only when `providerType` is `filesystem` |
+
+---
+
+### Canvas (DataCanvas primitive — Tier 3, optional peer dep `@duckdb/node-api`)
+
+| Env Var | `AppConfig` field | Default | Notes |
+|:--------|:-----------------|:--------|:------|
+| `CANVAS_PROVIDER_TYPE` | `canvas.providerType` | `none` | `none` \| `duckdb`. Set to `duckdb` to enable `core.canvas`. Fails closed on Cloudflare Workers (DuckDB has no V8-isolate build). |
+| `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` | Per-canvas DuckDB `memory_limit` PRAGMA value, in MB. |
+| `CANVAS_EXPORT_PATH` | `canvas.exportRootPath` | `./.canvas-exports` | Sandbox root for path-targeted exports. Absolute paths and `..` traversal are rejected. |
+| `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `100` | Active canvas cap per tenant; throws `RateLimited` when exceeded. |
+| `CANVAS_TTL_MS` | `canvas.ttlMs` | `86400000` | Sliding TTL (24 h). Every operation extends the expiry. |
+| `CANVAS_ABSOLUTE_CAP_MS` | `canvas.absoluteCapMs` | `604800000` | Absolute cap from creation (7 d). Sliding window clamps to this. |
+| `CANVAS_SWEEPER_INTERVAL_MS` | `canvas.sweeperIntervalMs` | `60000` | Background sweep interval. Set to `0` to disable. |
+| `CANVAS_DEFAULT_ROW_LIMIT` | `canvas.defaultRowLimit` | `10000` | Default cap on rows materialized into a query response. |
+| `CANVAS_SCHEMA_SNIFF_ROWS` | `canvas.schemaSniffRows` | `100` | Rows to materialize for schema inference when `schema` is omitted. |
+
+**Platform support:** Linux/macOS/Windows × x64 supported, Linux/macOS arm64 supported. Windows arm64 unsupported (DuckDB upstream). See `api-canvas` skill for the full DataCanvas reference.
 
 #### Supabase (optional sub-object)
 

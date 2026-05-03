@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against @cyanheads/mcp-ts-core when you hit a framework issue. Use when a builder, utility, context method, or config behaves contrary to the documented API — not for server-specific application bugs.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: workflow
 ---
@@ -172,6 +172,7 @@ Every issue needs exactly one primary label. Stack secondary labels on top when 
 | `performance` | Memory, CPU, latency, or resource usage |
 | `security` | Vulnerability, CVE, or hardening work |
 | `breaking-change` | Fix/feature will break public API; requires a major bump |
+| `surplus-token-idea` | Worth exploring when token budget allows |
 
 Combine labels: `--label "bug" --label "regression"`.
 
@@ -180,7 +181,7 @@ Combine labels: `--label "bug" --label "regression"`.
 For long output, write to a file and attach:
 
 ```bash
-bun run dev:stdio 2>&1 | head -100 > /tmp/mcp-error.log
+bun run rebuild && bun run start:stdio 2>&1 | head -100 > /tmp/mcp-error.log
 
 # As part of a new issue
 gh issue create -R cyanheads/mcp-ts-core \

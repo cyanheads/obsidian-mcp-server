@@ -66,6 +66,13 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
   auth: ['tool:obsidian_manage_frontmatter:write'],
   errors: [
     {
+      reason: 'path_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: '`get` requires the path to be readable; `set`/`delete` require it to be inside OBSIDIAN_WRITE_PATHS, with OBSIDIAN_READ_ONLY=false.',
+      recovery:
+        'Use a path inside the configured scope, or unset OBSIDIAN_READ_ONLY for writes. The error data echoes the active scope; check the server startup banner for the active configuration.',
+    },
+    {
       reason: 'value_required',
       code: JsonRpcErrorCode.ValidationError,
       when: '`operation` is "set" but no `value` was supplied.',

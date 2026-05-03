@@ -62,6 +62,13 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
   auth: ['tool:obsidian_replace_in_note:write'],
   errors: [
     {
+      reason: 'path_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes. (The pre-read also requires the path to be readable.)',
+      recovery:
+        'Use a path inside the configured write scope, or unset OBSIDIAN_READ_ONLY. The error data echoes the active scope; check the server startup banner for the active configuration.',
+    },
+    {
       reason: 'regex_invalid',
       code: JsonRpcErrorCode.ValidationError,
       when: 'A `useRegex: true` replacement supplied a `search` pattern that is not a valid ECMAScript regex.',

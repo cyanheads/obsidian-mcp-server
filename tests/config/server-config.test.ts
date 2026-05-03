@@ -13,6 +13,9 @@ const ENV_KEYS = [
   'OBSIDIAN_VERIFY_SSL',
   'OBSIDIAN_REQUEST_TIMEOUT_MS',
   'OBSIDIAN_ENABLE_COMMANDS',
+  'OBSIDIAN_READ_PATHS',
+  'OBSIDIAN_WRITE_PATHS',
+  'OBSIDIAN_READ_ONLY',
 ] as const;
 
 beforeEach(() => {
@@ -36,6 +39,9 @@ describe('getServerConfig', () => {
       verifySsl: false,
       requestTimeoutMs: 30_000,
       enableCommands: false,
+      readPaths: undefined,
+      writePaths: undefined,
+      readOnly: false,
     });
   });
 
@@ -78,5 +84,80 @@ describe('getServerConfig', () => {
     const a = getServerConfig();
     const b = getServerConfig();
     expect(a).toBe(b);
+  });
+});
+
+describe('OBSIDIAN_READ_PATHS / OBSIDIAN_WRITE_PATHS parsing', () => {
+  it('parses comma-separated paths and normalizes case + trailing slashes', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', 'Public/,Notes/sub/');
+    expect(getServerConfig().readPaths).toEqual(['public', 'notes/sub']);
+  });
+
+  it('drops empty entries between separators', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_WRITE_PATHS', 'projects/,,scratch/');
+    expect(getServerConfig().writePaths).toEqual(['projects', 'scratch']);
+  });
+
+  it('trims surrounding whitespace per entry', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', '  public  ,   notes  ');
+    expect(getServerConfig().readPaths).toEqual(['public', 'notes']);
+  });
+
+  it('deduplicates after normalization', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', 'Public/,public,PUBLIC/');
+    expect(getServerConfig().readPaths).toEqual(['public']);
+  });
+
+  it('treats empty string as unset (full vault)', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', '');
+    vi.stubEnv('OBSIDIAN_WRITE_PATHS', '');
+    const config = getServerConfig();
+    expect(config.readPaths).toBeUndefined();
+    expect(config.writePaths).toBeUndefined();
+  });
+
+  it('treats whitespace-only as unset', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', '   ');
+    expect(getServerConfig().readPaths).toBeUndefined();
+  });
+
+  it('throws when input is separators only', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', ',,,');
+    expect(() => getServerConfig()).toThrow(/OBSIDIAN_READ_PATHS/);
+  });
+
+  it('throws on absolute paths', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_WRITE_PATHS', '/etc/passwd');
+    expect(() => getServerConfig()).toThrow(/OBSIDIAN_WRITE_PATHS/);
+  });
+
+  it('throws on `..` traversal', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', 'projects/../secret');
+    expect(() => getServerConfig()).toThrow(/OBSIDIAN_READ_PATHS/);
+  });
+});
+
+describe('OBSIDIAN_READ_ONLY', () => {
+  it('coerces "true"/"1" to true', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_ONLY', 'true');
+    expect(getServerConfig().readOnly).toBe(true);
+    resetServerConfig();
+    vi.stubEnv('OBSIDIAN_READ_ONLY', '1');
+    expect(getServerConfig().readOnly).toBe(true);
+  });
+
+  it('defaults to false', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    expect(getServerConfig().readOnly).toBe(false);
   });
 });
