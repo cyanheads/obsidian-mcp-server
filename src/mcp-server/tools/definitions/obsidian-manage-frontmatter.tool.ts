@@ -13,12 +13,14 @@ import { TargetSchema } from './_shared/schemas.js';
 
 export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
   description:
-    'Atomic `get` / `set` / `delete` on a single frontmatter key. `set` requires `value` (any JSON-typed value: string, number, boolean, array, or object).',
+    'Get, set, or delete a single frontmatter key on a note, atomically. `set` requires a JSON-typed `value` (string, number, boolean, array, or object).',
   annotations: { destructiveHint: true },
   input: z.object({
     operation: z
       .enum(['get', 'set', 'delete'])
-      .describe('Which mutation/read to perform on the key.'),
+      .describe(
+        'Operation to perform on `key`. `get` — read the current value. `set` — write `value`, creating the key if absent. `delete` — remove the key from frontmatter.',
+      ),
     target: TargetSchema.describe('Where the note lives.'),
     key: z.string().min(1).describe('Frontmatter field name.'),
     value: z
@@ -69,8 +71,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
       reason: 'path_forbidden',
       code: JsonRpcErrorCode.Forbidden,
       when: '`get` requires the path to be readable; `set`/`delete` require it to be inside OBSIDIAN_WRITE_PATHS, with OBSIDIAN_READ_ONLY=false.',
-      recovery:
-        'Use a path inside the configured scope, or unset OBSIDIAN_READ_ONLY for writes. The error data echoes the active scope; check the server startup banner for the active configuration.',
+      recovery: 'Use a path inside the configured scope. The error data echoes the active scope.',
     },
     {
       reason: 'value_required',
@@ -90,7 +91,8 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
       reason: 'no_active_file',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
-      recovery: 'Open a note in Obsidian or pass an explicit path target instead.',
+      recovery:
+        'Call obsidian_open_in_ui to focus a file, or pass an explicit path target instead.',
     },
     {
       reason: 'periodic_not_found',
@@ -103,7 +105,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
       code: JsonRpcErrorCode.ValidationError,
       when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
       recovery:
-        "Enable the period in Obsidian's Periodic Notes plugin settings, or pass an explicit path target instead.",
+        "Pass an explicit path target — the requested period is disabled in the operator's Periodic Notes plugin.",
     },
   ],
 

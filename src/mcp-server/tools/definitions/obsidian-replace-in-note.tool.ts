@@ -34,7 +34,7 @@ const ReplacementSchema = z
 
 export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
   description:
-    "String or regex search-replace inside a single note. The note is fetched, replacements are applied sequentially (each sees the previous one's output), and the result is written back. Use for edits that don't fit `obsidian_patch_note`'s structural targets — e.g., body-wide find-and-replace.",
+    "Search and replace inside a single note, literally or by regex. Replacements run in array order, each over the previous one's output. Use for edits that don't fit `obsidian_patch_note`'s structural targets — e.g., body-wide find-and-replace.",
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -66,14 +66,14 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
       code: JsonRpcErrorCode.Forbidden,
       when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes. (The pre-read also requires the path to be readable.)',
       recovery:
-        'Use a path inside the configured write scope, or unset OBSIDIAN_READ_ONLY. The error data echoes the active scope; check the server startup banner for the active configuration.',
+        'Use a path inside the configured write scope. The error data echoes the active scope.',
     },
     {
       reason: 'regex_invalid',
       code: JsonRpcErrorCode.ValidationError,
       when: 'A `useRegex: true` replacement supplied a `search` pattern that is not a valid ECMAScript regex.',
       recovery:
-        'Test the pattern in a JS regex tester, or set useRegex to false to match `search` as a literal string.',
+        'Use a valid ECMAScript regex, or set useRegex to false to match `search` as a literal string.',
     },
     {
       reason: 'note_missing',
@@ -86,7 +86,8 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
       reason: 'no_active_file',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
-      recovery: 'Open a note in Obsidian or pass an explicit path target instead.',
+      recovery:
+        'Call obsidian_open_in_ui to focus a file, or pass an explicit path target instead.',
     },
     {
       reason: 'periodic_not_found',
@@ -99,7 +100,7 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
       code: JsonRpcErrorCode.ValidationError,
       when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
       recovery:
-        "Enable the period in Obsidian's Periodic Notes plugin settings, or pass an explicit path target instead.",
+        "Pass an explicit path target — the requested period is disabled in the operator's Periodic Notes plugin.",
     },
   ],
 

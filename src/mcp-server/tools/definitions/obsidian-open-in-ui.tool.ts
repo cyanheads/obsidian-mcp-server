@@ -42,7 +42,7 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
       code: JsonRpcErrorCode.Forbidden,
       when: 'The target path is outside OBSIDIAN_READ_PATHS (and OBSIDIAN_WRITE_PATHS, since write paths imply read access).',
       recovery:
-        'Use a path inside the configured read scope. The error data echoes the active scope; check the server startup banner for the active configuration.',
+        'Use a path inside the configured read scope. The error data echoes the active scope.',
     },
     {
       reason: 'note_missing',

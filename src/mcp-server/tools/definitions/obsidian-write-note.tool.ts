@@ -11,7 +11,7 @@ import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schema
 
 export const obsidianWriteNote = tool('obsidian_write_note', {
   description:
-    'Create or overwrite a note. With `section` provided, replaces just that heading/block/frontmatter section in place; otherwise writes the whole file. Whole-file writes refuse to clobber an existing note unless `overwrite: true` is set — read the note first and prefer `obsidian_patch_note` / `obsidian_append_to_note` / `obsidian_replace_in_note` for in-place edits. For heading sections, `content` is the new body; the heading line itself is preserved automatically and a leading duplicate heading is stripped.',
+    'Create or overwrite a note. With `section`, replaces just that heading/block/frontmatter section in place. Whole-file writes fail with `file_exists` against an existing note unless `overwrite: true` — for in-place edits, prefer `obsidian_patch_note` (sections), `obsidian_append_to_note` (append), or `obsidian_replace_in_note` (find-and-replace). For heading sections, `content` is the new body; the heading line is preserved automatically.',
   annotations: { idempotentHint: true, destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -55,7 +55,7 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       code: JsonRpcErrorCode.Forbidden,
       when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes.',
       recovery:
-        'Use a path inside the configured write scope, or unset OBSIDIAN_READ_ONLY. The error data echoes the active scope; check the server startup banner for the active configuration.',
+        'Use a path inside the configured write scope. The error data echoes the active scope.',
     },
   ],
 

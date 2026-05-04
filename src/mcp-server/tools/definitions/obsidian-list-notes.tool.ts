@@ -61,7 +61,7 @@ const EntrySchema = z
   .describe('A single entry in the listing.');
 
 export const obsidianListNotes = tool('obsidian_list_notes', {
-  description: `List notes and subdirectories at a vault path. Defaults to vault root when \`path\` is omitted. Walks the directory tree up to \`depth\` levels (default ${DEFAULT_DEPTH} — top-level entries plus their immediate children, a structural overview; max ${MAX_DEPTH}). Pass \`depth: 1\` for a flat single-directory listing, or bump higher to walk deeper. Optional \`extension\` and \`nameRegex\` filters apply across the whole walk. Returns flat \`entries[]\` (each with \`path\`, \`type\`, optional \`truncated\`) plus a tree view in the rendered output. Capped at ${ENTRY_CAP} entries per call — when reached, walking stops and \`excluded\` is set; drill deeper by narrowing \`path\` to a subdirectory or applying filters.`,
+  description: `List notes and subdirectories at a vault path. Defaults to the vault root when \`path\` is omitted. Tune recursion with \`depth\`, or filter the walk with \`extension\` / \`nameRegex\`. Capped at ${ENTRY_CAP} entries per call — when reached, walking stops and \`excluded\` is set; narrow \`path\` or tighten filters to surface the rest.`,
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     path: z.string().optional().describe('Vault-relative directory path. Omit for the vault root.'),
@@ -82,9 +82,9 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
       .int()
       .min(1)
       .max(MAX_DEPTH)
-      .optional()
+      .default(DEFAULT_DEPTH)
       .describe(
-        `How many directory levels to walk. \`1\` = target directory only (no recursion); \`${DEFAULT_DEPTH}\` (default) = target plus its immediate children — a structural overview; bump higher to drill in. Prefer narrowing \`path\` to a subdirectory over a high \`depth\` on the vault root.`,
+        `How many directory levels to walk. \`1\` = target directory only (no recursion); \`${DEFAULT_DEPTH}\` = target plus its immediate children — a structural overview; bump higher to drill in. Prefer narrowing \`path\` to a subdirectory over a high \`depth\` on the vault root.`,
       ),
   }),
   output: z.object({
@@ -127,7 +127,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied `nameRegex` is not a valid ECMAScript regex.',
       recovery:
-        'Test the pattern (e.g. `^Project.*\\.md$`) in a JS regex tester, or omit nameRegex to disable filtering.',
+        'Use a valid ECMAScript regex (e.g. `^Project.*\\.md$`), or omit nameRegex to disable filtering.',
     },
     {
       reason: 'path_forbidden',
@@ -146,7 +146,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
 
   async handler(input, ctx) {
     const svc = getObsidianService();
-    const depth = input.depth ?? DEFAULT_DEPTH;
+    const depth = input.depth;
 
     let regex: RegExp | undefined;
     if (input.nameRegex) {

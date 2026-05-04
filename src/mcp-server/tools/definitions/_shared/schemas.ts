@@ -40,12 +40,14 @@ export const TargetSchema = z.discriminatedUnion('type', [
 
 /** Sub-document target inside a note. */
 export const SectionSchema = z.object({
-  type: z.enum(['heading', 'block', 'frontmatter']).describe('Section locator kind.'),
+  type: z
+    .enum(['heading', 'block', 'frontmatter'])
+    .describe('Heading by name, block by reference, or frontmatter field by key.'),
   target: z
     .string()
     .min(1)
     .describe(
-      'Heading name (use "::" for nested headings), block reference (e.g. "2d9b4a"), or frontmatter field name.',
+      'Heading name (use "::" for nested headings), block reference without leading caret (e.g. "2d9b4a", not "^2d9b4a"), or frontmatter field name.',
     ),
 });
 

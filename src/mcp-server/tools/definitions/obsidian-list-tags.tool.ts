@@ -9,7 +9,7 @@ import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 
 export const obsidianListTags = tool('obsidian_list_tags', {
   description:
-    'List every tag found across the vault, with usage counts. Includes hierarchical parents — `work/tasks` contributes to both `work` and `work/tasks`.',
+    'List every tag found across the vault, with usage counts. Includes hierarchical parents — `work/tasks` contributes to both `work` and `work/tasks`. To find notes by tag, use `obsidian_search_notes` in dataview mode (e.g. `TABLE FROM #work`).',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({}),
   output: z.object({

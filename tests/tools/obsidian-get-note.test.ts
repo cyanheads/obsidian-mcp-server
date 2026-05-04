@@ -233,6 +233,143 @@ describe('obsidian_get_note / not-found suggestions', () => {
   });
 });
 
+describe('obsidian_get_note / includeLinks', () => {
+  function mockFullNote(content: string): void {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(
+        200,
+        {
+          path: 'Note.md',
+          content,
+          frontmatter: {},
+          tags: [],
+          stat: { ctime: 0, mtime: 0, size: 0 },
+        },
+        { headers: { 'content-type': 'application/json' } },
+      );
+  }
+
+  it('defaults includeLinks to false — outgoingLinks absent', async () => {
+    mockFullNote('See [[Other]] and [link](other.md).');
+    const input = obsidianGetNote.input.parse({
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+    });
+    const out = await obsidianGetNote.handler(input, createMockContext());
+    if (out.result.format !== 'full') throw new Error('expected full branch');
+    expect(out.result.outgoingLinks).toBeUndefined();
+  });
+
+  it('captures wikilinks with aliases, sections, and embeds; excludes self-section and empty', async () => {
+    mockFullNote(
+      [
+        '[[Project Plan]]',
+        '[[Meeting Notes|the meeting]]',
+        '![[diagram.png]]',
+        '[[Project Plan#Goals]]',
+        '[[Project Plan#Goals|alias]]',
+        '[[#self-section-only]]',
+        '[[]]',
+      ].join('\n'),
+    );
+    const input = obsidianGetNote.input.parse({
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+    const out = await obsidianGetNote.handler(input, createMockContext());
+    if (out.result.format !== 'full') throw new Error('expected full branch');
+    expect(out.result.outgoingLinks).toEqual([
+      { target: 'Project Plan', type: 'wikilink' },
+      { target: 'Meeting Notes', type: 'wikilink' },
+      { target: 'diagram.png', type: 'wikilink' },
+      { target: 'Project Plan', type: 'wikilink' },
+      { target: 'Project Plan', type: 'wikilink' },
+    ]);
+  });
+
+  it('captures internal markdown links and filters external URIs', async () => {
+    mockFullNote(
+      [
+        '[plain](Notes/plain.md)',
+        '[relative](../shared.md)',
+        '![image](assets/x.png)',
+        '[ext](https://anthropic.com)',
+        '[mailto](mailto:x@y.com)',
+        '![ext-img](https://e.com/i.png)',
+      ].join('\n'),
+    );
+    const input = obsidianGetNote.input.parse({
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+    const out = await obsidianGetNote.handler(input, createMockContext());
+    if (out.result.format !== 'full') throw new Error('expected full branch');
+    expect(out.result.outgoingLinks).toEqual([
+      { target: 'Notes/plain.md', type: 'markdown' },
+      { target: '../shared.md', type: 'markdown' },
+      { target: 'assets/x.png', type: 'markdown' },
+    ]);
+  });
+
+  it('captures bracketed markdown URLs containing spaces (regression: angle-bracket form)', async () => {
+    mockFullNote(
+      [
+        '[doc](<Notes/with spaces.md>)',
+        '[short](<short.md>)',
+        '[trim](<  Notes/x.md  >)',
+        '[empty](<>)',
+      ].join('\n'),
+    );
+    const input = obsidianGetNote.input.parse({
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+    const out = await obsidianGetNote.handler(input, createMockContext());
+    if (out.result.format !== 'full') throw new Error('expected full branch');
+    expect(out.result.outgoingLinks).toEqual([
+      { target: 'Notes/with spaces.md', type: 'markdown' },
+      { target: 'short.md', type: 'markdown' },
+      { target: 'Notes/x.md', type: 'markdown' },
+    ]);
+  });
+
+  it('returns an empty array when the body has no links', async () => {
+    mockFullNote('Just prose, no links.\n\nAnother paragraph.');
+    const input = obsidianGetNote.input.parse({
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+    const out = await obsidianGetNote.handler(input, createMockContext());
+    if (out.result.format !== 'full') throw new Error('expected full branch');
+    expect(out.result.outgoingLinks).toEqual([]);
+  });
+
+  it('is silently ignored for format: "content"', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, '[[Other]]');
+
+    const input = obsidianGetNote.input.parse({
+      format: 'content',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+    const out = await obsidianGetNote.handler(input, createMockContext());
+    expect(out.result).toEqual({
+      format: 'content',
+      path: 'Note.md',
+      content: '[[Other]]',
+    });
+  });
+});
+
 describe('obsidian_get_note / format()', () => {
   it('renders content', () => {
     const blocks = obsidianGetNote.format!({
@@ -258,6 +395,42 @@ describe('obsidian_get_note / format()', () => {
     expect(text).toContain('casey');
     expect(text).toContain('size=3');
     expect(text).toContain('body');
+  });
+
+  it('renders an outgoing-links section when outgoingLinks is populated', () => {
+    const blocks = obsidianGetNote.format!({
+      result: {
+        format: 'full',
+        path: 'A.md',
+        content: 'body',
+        frontmatter: {},
+        tags: [],
+        stat: { ctime: 0, mtime: 0, size: 0 },
+        outgoingLinks: [
+          { target: 'Other', type: 'wikilink' },
+          { target: 'Notes/with spaces.md', type: 'markdown' },
+        ],
+      },
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('Outgoing links (2)');
+    expect(text).toContain('[wikilink] Other');
+    expect(text).toContain('[markdown] Notes/with spaces.md');
+  });
+
+  it('omits the outgoing-links section when outgoingLinks is empty or absent', () => {
+    const baseResult = {
+      format: 'full' as const,
+      path: 'A.md',
+      content: 'body',
+      frontmatter: {},
+      tags: [],
+      stat: { ctime: 0, mtime: 0, size: 0 },
+    };
+    const empty = obsidianGetNote.format!({ result: { ...baseResult, outgoingLinks: [] } });
+    const absent = obsidianGetNote.format!({ result: baseResult });
+    expect((empty[0] as { text: string }).text).not.toContain('Outgoing links');
+    expect((absent[0] as { text: string }).text).not.toContain('Outgoing links');
   });
 
   it('renders document-map listing', () => {

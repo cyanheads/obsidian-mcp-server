@@ -19,7 +19,7 @@ const LocationSchema = z
 
 export const obsidianManageTags = tool('obsidian_manage_tags', {
   description:
-    "Add, remove, or list a note's tags. The server reconciles both representations — frontmatter `tags:` array and inline `#tag` syntax — so an `add` ensures the tag is present in the requested location(s), and a `remove` strips it. Inline `#tag` occurrences inside fenced code blocks are intentionally left alone. Inline-location additions append the new tag at the end of the file. `list` ignores the `tags` field.",
+    "Add, remove, or list a note's tags. The server reconciles both representations — frontmatter `tags:` array and inline `#tag` syntax — so an `add` ensures the tag is present in the requested location(s), and a `remove` strips it. Inline `#tag` occurrences inside fenced code blocks are intentionally left alone. Inline-location additions append the new tag at the end of the file. `list` ignores the input `tags` array.",
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -79,8 +79,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       reason: 'path_forbidden',
       code: JsonRpcErrorCode.Forbidden,
       when: '`list` requires the path to be readable; `add`/`remove` require it to be inside OBSIDIAN_WRITE_PATHS, with OBSIDIAN_READ_ONLY=false.',
-      recovery:
-        'Use a path inside the configured scope, or unset OBSIDIAN_READ_ONLY for writes. The error data echoes the active scope; check the server startup banner for the active configuration.',
+      recovery: 'Use a path inside the configured scope. The error data echoes the active scope.',
     },
     {
       reason: 'tags_required',
@@ -99,7 +98,8 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       reason: 'no_active_file',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
-      recovery: 'Open a note in Obsidian or pass an explicit path target instead.',
+      recovery:
+        'Call obsidian_open_in_ui to focus a file, or pass an explicit path target instead.',
     },
     {
       reason: 'periodic_not_found',
@@ -112,7 +112,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       code: JsonRpcErrorCode.ValidationError,
       when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
       recovery:
-        "Enable the period in Obsidian's Periodic Notes plugin settings, or pass an explicit path target instead.",
+        "Pass an explicit path target — the requested period is disabled in the operator's Periodic Notes plugin.",
     },
   ],
 

@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-05-03 21:24:39
+Generated on: 2026-05-04 05:06:44
 
 ```text
 obsidian-mcp-server/
@@ -134,6 +134,7 @@ obsidian-mcp-server/
 │   │   └── obsidian/
 │   │       ├── frontmatter-ops.ts
 │   │       ├── obsidian-service.ts
+│   │       ├── path-policy.ts
 │   │       ├── section-extractor.ts
 │   │       └── types.ts
 │   └── index.ts
@@ -146,7 +147,9 @@ obsidian-mcp-server/
 │   │   └── obsidian-vault-note.test.ts
 │   ├── services/
 │   │   ├── frontmatter-ops.test.ts
+│   │   ├── obsidian-service-path-policy.test.ts
 │   │   ├── obsidian-service.test.ts
+│   │   ├── path-policy.test.ts
 │   │   └── section-extractor.test.ts
 │   ├── tools/
 │   │   ├── obsidian-append-to-note.test.ts

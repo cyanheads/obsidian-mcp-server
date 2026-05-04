@@ -19,16 +19,24 @@ const StatSchema = z.object({
 
 export const obsidianGetNote = tool('obsidian_get_note', {
   description:
-    'Read a note from the vault. `format: "content"` returns just the raw markdown body. `format: "full"` returns a structured object with content, frontmatter, tags, and file metadata. `format: "document-map"` returns the catalog of headings, block references, and frontmatter fields. `format: "section"` returns a single heading/block/frontmatter section (requires `section`); heading sections include the full subtree under that heading, including nested headings. Works against any vault path, the active file, or a periodic note.',
+    'Read a note from the vault — by path, the active file, or a periodic note. Choose a `format` projection: raw body, full object, structural document map, or a single section.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     format: z
       .enum(['content', 'full', 'document-map', 'section'])
-      .describe('Which projection of the note to return.'),
+      .describe(
+        'Which projection to return. `content` — raw markdown body. `full` — content plus parsed frontmatter, tags, and file metadata. `document-map` — catalog of headings, block IDs, and frontmatter field names (use to discover patch targets). `section` — a single heading, block, or frontmatter section (requires `section`); heading sections include the full subtree under that heading.',
+      ),
     target: TargetSchema.describe('Where the note lives.'),
     section: SectionSchema.optional().describe(
       'Required when `format` is `"section"`. Identifies the heading/block/frontmatter to extract.',
     ),
+    includeLinks: z
+      .boolean()
+      .default(false)
+      .describe(
+        'When true with `format: "full"`, parses outgoing wiki and markdown link references from the note body. Skipped for other formats.',
+      ),
   }),
   output: z.object({
     result: z
@@ -47,9 +55,28 @@ export const obsidianGetNote = tool('obsidian_get_note', {
             content: z.string().describe('Raw markdown body.'),
             frontmatter: z
               .record(z.string(), z.unknown())
-              .describe('Parsed YAML frontmatter as an object.'),
+              .describe(
+                'Parsed YAML frontmatter. Values are strings, numbers, booleans, arrays, or nested objects.',
+              ),
             tags: z.array(z.string()).describe('Tags from frontmatter and inline #tag syntax.'),
             stat: StatSchema.describe('File metadata.'),
+            outgoingLinks: z
+              .array(
+                z
+                  .object({
+                    target: z
+                      .string()
+                      .describe(
+                        'Link target as written — vault path, basename, or alias. No existence check.',
+                      ),
+                    type: z.enum(['wikilink', 'markdown']).describe('Source syntax.'),
+                  })
+                  .describe('A single outgoing link reference.'),
+              )
+              .optional()
+              .describe(
+                'Outgoing link references parsed from the note body. Present when `includeLinks` is true. Vault-internal references only — external URLs (http, mailto, etc.) are filtered out.',
+              ),
           })
           .describe('Full projection — content plus parsed metadata.'),
         z
@@ -95,7 +122,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       code: JsonRpcErrorCode.Forbidden,
       when: 'The target path is outside OBSIDIAN_READ_PATHS (and OBSIDIAN_WRITE_PATHS, since write paths imply read access).',
       recovery:
-        'Use a path inside the configured read scope. The error data echoes the active scope; check the server startup banner for the active configuration.',
+        'Use a path inside the configured read scope. The error data echoes the active scope.',
     },
     {
       reason: 'note_missing',
@@ -108,7 +135,8 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       reason: 'no_active_file',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
-      recovery: 'Open a note in Obsidian or pass an explicit path target instead.',
+      recovery:
+        'Call obsidian_open_in_ui to focus a file, or pass an explicit path target instead.',
     },
     {
       reason: 'periodic_not_found',
@@ -121,7 +149,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       code: JsonRpcErrorCode.ValidationError,
       when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
       recovery:
-        "Enable the period in Obsidian's Periodic Notes plugin settings, or pass an explicit path target instead.",
+        "Pass an explicit path target — the requested period is disabled in the operator's Periodic Notes plugin.",
     },
   ],
 
@@ -154,6 +182,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
           frontmatter: note.frontmatter,
           tags: note.tags,
           stat: note.stat,
+          ...(input.includeLinks ? { outgoingLinks: parseOutgoingLinks(note.content) } : {}),
         },
       };
     }
@@ -232,6 +261,12 @@ export const obsidianGetNote = tool('obsidian_get_note', {
           lines.push(`- \`${k}\`: ${stringifyValue(result.frontmatter[k])}`);
         }
       }
+      if (result.outgoingLinks && result.outgoingLinks.length > 0) {
+        lines.push('', `**Outgoing links (${result.outgoingLinks.length})**`);
+        for (const l of result.outgoingLinks) {
+          lines.push(`- [${l.type}] ${l.target}`);
+        }
+      }
       lines.push('', '**Content**', result.content);
       return [{ type: 'text', text: lines.join('\n') }];
     }
@@ -283,4 +318,40 @@ function formatIsoTime(ms: number): string {
   } catch {
     return String(ms);
   }
+}
+
+/**
+ * Extract outgoing link references from note content. Captures Obsidian
+ * wikilinks (`[[target]]`, `![[target]]`, with optional `|alias` or
+ * `#section`) and markdown links (`[text](target)`). External URIs
+ * (any `scheme:` form) are filtered out — only vault-internal references
+ * remain. No existence checks; this is the link graph as written.
+ */
+function parseOutgoingLinks(
+  content: string,
+): Array<{ target: string; type: 'wikilink' | 'markdown' }> {
+  const links: Array<{ target: string; type: 'wikilink' | 'markdown' }> = [];
+
+  for (const m of content.matchAll(/!?\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g)) {
+    const target = m[1]?.trim();
+    if (target) links.push({ target, type: 'wikilink' });
+  }
+
+  /**
+   * URL group accepts either `<bracketed text with spaces>` or a non-whitespace
+   * run. The bracketed form is the markdown spec's escape hatch for paths
+   * containing spaces.
+   */
+  for (const m of content.matchAll(/\[[^\]]*\]\((<[^<>\n]+>|[^)\s]+)(?:\s+"[^"]*")?\)/g)) {
+    let target = m[1]?.trim();
+    if (!target) continue;
+    if (target.startsWith('<') && target.endsWith('>')) {
+      target = target.slice(1, -1).trim();
+    }
+    if (target && !/^[a-z][a-z0-9+\-.]*:/i.test(target)) {
+      links.push({ target, type: 'markdown' });
+    }
+  }
+
+  return links;
 }

@@ -65,17 +65,14 @@ const ExcludedSchema = z
   .optional();
 
 export const obsidianSearchNotes = tool('obsidian_search_notes', {
-  description: `Search the vault. Modes:
-- \`text\`: substring match with context windows. Pass \`query\` as a string and optionally \`pathPrefix\` to filter the returned filenames.
-- \`dataview\`: a Dataview DQL query (\`TABLE …\`). Pass \`query\` as the DQL string. Use this for path/date/metadata filters; \`file.mtime\`, \`file.path\`, etc. are queryable.
-- \`jsonlogic\`: a JSONLogic tree evaluated over each note's NoteJson. Pass \`logic\` as a JSON object. Available \`var\` paths: \`path\` (string), \`content\` (string), \`frontmatter.<key>\` (any), \`tags\` (string[]), \`stat.ctime\` / \`stat.mtime\` / \`stat.size\` (number). Custom operators include \`glob\` and \`regexp\`.
-
-Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the overflow. Text-mode hits are additionally clipped to \`maxMatchesPerHit\` matches per file (default ${DEFAULT_MATCHES_PER_HIT}); when clipped, the hit carries \`truncated: true\` and \`totalMatches\`.`,
+  description: `Search the vault by text substring, Dataview DQL query, or JSONLogic predicate. Pick the mode that matches the query shape. Results cap at ${HIT_CAP} hits with an \`excluded\` indicator when more were available; text-mode hits also clip per file at \`maxMatchesPerHit\`. On large vaults, narrow with \`pathPrefix\` or lower \`maxMatchesPerHit\` to keep responses compact.`,
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     mode: z
       .enum(['text', 'dataview', 'jsonlogic'])
-      .describe('Search algorithm and request body shape.'),
+      .describe(
+        'Which search algorithm to run. `text` matches a substring case-insensitively across filenames and note bodies, returning surrounding context windows. `dataview` runs a DQL query (e.g. `TABLE WHERE file.mtime > date(today)`) for path/date/metadata filters. `jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`, plus `glob` and `regexp` operators.',
+      ),
     query: z
       .string()
       .optional()
@@ -90,8 +87,8 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       .number()
       .int()
       .positive()
-      .optional()
-      .describe('Characters of context on each side of the match (text mode only). Default 100.'),
+      .default(100)
+      .describe('Characters of context on each side of the match (text mode only).'),
     pathPrefix: z
       .string()
       .optional()
@@ -100,9 +97,9 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       .number()
       .int()
       .positive()
-      .optional()
+      .default(DEFAULT_MATCHES_PER_HIT)
       .describe(
-        `Cap on match contexts returned per file in text mode. When clipped, the hit carries \`truncated: true\` and \`totalMatches\`. Default ${DEFAULT_MATCHES_PER_HIT}.`,
+        'Cap on match contexts returned per file in text mode. When clipped, the hit carries `truncated: true` and `totalMatches`.',
       ),
   }),
   output: z.object({
@@ -189,7 +186,7 @@ Results are capped at ${HIT_CAP} hits; an \`excluded\` indicator reports the ove
       const prefix = input.pathPrefix;
       const prefixed = prefix ? all.filter((h) => h.filename.startsWith(prefix)) : all;
       const allowed = policy.filterReadable(prefixed);
-      const matchCap = input.maxMatchesPerHit ?? DEFAULT_MATCHES_PER_HIT;
+      const matchCap = input.maxMatchesPerHit;
       const clipped = allowed.map((h) => clipMatches(h, matchCap));
       const capped = applyCap(clipped);
       return { result: { mode: 'text' as const, ...capped } };

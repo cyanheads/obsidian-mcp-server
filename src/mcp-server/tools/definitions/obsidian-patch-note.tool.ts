@@ -17,14 +17,16 @@ import {
 
 export const obsidianPatchNote = tool('obsidian_patch_note', {
   description:
-    'Surgical edit of a heading, block reference, or frontmatter field. Choose `operation: "append"` to add after the section, `"prepend"` to add before, or `"replace"` to swap it out. Use `obsidian_get_note` with `format: "document-map"` to discover available headings, blocks, and frontmatter fields. Nested headings need `Parent::Child` syntax.',
+    'Edit a heading, block reference, or frontmatter field in place — append to, prepend to, or replace the target\'s body. Use `obsidian_get_note` with `format: "document-map"` to discover available targets first; nested headings need `Parent::Child` syntax.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
     section: SectionSchema.describe('Which heading/block/frontmatter field to edit.'),
     operation: z
       .enum(['append', 'prepend', 'replace'])
-      .describe('How to apply the content relative to the section.'),
+      .describe(
+        "How to apply `content` relative to the targeted section. `append` — at the end of the target's body (for headings, before the next sibling/parent heading; for frontmatter array fields, as a new array item). `prepend` — at the start. `replace` — swaps the target's body.",
+      ),
     content: z
       .string()
       .describe('Body to insert/replace. Markdown unless `contentType` is `json`.'),
@@ -47,7 +49,7 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
       code: JsonRpcErrorCode.Forbidden,
       when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes.',
       recovery:
-        'Use a path inside the configured write scope, or unset OBSIDIAN_READ_ONLY. The error data echoes the active scope; check the server startup banner for the active configuration.',
+        'Use a path inside the configured write scope. The error data echoes the active scope.',
     },
     {
       reason: 'note_missing',
@@ -60,7 +62,8 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
       reason: 'no_active_file',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
-      recovery: 'Open a note in Obsidian or pass an explicit path target instead.',
+      recovery:
+        'Call obsidian_open_in_ui to focus a file, or pass an explicit path target instead.',
     },
     {
       reason: 'periodic_not_found',
@@ -73,7 +76,7 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
       code: JsonRpcErrorCode.ValidationError,
       when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
       recovery:
-        "Enable the period in Obsidian's Periodic Notes plugin settings, or pass an explicit path target instead.",
+        "Pass an explicit path target — the requested period is disabled in the operator's Periodic Notes plugin.",
     },
     {
       reason: 'section_target_missing',

@@ -11,7 +11,7 @@ import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 
 export const obsidianExecuteCommand = tool('obsidian_execute_command', {
   description:
-    'Execute an Obsidian command by ID (from `obsidian_list_commands`). Behaviour depends on the command — some are destructive (delete file, close vault), some open UI. Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`; the tool is registered only when the operator has explicitly enabled it.',
+    'Execute an Obsidian command by ID (from `obsidian_list_commands`). Behaviour depends on the command — some are destructive (delete file, close vault), some open UI. Commands run with the same authority as a user invoking them from the keyboard.',
   annotations: { openWorldHint: true, destructiveHint: true },
   input: z.object({
     commandId: z
@@ -21,7 +21,7 @@ export const obsidianExecuteCommand = tool('obsidian_execute_command', {
   }),
   output: z.object({
     commandId: z.string().describe('Echoed command ID.'),
-    executed: z.boolean().describe('True when the upstream POST returned successfully.'),
+    executed: z.boolean().describe('True when the command was dispatched successfully.'),
   }),
   auth: ['tool:obsidian_execute_command:admin'],
   errors: [
