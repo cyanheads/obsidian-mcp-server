@@ -206,6 +206,8 @@ async handler(input, ctx) {
 }
 ```
 
+**Declare contracts inline on each tool, even when they look similar across tools.** The contract is part of the tool's documented public surface — reading one tool definition file should give the full picture (input, output, errors, handler, format). Don't extract a shared `errors[]` constant or contract module to deduplicate; per-tool repetition is the intended cost of locality, and dynamic `recovery` hints often need tool-specific context anyway.
+
 Services that accept `ctx` use the same resolver for parity. The Obsidian service threads `ctx` into `#throwForStatus` and spreads `ctx.recoveryFor(reason)` per status branch, so service-side throws carry the calling tool's contract recovery onto the wire:
 
 ```ts
@@ -288,6 +290,7 @@ Available skills:
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
 | `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
+| `tool-defs-analysis` | Audit MCP definition language across tools/resources/prompts — voice, leaks, defaults, recovery hints, sparsity, structure |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
 | `release-and-publish` | Ship a release end-to-end across npm, MCP Registry, and GHCR |
 | `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |

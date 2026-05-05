@@ -25,7 +25,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     format: z
       .enum(['content', 'full', 'document-map', 'section'])
       .describe(
-        'Which projection to return. `content` — raw markdown body. `full` — content plus parsed frontmatter, tags, and file metadata. `document-map` — catalog of headings, block IDs, and frontmatter field names (use to discover patch targets). `section` — a single heading, block, or frontmatter section (requires `section`); heading sections include the full subtree under that heading.',
+        'Which projection to return. `content` — raw markdown body. `full` — content plus parsed frontmatter, tags, and file metadata. `document-map` — catalog of headings, block IDs, and frontmatter field names (use to discover patch targets). `section` — a single heading, block, or frontmatter section (requires `section`); heading sections include the full subtree under that heading and use `Parent::Child` syntax for nesting.',
       ),
     target: TargetSchema.describe('Where the note lives.'),
     section: SectionSchema.optional().describe(

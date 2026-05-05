@@ -11,7 +11,7 @@ import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schema
 
 export const obsidianAppendToNote = tool('obsidian_append_to_note', {
   description:
-    'Append content to a note. Without `section`, the body is appended to the end of the file. With `section`, the content is appended to the end of that heading/block/frontmatter. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
+    'Append content to a note. Without `section`, the body is appended to the end of the file. With `section`, the content is appended to the end of that heading/block/frontmatter; nested headings need `Parent::Child` syntax — use `obsidian_get_note` with `format: "document-map"` to discover available targets. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -41,6 +41,40 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
       when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes.',
       recovery:
         'Use a path inside the configured write scope. The error data echoes the active scope.',
+    },
+    {
+      reason: 'note_missing',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Section append targets a path that does not resolve to an existing note (PATCH requires the file to exist).',
+      recovery:
+        'Verify the path with obsidian_list_notes, or omit `section` to fall back to whole-file append (which creates the note if missing).',
+    },
+    {
+      reason: 'no_active_file',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `active` but no file is currently open in Obsidian.',
+      recovery:
+        'Call obsidian_open_in_ui to focus a file, or pass an explicit path target instead.',
+    },
+    {
+      reason: 'periodic_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `periodic` but no matching periodic note exists.',
+      recovery: 'Create the periodic note first or pass an explicit path target.',
+    },
+    {
+      reason: 'periodic_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
+      recovery:
+        "Pass an explicit path target — the requested period is disabled in the operator's Periodic Notes plugin.",
+    },
+    {
+      reason: 'section_target_missing',
+      code: JsonRpcErrorCode.ValidationError,
+      when: '`section` was provided but the named heading/block/frontmatter field does not exist in the note.',
+      recovery:
+        'Call obsidian_get_note with format document-map to discover available targets, or pass createTargetIfMissing: true to bring it into existence.',
     },
   ],
 

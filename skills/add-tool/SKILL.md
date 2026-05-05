@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.6"
+  version: "2.8"
   audience: external
   type: reference
 ---
@@ -65,6 +65,11 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
   // (InternalError, ServiceUnavailable, Timeout, ValidationError,
   // SerializationError) bubble freely — only declare domain-specific reasons.
   // Delete this block if no domain failures apply.
+  //
+  // Keep contracts inline on this tool, even when other tools have similar
+  // entries. The contract is part of the tool's documented public surface —
+  // don't extract a shared `errors[]` constant; per-tool repetition is the
+  // intended cost of self-contained tool defs.
   //
   // `recovery` is required (≥ 5 words) — it's the agent's next move when this
   // failure fires. Forcing function for thoughtful guidance: placeholders like
@@ -503,7 +508,7 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 - **Lists**: Return top N with a total count and pagination cursor, not unbounded arrays
 - **Large objects**: Return key fields by default; accept a `fields` or `verbose` parameter for full data
 - **Binary/blob content**: Return metadata and a reference, not the raw content
-- **Tabular working sets**: When upstream returns more rows than fit in context, `DataCanvas` (`ctx.core.canvas?`, Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) is one option — register the rows, return the `canvas_id` plus a preview, and the agent can run SQL to slice down to what it needs without a re-fetch. See `api-canvas` for the register / query / export pattern.
+- **Tabular working sets**: When upstream returns more rows than fit in context, `DataCanvas` (`ctx.core.canvas?`, Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) lets you register the rows and return the `canvas_id` plus a preview so the agent can run SQL to slice down without a re-fetch. The `spillover()` helper (`@cyanheads/mcp-ts-core/canvas`) automates the overflow case: drain rows up to a character budget for the inline preview, auto-register the full source on overflow, return both as a discriminated union. Compute distributions or refinement hints across the full result — not the preview — so the agent gets honest aggregate signal on the rows it didn't read. See `api-canvas` for the register / query / export pattern and the spillover flow.
 
 ## Checklist
 
@@ -517,6 +522,7 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 - [ ] If wrapping external API: output schema and `format()` preserve uncertainty from sparse upstream payloads instead of inventing concrete values
 - [ ] `auth` scopes declared if the tool needs authorization
 - [ ] `errors: [...]` contract declared for the tool's domain-specific failure modes — or block deleted if no domain failures apply (baseline codes bubble freely)
+- [ ] Error contract declared inline on this tool — not imported from a shared module, even when other tools have near-identical entries
 - [ ] `task: true` added if the tool is long-running
 - [ ] Registered in the project's existing `createApp()` tool list (directly or via barrel)
 - [ ] `bun run devcheck` passes

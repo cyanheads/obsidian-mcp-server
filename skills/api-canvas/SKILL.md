@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: reference
 ---
@@ -262,6 +262,82 @@ export const fetchAndStage = tool('fetch_and_stage_germplasm', {
   },
 });
 ```
+
+---
+
+## Pattern: spillover
+
+A handler produces a tabular result that's too big to inline: a paginated REST call that returns 50k rows, a streamed CSV, a database cursor. Inlining everything blows the agent's context; inlining a fixed slice leaves it blind to the rest. **Spillover** is the third option — show a small preview, register the whole result on the canvas, hand back a token pointing at it. The agent reads the preview directly and reaches for SQL when it needs the rest.
+
+### `spillover(opts)`
+
+```ts
+import { spillover } from '@cyanheads/mcp-ts-core/canvas';
+
+const result = await spillover({
+  canvas: instance,
+  source: fetchAllPages(),         // any AsyncIterable<Row> or Iterable<Row>
+  previewChars: 100_000,           // ≈ 25k tokens of inline rows
+  caps: { maxRows: 50_000 },       // hard upper bound on registered rows
+  signal: ctx.signal,
+});
+
+if (result.spilled) {
+  // result.previewRows  → inline these in the response
+  // result.handle.tableName → surface so the agent can SQL the full set
+  // result.truncated    → true if caps.maxRows was hit before the source exhausted
+} else {
+  // result.previewRows  → entire source fit; no canvas table was created
+}
+```
+
+The discriminated union narrows on `result.spilled` — no runtime checks needed.
+
+### Sizing the preview
+
+The budget is **characters of `JSON.stringify(row)`**, not rows. A row count is a leaky proxy: the same `50` rows is ~500 tokens for compact IDs and ~25k tokens for nested observations. A character budget gives one number that works across heterogeneous tools.
+
+| Token budget you want | Rough `previewChars` |
+|:---------------------|:---------------------|
+| 10k tokens           | 40_000               |
+| 25k tokens           | 100_000              |
+| 50k tokens           | 200_000              |
+
+Heuristic: ~4 chars per token for typical JSON. Refine empirically per tool if the row shape is unusual.
+
+### Flow
+
+1. **Drain.** Pull rows, accumulating `JSON.stringify(row).length` per row, until the running total would exceed `previewChars` (the row that crosses the budget is the **overflow sentinel**) or the source exhausts.
+2. **Source fit.** Drain finished under budget — return `{ spilled: false, previewRows }`. No canvas call was made.
+3. **Source overflows.** The sentinel proves there are more rows than fit. Build a merged iterable of *(buffered preview rows + sentinel + remaining iterator)*, hand it to `canvas.registerTable`, return `{ spilled: true, previewRows, handle, truncated }`.
+
+The merged iterable streams — the helper does not double-buffer the full source.
+
+### Schema handling
+
+| Source | Schema | Behavior |
+|:-------|:-------|:---------|
+| Sync or async | Caller-supplied | Forwarded to `registerTable` as-is |
+| Sync or async | Omitted | Helper infers via `inferSchemaFromRows` over preview buffer + sentinel |
+
+When the preview budget is small (single-digit rows) and the sniff window matters, pass `schema` explicitly — the helper's window is only as large as the preview budget allows.
+
+### Cancellation and partial state
+
+`signal.abort()` throws on the next iteration of the preview drain or the spill drain. If abort fires after `canvas.registerTable` has begun appending rows, the helper best-effort calls `canvas.drop(tableName)` before the throw propagates — the contract is "partial drain is not registered."
+
+### When *not* to use spillover
+
+- **Tiny known result.** If the upstream call returns ≤ 100 rows, just inline them — no canvas needed.
+- **Headless register** (caller wants the full set on canvas with zero preview rows). Call `canvas.registerTable` directly. `previewChars` is rejected at `0`; spillover always implies a visible preview.
+- **Workers runtime.** Canvas requires DuckDB native; spillover is a canvas-coupled helper. For Workers parity, persist via `ctx.state` instead.
+
+### Out of scope
+
+- **Provenance metadata** (source URI, original query). Caller stores externally — see #112 option 3.
+- **Pagination-flavored builder.** A `paginate(fetchPage) → AsyncIterable<Row>` adapter is deferred until a second non-paginated consumer surfaces.
+- **Token-accurate budget.** `previewTokens` (tokenizer-driven) is a future option; characters cover the common case.
+- **`caps.maxBytes`.** Row caps cover the common case without re-doing serialization the canvas appender skips.
 
 ---
 

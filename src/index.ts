@@ -6,8 +6,7 @@
  * @module index
  */
 
-import { createApp } from '@cyanheads/mcp-ts-core';
-import { disabledTool } from '@cyanheads/mcp-ts-core/tools';
+import { createApp, disabledTool } from '@cyanheads/mcp-ts-core';
 import { requestContextService } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { allPromptDefinitions } from '@/mcp-server/prompts/definitions/index.js';

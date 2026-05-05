@@ -4,7 +4,7 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -119,6 +119,8 @@ throw ctx.fail('no_match', `No item ${id}`, {
 `ctx.recoveryFor` is the first member of a planned **family of opt-in resolution helpers**. Future contract-bound fields (`troubleshootingFor`, `userMessageFor`, …) follow the same shape: single-purpose, spreadable wire-shape, `{}` fallback when not applicable.
 
 **Skip the contract** for one-off internal tools or quick prototypes — `ctx` is plain `Context` (no `fail`) and you throw via [factories](#error-factories-fallback) directly. Behavior is identical at the wire; the contract just adds compile-time safety.
+
+> **Declare contracts inline on each tool, even when similar across tools.** The contract is part of the tool's documented public surface — reading one tool definition file should give the full picture (input, output, errors, handler, format). Don't extract a shared `errors[]` constant or contract module to deduplicate near-identical entries; per-tool repetition is the intended cost of locality, and dynamic `recovery` hints often need tool-specific runtime context anyway. If a code-cleanup pass suggests consolidating contracts, decline — the duplication is load-bearing for tool-def readability.
 
 > **Limits of the conformance lint.** The conformance and prefer-fail rules scan the handler's source text for `throw` statements. Errors thrown from called services (e.g. `await myService.fetch()` raising `RateLimited` internally) are invisible — the lint only sees what's lexically in the handler. Treat the contract as the *advertised* failure surface; bubbled-up codes still reach the client correctly via the auto-classifier, just without lint enforcement.
 

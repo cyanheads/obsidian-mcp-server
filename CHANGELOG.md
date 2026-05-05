@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.1.4](changelog/3.1.x/3.1.4.md) — 2026-05-05
+
+Error contracts catch up to wire reality — obsidian://vault, obsidian_append_to_note, obsidian_write_note declare failure reasons (path_forbidden, note_missing, no_active_file, periodic_*, section_target_missing) the service already throws.
+
 ## [3.1.3](changelog/3.1.x/3.1.3.md) — 2026-05-04
 
 obsidian_get_note grows an opt-in includeLinks flag that surfaces the note's outgoing wikilinks and markdown links; tool descriptions, schema defaults, and recovery hints tightened across the surface.

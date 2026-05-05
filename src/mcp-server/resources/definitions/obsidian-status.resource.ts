@@ -21,7 +21,7 @@ export const obsidianStatus = resource('obsidian://status', {
     authenticated: z
       .boolean()
       .describe(
-        'True when the configured OBSIDIAN_API_KEY is accepted by an authenticated probe to /vault/.',
+        'True when the configured OBSIDIAN_API_KEY is accepted by an authenticated request to the vault listing.',
       ),
     versions: z
       .object({
