@@ -85,6 +85,10 @@ ARG PORT
 # Set runtime environment variables
 # Note: PORT is an automatic variable in many cloud environments (e.g., Cloud Run)
 ENV MCP_HTTP_PORT=${PORT:-3010}
+# Bind to all interfaces inside the container so the host's `-p` mapping can reach it;
+# loopback would be unreachable from outside the container. For deployments beyond the
+# operator's own machine, set MCP_AUTH_MODE=jwt or oauth — the default `none` plus this
+# bind exposes the upstream OBSIDIAN_API_KEY to any caller that can reach the port.
 ENV MCP_HTTP_HOST="0.0.0.0"
 ENV MCP_TRANSPORT_TYPE="http"
 ENV MCP_SESSION_MODE="stateless"

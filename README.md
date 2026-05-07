@@ -320,6 +320,8 @@ docker run --rm -e OBSIDIAN_API_KEY=your-key -p 3010:3010 obsidian-mcp-server
 
 The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/obsidian-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
+The image binds to `0.0.0.0` inside the container (required for Docker port mapping). For any deployment reachable beyond your own machine, set `MCP_AUTH_MODE=jwt` (with `MCP_AUTH_SECRET_KEY`) or `oauth` — otherwise the listener forwards your `OBSIDIAN_API_KEY` to the vault on behalf of every caller.
+
 ## Project structure
 
 | Directory | Purpose |
