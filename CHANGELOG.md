@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.1.5](changelog/3.1.x/3.1.5.md) — 2026-05-06
+
+Bump @cyanheads/mcp-ts-core ^0.8.15 → ^0.8.18 and document the auth requirement for HTTP deployments beyond loopback.
+
 ## [3.1.4](changelog/3.1.x/3.1.4.md) — 2026-05-05
 
 Error contracts catch up to wire reality — obsidian://vault, obsidian_append_to_note, obsidian_write_note declare failure reasons (path_forbidden, note_missing, no_active_file, periodic_*, section_target_missing) the service already throws.

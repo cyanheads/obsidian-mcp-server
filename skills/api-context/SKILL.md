@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.sample`, `ctx.progress`), and when to use each.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: reference
 ---
@@ -27,6 +27,7 @@ interface Context {
   readonly requestId: string;       // Unique per request, auto-generated
   readonly timestamp: string;       // ISO 8601 request start time
   readonly tenantId?: string;       // JWT 'tid' claim; 'default' for stdio and HTTP+MCP_AUTH_MODE=none
+  readonly sessionId?: string;      // Mcp-Session-Id (HTTP stateful/auto); undefined elsewhere unless opted in
   readonly traceId?: string;        // OTEL trace ID (present when OTEL enabled)
   readonly spanId?: string;         // OTEL span ID (present when OTEL enabled)
   readonly auth?: AuthContext;      // Parsed auth claims (clientId, scopes, sub)
@@ -69,6 +70,7 @@ interface Context {
 | `requestId` | Yes | Auto-generated UUID per request |
 | `timestamp` | Yes | ISO 8601, request start |
 | `tenantId` | Stdio and HTTP+`MCP_AUTH_MODE=none` (as `'default'`); JWT `tid` claim in HTTP+`jwt`/`oauth` | JWT / single-tenant default |
+| `sessionId` | HTTP `stateful` / `auto` mode; undefined for stdio and stateless HTTP unless opted in | `Mcp-Session-Id` header (or server-minted) — see [§ `ctx.sessionId`](#ctxsessionid) |
 | `traceId` | When OTEL enabled | OTEL trace context |
 | `spanId` | When OTEL enabled | OTEL trace context |
 | `auth` | When auth enabled | Parsed JWT claims |
@@ -165,6 +167,81 @@ if (page.cursor) { /* more pages available */ }
 - Throws `McpError(InvalidRequest)` if `tenantId` is missing. Won't happen in stdio (any auth mode) or HTTP+`MCP_AUTH_MODE=none` — both default to `'default'`. Can happen in HTTP+`MCP_AUTH_MODE=jwt`/`oauth` when the token lacks a `tid` claim (intentional fail-closed: distinct authenticated callers must not silently share state).
 - Keys are tenant-prefixed internally; handlers never need to namespace manually.
 - **Workers persistence:** The `in-memory` provider loses data on cold starts. Use `cloudflare-kv`, `cloudflare-r2`, or `cloudflare-d1` for durable storage in Workers.
+
+---
+
+## `ctx.sessionId`
+
+Optional HTTP session identifier. Surfaced when the request carries a durable session — handlers use it as a *discovery / scoping key* on top of tenant-keyed `ctx.state`, not as an authorization principal.
+
+### When it's defined
+
+| Transport / mode | `ctx.sessionId` |
+|:-----------------|:----------------|
+| stdio (any auth) | `undefined` |
+| HTTP, `MCP_SESSION_MODE=stateless` | `undefined` (default) — see [opt-in](#stateless-mode-opt-in) |
+| HTTP, `stateful` / `auto`, `MCP_AUTH_MODE=none` | session token; possession = access (no identity binding) |
+| HTTP, `stateful` / `auto`, `MCP_AUTH_MODE=jwt` / `oauth` | session token, identity-bound — hijack mismatches are rejected by `SessionStore.isValidForIdentity` *before* the handler runs |
+
+In `stateful` / `auto` mode, the value mirrors the `Mcp-Session-Id` HTTP header (or a server-minted token for new sessions). Each subsequent request from the same client reuses it; reconnects after disconnect bind to the same session as long as it hasn't expired.
+
+### Stateless-mode opt-in
+
+In stateless HTTP mode the SDK still hands the framework a freshly generated token for every request, but it has request-lifetime semantics (no `SessionStore`, no continuity). The framework hides this from handlers by default — `ctx.sessionId` is `undefined` so any handler treating it as durable fails closed.
+
+To surface the per-request token anyway, opt in via `createApp`:
+
+```ts
+import { createApp } from '@cyanheads/mcp-ts-core';
+
+await createApp({
+  tools: [...],
+  context: {
+    exposeStatelessSessionId: true,
+  },
+});
+```
+
+Use this only when downstream code is structured around `ctx.sessionId` and accepts that the value changes per-request. For generic per-request correlation, use `ctx.requestId` (always present, no opt-in).
+
+### Capability-token model
+
+Surfacing `sessionId` does not change the framework's capability-as-token rule (possession of an opaque ID grants access — see CLAUDE.md `# Core Rules`). It is an opt-in *discovery-scoping* axis, not an access boundary.
+
+- Tokens shared across sessions (e.g. `df_<uuid>` handed from Agent A to Agent B) still resolve on the receiving side. The lookup key is the token, not the session.
+- Session-scoped *enumeration* (e.g. `dataframe_describe` returning only items registered by the current session) is a per-server pattern: maintain a session-keyed lookup of known names, gate list-all on it, but route direct lookups against the shared backing store.
+
+This matches deployments like `brapi-mcp-server` under `MCP_AUTH_MODE=none`: each session gets its own `_connect` alias surface and its own `dataframe_describe` enumeration scope, while any agent holding a `df_<uuid>` token can query it directly across session boundaries.
+
+### Recipes
+
+**Strict — fail closed when no session is present:**
+
+```ts
+import { invalidRequest } from '@cyanheads/mcp-ts-core/errors';
+
+if (!ctx.sessionId) {
+  throw invalidRequest('Session required for this operation.');
+}
+await ctx.state.set(`session:${ctx.sessionId}:${baseKey}`, value);
+```
+
+**Lax — fall back to tenant-shared key:**
+
+```ts
+const sessionKey = ctx.sessionId
+  ? `session:${ctx.sessionId}:${baseKey}`
+  : baseKey;
+await ctx.state.set(sessionKey, value);
+```
+
+**Reading the matching log correlation field.** The framework's auto-instrumented logs always carry the raw SDK session token (even in stateless mode, for tracing) under the `sessionId` field. Don't read `ctx.sessionId` and pass it to `ctx.log` — the logger already has it.
+
+### Behavior notes
+
+- **Not a tenant boundary.** `ctx.state` is still tenant-scoped. Building session-scoped state is the consumer's responsibility — prefix with `session:${ctx.sessionId}:` as shown above.
+- **Auto-task tools.** `task: true` handlers run in a detached background context with no session attachment — `ctx.sessionId` is always `undefined` regardless of mode.
+- **Worker bundle.** Workers use the same HTTP transport plumbing; session behavior matches Node HTTP.
 
 ---
 
@@ -446,6 +523,7 @@ The `≥5 words` lint rule on contract `recovery` (validated at lint time) makes
 | `ctx.requestId` | `string` | Always |
 | `ctx.timestamp` | `string` | Always |
 | `ctx.tenantId` | `string \| undefined` | Stdio (`'default'`); HTTP+`MCP_AUTH_MODE=none` (`'default'`); HTTP+`jwt`/`oauth` (JWT `tid` claim — undefined if absent) |
+| `ctx.sessionId` | `string \| undefined` | HTTP `stateful` / `auto` mode; stateless HTTP only when `createApp({ context: { exposeStatelessSessionId: true } })`; never in stdio or auto-task handlers |
 | `ctx.traceId` | `string \| undefined` | OTEL enabled |
 | `ctx.spanId` | `string \| undefined` | OTEL enabled |
 | `ctx.auth` | `AuthContext \| undefined` | Auth enabled |
