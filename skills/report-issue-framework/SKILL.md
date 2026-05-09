@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against @cyanheads/mcp-ts-core when you hit a framework issue. Use when a builder, utility, context method, or config behaves contrary to the documented API — not for server-specific application bugs.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: workflow
 ---
@@ -35,16 +35,18 @@ gh issue list -R cyanheads/mcp-ts-core --search "your error message or keyword"
 
 ## Writing Well-Structured Issues
 
-Good issues are scannable, concrete, and self-contained. These patterns apply to both bugs and features — the guidance targets any prose block (Description, Additional context, feature proposals).
+Good issues are scannable, concrete, and self-contained — terse and fact-dense. Default to one or two sentences per bullet; if a bullet runs long, split it or cut it. These patterns apply to both bugs and features — the guidance targets any prose block (Description, Additional context, feature proposals).
 
 - **Lead with specifics.** Name the tool, function, module, or symptom. "Currently `createApp()` throws `ConfigurationError` when `MCP_HTTP_PORT` is set to `0`" beats "There's a problem with the config." A reader should know what's broken or missing before the end of the first sentence.
 - **Embed library/service links on first mention.** `[Hono](https://hono.dev/)`, `[linkedom](https://github.com/WebReflection/linkedom)`. Link to the canonical repo or homepage so readers can verify the dependency and reach docs in one click.
 - **Use `owner/repo#N` for cross-repo issue references.** GitHub auto-renders them as linked references (e.g. `cyanheads/pubmed-mcp-server#34`). Bare `#N` only works for same-repo issues.
 - **Add a `Related: #N` line** near the top when the issue grows from prior context (discussions, other issues, PRs). Makes provenance clickable.
+- **Cite cross-references once per body.** Link an issue/PR in `Related:`, the description, or Additional context — not all three. The reader sees them all; redundant linking dilutes signal.
 - **Lead design sections with a philosophy sentence.** Bold a short principle before the tradeoff details — e.g. "Philosophy: **fail fast on config errors, degrade gracefully on runtime errors.**" Establishes the lens for the rest of the section.
 - **Prefer Markdown tables for comparisons.** When showing options, tiers, strategies, or tradeoffs — tables are the highest-density format for scanning N rows × M attributes.
 - **Separate `### Scope` from `### Out of scope`.** The latter is as important as the former — it pre-empts scope-creep debates in comments and signals you've thought about the boundaries.
 - **Use `Depends on: owner/repo#N`** to declare ordering explicitly when implementation is blocked on another issue landing first.
+- **Cut what dilutes the signal.** Mechanism walkthroughs (link the PR or doc instead), ceremonial framings ("This issue covers…"), conversation references ("as discussed", "per offline"), and kitchen-sink Additional context blocks. If a paragraph isn't pulling weight, drop it.
 - **Skip collaborator-framing sign-offs.** Lines like "Happy to open a PR", "let me know if you'd like", "willing to contribute", "if that's the preferred flow" read as noise. A PR link beats an offer; if you're the maintainer filing against your own repo, the offer is redundant. End the body at the last substantive point.
 
 ## Redact Before Posting
@@ -81,7 +83,7 @@ Bun
 
 ### Runtime version
 
-Bun 1.2.x
+Bun 1.3.x
 
 ### Transport
 

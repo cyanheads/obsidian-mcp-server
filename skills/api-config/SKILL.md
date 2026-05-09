@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -68,6 +68,7 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 |:--------|:-----------------|:--------|:------|
 | `MCP_AUTH_MODE` | `mcpAuthMode` | `none` | `none` \| `jwt` \| `oauth` |
 | `MCP_AUTH_SECRET_KEY` | `mcpAuthSecretKey` | — | Required for `jwt` mode; min 32 chars |
+| `MCP_AUTH_DISABLE_SCOPE_CHECKS` | `mcpAuthDisableScopeChecks` | `false` | When `true`, bypasses both `withRequiredScopes` (declared `auth: [...]`) and `checkScopes` (runtime/tenant scopes). Token validation (sig/aud/iss/exp) intact. Logs a `WARNING` at startup. See `api-auth` skill. |
 | `OAUTH_ISSUER_URL` | `oauthIssuerUrl` | — | Required for `oauth` mode |
 | `OAUTH_AUDIENCE` | `oauthAudience` | — | Required for `oauth` mode |
 | `OAUTH_JWKS_URI` | `oauthJwksUri` | — | Override JWKS endpoint (otherwise derived from issuer) |

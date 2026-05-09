@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "2.0"
+  version: "2.1"
   audience: external
   type: workflow
 ---
@@ -120,9 +120,11 @@ For each agent directory that exists:
 
 If no agent directory exists, skip Phase B — the project hasn't opted in to per-agent skill copies.
 
-**Phase C — Package scripts → Project `scripts/`**
+**Phase C — Package framework files → Project**
 
-The `init` CLI scaffolds a fixed set of framework scripts into consumer projects — these underpin `bun run build`, `bun run devcheck`, `bun run lint:mcp`, `bun run tree`, and the changelog build. They drift silently when the framework updates them. Compare by content hash and overwrite on mismatch:
+Two categories of framework-authored files ship into consumer projects and drift silently as the framework updates them. Both follow the same hash-compare-and-overwrite mechanic.
+
+**Scripts** — `init` scaffolds a fixed set that underpin `bun run build`, `bun run devcheck`, `bun run lint:mcp`, `bun run tree`, and the changelog build. Iterate the package's shipped scripts directory:
 
 ```bash
 for src in node_modules/@cyanheads/mcp-ts-core/scripts/*.ts; do
@@ -140,9 +142,17 @@ done
 
 Scripts in `scripts/` that aren't present in the package directory are project-specific (custom deploy, codegen, etc.) — leave them alone. The package's `files:` field gates what ships into `node_modules/.../scripts/`, so enumerating that directory is the canonical "shipped scripts" set.
 
-If the consumer customized a framework script, the overwrite discards those changes. After the sync runs, diff `scripts/` to surface replacements — review before committing. If a specific local customization needs to be preserved, revert that file using your git tools.
+**Pristine reference files** — files explicitly documented as "never edit, rename, or move." The framework keeps the authoritative copy under `templates/`; the consumer's copy must track upstream as the format evolves (new frontmatter fields, section reorderings, etc.). Fixed src→dst mapping:
 
-**Report** which skills were added/updated in Phase A (with version deltas), which agent directories were refreshed in Phase B, and which scripts were resynced in Phase C. The user needs to know what new guidance and tooling is now in play.
+| Source (in package) | Destination (in project) |
+|:--|:--|
+| `templates/changelog/template.md` | `changelog/template.md` |
+
+Apply the same compare-and-overwrite logic. Add new entries here only when a template is explicitly documented as pristine in the framework's CLAUDE.md or its own header.
+
+If the consumer customized a framework script or pristine reference (against guidance), the overwrite discards those changes. After the sync runs, diff `scripts/` and the affected template paths to surface replacements — review before committing. If a specific local customization needs to be preserved, revert that file using your git tools.
+
+**Report** which skills were added/updated in Phase A (with version deltas), which agent directories were refreshed in Phase B, and which scripts and pristine reference files were resynced in Phase C. The user needs to know what new guidance and tooling is now in play.
 
 ### 6. Adopt changes in the codebase
 
@@ -212,7 +222,7 @@ Present a concise numbered summary to the user:
 - [ ] Every applicable framework adoption opportunity applied in this pass — no scope/effort/marginal-benefit deferrals; third-party adoptions evaluated on cost/benefit
 - [ ] Project `skills/` synced from package (Phase A), with a change report
 - [ ] Agent skill directories (`.claude/skills/`, `.agents/skills/`, etc.) refreshed from project `skills/` (Phase B)
-- [ ] Framework `scripts/` resynced from package via content-hash compare (Phase C), with a change report; `scripts/` diff reviewed before committing
+- [ ] Framework `scripts/` and pristine reference files resynced from package via content-hash compare (Phase C), with a change report; diffs reviewed before committing
 - [ ] `bun run rebuild` succeeds
 - [ ] `bun run devcheck` passes (includes audit + outdated)
 - [ ] `bun run test` passes

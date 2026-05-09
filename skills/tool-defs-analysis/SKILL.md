@@ -4,7 +4,7 @@ description: >
   Read-only audit of MCP definition language across an existing surface — tools, resources, prompts. Walks every definition file and checks 10 categories the LLM reads to decide whether and how to call: voice & tense, internal leaks, audience leaks, defaults, recovery hints, output descriptions, cross-references, sparsity, examples, structure. Produces grouped findings with file:line citations and a numbered options list. Use during polish, after a refactor, or before a release. Complements `field-test` (behavior testing) and `security-pass` (security audit).
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: external
   type: audit
 ---
@@ -105,7 +105,7 @@ Prior art: #74. Field-test catches this in its leak audit; this skill is the mor
 
 **Check:** the hint directs the *agent* to its next action, not the developer to debugging. "Call `pubmed_search` with a narrower query" beats "Verify the configuration is correct" or "Internal error".
 
-**Smell:** "Check the logs", "See documentation", "Contact admin", "Try again later" (with no condition), generic non-actionable text, hints that name internal classes, files, or env vars.
+**Smell:** "Check the logs", "See documentation", "Contact admin", "Try again later" (with no condition), generic non-actionable text, hints that name internal classes or files.
 
 #### 6. Output descriptions
 

@@ -4,7 +4,7 @@ description: >
   API reference for all utilities exported from `@cyanheads/mcp-ts-core/utils`. Use when looking up utility method signatures, options, peer dependencies, or usage patterns.
 metadata:
   author: cyanheads
-  version: "2.1"
+  version: "2.2"
   audience: external
   type: reference
 ---
@@ -30,7 +30,9 @@ Utility exports from `@cyanheads/mcp-ts-core/utils`. Utilities with complex APIs
 | Export | API | Notes |
 |:-------|:----|:------|
 | `fetchWithTimeout` | `(url, timeoutMs, context: RequestContext, options?: FetchWithTimeoutOptions) -> Promise<Response>` | Wraps `fetch` with `AbortController` timeout. `FetchWithTimeoutOptions` extends `RequestInit` (minus `signal`) and adds `rejectPrivateIPs?: boolean` and `signal?: AbortSignal` (external cancellation). SSRF guard (best-effort, not hard isolation): blocks RFC 1918, loopback, link-local, CGNAT, cloud metadata. DNS validation on Node; hostname-only on Workers. Manual redirect following (max 5) with per-hop SSRF check. **DNS rebinding / TOCTOU gap** — the validation lookup and `fetch`'s own resolution are independent; pair with egress controls or a DNS-pinning fetch proxy for strong isolation. |
-| `withRetry` | `<T>(fn: () => Promise<T>, options?: RetryOptions) -> Promise<T>` | Executes `fn` with exponential backoff. Retries on transient errors (`ServiceUnavailable`, `Timeout`, `RateLimited`); non-transient errors fail immediately. On exhaustion, enriches the final error with attempt count in message and `data.retryAttempts`. **Place the retry boundary around the full pipeline** (fetch + parse), not just the network call. See `docs/service-resilience.md`. `RetryOptions`: `maxRetries` (default `3`), `baseDelayMs` (default `1000`), `maxDelayMs` (default `30000`), `jitter` (default `0.25`), `operation` (log label), `context` (RequestContext), `signal` (AbortSignal), `isTransient` (custom predicate). |
+| `withRetry` | `<T>(fn: () => Promise<T>, options?: RetryOptions) -> Promise<T>` | Executes `fn` with exponential backoff. Retries on transient errors (`ServiceUnavailable`, `Timeout`, `RateLimited`); non-transient errors fail immediately. On exhaustion, enriches the final error with attempt count in message and `data.retryAttempts`. **Place the retry boundary around the full pipeline** (fetch + parse), not just the network call. `RetryOptions`: `maxRetries` (default `3`), `baseDelayMs` (default `1000`), `maxDelayMs` (default `30000`), `jitter` (default `0.25`), `operation` (log label), `context` (RequestContext), `signal` (AbortSignal), `isTransient` (custom predicate). |
+| `httpErrorFromResponse` | `(response: Response, options?: HttpErrorFromResponseOptions) -> Promise<McpError>` | Maps an HTTP `Response` to a properly classified `McpError` — full status table including 401/403/408/422/429/5xx, body capture (truncated), `retry-after` header, optional `cause`. Use this instead of hand-rolling `if (status === 429) ...` ladders. Reads the response body — `clone()` first if you need it elsewhere. `HttpErrorFromResponseOptions`: `service?` (logical name in message, e.g. `'NCBI'`), `captureBody?` (default `true`), `bodyLimit?` (default `500`), `data?` (extra fields merged into `error.data`), `cause?`, `codeOverride?` (per-status mapping override). Pairs naturally with `withRetry` — both classify codes the same way. |
+| `httpStatusToErrorCode` | `(status: number) -> JsonRpcErrorCode \| undefined` | Sync status → code lookup. Returns `undefined` for 1xx/2xx/3xx. Use when you need just the code without a `Response` object handy. |
 
 ---
 
@@ -101,7 +103,7 @@ The `utils` export includes two type guards. The full set of guards lives in the
 
 | Export | API | Notes |
 |:-------|:----|:------|
-| `ErrorHandler` | `.tryCatch<T>(fn, opts) -> Promise<T>` `.handleError(error, opts) -> Error` `.determineErrorCode(error) -> JsonRpcErrorCode` `.mapError(error, mappings, defaultFactory?) -> T \| Error` `.formatError(error) -> Record<string, unknown>` | Service-level error handling. `tryCatch` wraps async or sync `fn`, logs via `handleError`, and always rethrows. No `.tryCatchSync()`. Use in services, NOT in tool handlers (those throw raw `McpError`). Options: `operation`, `context`, `errorCode`, `input`, `rethrow`, `includeStack`, `critical`, `errorMapper`. |
+| `ErrorHandler` | `.tryCatch<T>(fn, opts) -> Promise<T>` `.handleError(error, opts) -> Error` `.classifyOnly(error) -> { code, message, data? }` `.determineErrorCode(error) -> JsonRpcErrorCode` `.mapError(error, mappings, defaultFactory?) -> T \| Error` `.formatError(error) -> Record<string, unknown>` | Service-level error handling. `tryCatch` wraps async or sync `fn`, logs via `handleError`, and always rethrows. No `.tryCatchSync()`. Use in services, NOT in tool handlers (those throw raw `McpError`). `tryCatch` accepts `Omit<ErrorHandlerOptions, 'rethrow'>` — required: `operation`. Optional: `context`, `errorCode`, `input`, `includeStack`, `critical`, `errorMapper`. `handleError` accepts the full `ErrorHandlerOptions` including `rethrow`. |
 
 ---
 
@@ -133,6 +135,8 @@ Both functions throw `McpError(InternalError)` only on unexpected heuristic fail
 ---
 
 ## `@cyanheads/mcp-ts-core/utils` — Telemetry
+
+Helper API only. For the catalog of what the framework auto-emits (span names, metric names, attributes, completion log fields, env config, runtime support, cardinality rules), see the `api-telemetry` skill.
 
 ### `telemetry/instrumentation`
 

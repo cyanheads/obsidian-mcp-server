@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.1.6](changelog/3.1.x/3.1.6.md) — 2026-05-09
+
+Pick up `mcp_tool_scopes` claim + `MCP_AUTH_DISABLE_SCOPE_CHECKS` bypass from `@cyanheads/mcp-ts-core` 0.8.20 — resolves [#47](https://github.com/cyanheads/obsidian-mcp-server/issues/47) for OIDC providers that can't override `scope`.
+
 ## [3.1.5](changelog/3.1.x/3.1.5.md) — 2026-05-06
 
 Bump @cyanheads/mcp-ts-core ^0.8.15 → ^0.8.18 and document the auth requirement for HTTP deployments beyond loopback.

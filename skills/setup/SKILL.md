@@ -4,14 +4,14 @@ description: >
   Post-init orientation for an MCP server built on @cyanheads/mcp-ts-core. Use after running `@cyanheads/mcp-ts-core init` to understand the project structure, conventions, and skill sync model. Also use when onboarding to an existing project for the first time.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: workflow
 ---
 
 ## Context
 
-This skill assumes `npx @cyanheads/mcp-ts-core init [name]` has already run. The CLI created the project's `CLAUDE.md` and `AGENTS.md` for different agents, copied external skills to `skills/`, and scaffolded the directory structure with echo definitions as starting points. This skill covers what was created and what to do next.
+This skill assumes `bunx @cyanheads/mcp-ts-core init [name]` has already run. The CLI created the project's `CLAUDE.md` and `AGENTS.md` for different agents, copied external skills to `skills/`, and scaffolded the directory structure with echo definitions as starting points. This skill covers what was created and what to do next.
 
 ## Agent Protocol File
 
@@ -22,7 +22,7 @@ The init CLI generates both `CLAUDE.md` and `AGENTS.md` with the same purpose. K
 
 Both files serve the same purpose: project-specific agent instructions. Prefer committing one authoritative copy rather than trying to keep both in sync by hand.
 
-For the full framework API, read `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` once per session. It contains the exports catalog, tool/resource/prompt contracts, error codes, context API, and common import patterns.
+For the full framework docs, read `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` once per session. It contains the exports catalog, tool/resource/prompt contracts, error codes, context API, and common import patterns.
 
 ## Project Structure
 
@@ -96,7 +96,7 @@ After init:
 2. **Rename and replace what you keep.** The echo definitions and their tests show the pattern — swap them out for your real tools/resources/prompts.
 3. **Definitions register directly in `src/index.ts`.** No barrel files, just import and add to the `tools` / `resources` / `prompts` arrays.
 
-See the `add-tool`, `add-app-tool`, `add-resource`, `add-prompt`, and `add-test` skills for the scaffolding patterns when you start adding real definitions.
+See the `add-tool`, `add-app-tool`, `add-resource`, `add-prompt`, `add-service`, and `add-test` skills for the scaffolding patterns when you start adding real definitions.
 
 ## Conventions
 
@@ -130,11 +130,11 @@ After `bun install`, complete these one-time setup tasks:
 
 1. **Update dependencies to latest** — `bun update --latest`. The scaffolded `package.json` pins minimum versions from when the framework was published; updating ensures you start with the latest compatible releases.
 2. **Initialize git** — use your git tools: init the repo, stage all files, and commit with message `chore: scaffold from @cyanheads/mcp-ts-core`
-3. **Verify agent protocol placeholders** — if the `init` CLI was run without a `[name]` argument, `{{PACKAGE_NAME}}` may remain as a literal in `CLAUDE.md`/`AGENTS.md` and `package.json`. Replace it with the actual server name.
+3. **Verify the substituted server name** — when `init` runs without a `[name]` argument, the package name defaults to the cwd directory name. If that's not what you want as the published server name, update `package.json`, `CLAUDE.md`/`AGENTS.md`, and `server.json` to your actual server name.
 
 ## Changelog Convention
 
-`changelog/template.md` ships as a **format reference** — never edit, rename, or move it. For each release, author a per-version file at `changelog/<major.minor>.x/<version>.md` (e.g. `changelog/0.1.x/0.1.0.md`) with YAML frontmatter (`summary:` + optional `breaking:`) and grouped sections (Added / Changed / Fixed / Removed). Then regenerate the rollup with `bun run changelog:build` — `CHANGELOG.md` is an auto-generated navigation index, never hand-edited. See the `release-and-publish` skill for the full release flow.
+`changelog/template.md` ships as a **format reference** — never edit, rename, or move it. For each release, author a per-version file at `changelog/<major.minor>.x/<version>.md` (e.g. `changelog/0.1.x/0.1.0.md`) with YAML frontmatter (`summary:` + optional `breaking:` / `security:`) and grouped sections (Added / Changed / Fixed / Removed). Then regenerate the rollup with `bun run changelog:build` — `CHANGELOG.md` is an auto-generated navigation index, never hand-edited. See the `release-and-publish` skill for the full release flow.
 
 ## Next Steps
 
@@ -146,15 +146,16 @@ The included skills form a rough progression — not a rigid sequence, but the t
 4. **`field-test`** — exercise the built surface with real and adversarial inputs; produces a report of issues and pain points
 5. **`security-pass`** — audit handlers for MCP-specific security gaps: output injection, scope blast radius, input sinks, tenant isolation
 6. **`polish-docs-meta`** — finalize README, metadata, and agent protocol before shipping
-7. **`maintenance`** — after `bun update --latest`, investigate upstream changelogs and re-sync skills
+7. **`release-and-publish`** — post-wrapup ship workflow: verification gate, push commits and tags, publish to npm/MCP Registry/GHCR
+8. **`maintenance`** — after `bun update --latest`, investigate upstream changelogs and re-sync skills
 
 Skip or reorder as the project calls for it. The agent protocol's "What's Next?" section is the authoritative map once the first session is over.
 
 ## Checklist
 
 - [ ] Agent protocol file selected — keep one authoritative file (`CLAUDE.md` or `AGENTS.md`)
-- [ ] `{{PACKAGE_NAME}}` placeholders replaced in agent protocol file (if not auto-substituted by init)
-- [ ] Core framework CLAUDE.md read (`node_modules/@cyanheads/mcp-ts-core/CLAUDE.md`)
+- [ ] Substituted server name verified in `package.json`, agent protocol file, and `server.json`
+- [ ] Framework docs read (`node_modules/@cyanheads/mcp-ts-core/CLAUDE.md`)
 - [ ] Unused echo definitions cleaned up (and unregistered from `src/index.ts`)
 - [ ] Skills copied to agent directory (`cp -R skills/* .claude/skills/` or equivalent)
 - [ ] Project structure understood (definitions directories, entry point)

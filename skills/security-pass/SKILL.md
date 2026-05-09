@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / sampling / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: audit
 ---
@@ -104,8 +104,9 @@ grep -rn "auth: \[" src/mcp-server/tools/definitions/
 - Tools with `['admin']`, `['*']`, or `[]`?
 - A single scope covering two capabilities that should be separated (read vs write)?
 - Read-only tools never require write scopes?
+- `MCP_AUTH_DISABLE_SCOPE_CHECKS=true` set in production? When on, both `withRequiredScopes` and `checkScopes` early-return — every authenticated user gets every tool, and runtime tenant patterns like `team:${input.teamId}:write` no longer guard. Acceptable only when paired with a real server-side ACL (path filter, allowlist, upstream API enforcement).
 
-**Smell:** every tool shares the same scope string.
+**Smell:** every tool shares the same scope string. Or: `MCP_AUTH_DISABLE_SCOPE_CHECKS=true` set without a documented compensating ACL — confirm the deployment relies on a meaningful access control layer below the framework before approving.
 
 #### Axis 3 — Destructive ops without elicit
 

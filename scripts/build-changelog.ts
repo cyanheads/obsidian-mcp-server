@@ -6,23 +6,25 @@
  * YAML frontmatter declaring:
  *   • summary (required)  — ≤250-char headline, no markdown, one line
  *   • breaking (optional) — `true` flags releases with breaking changes
+ *   • security (optional) — `true` flags releases with security fixes
  *
  * The rollup is a thin **index**, not a copy of bodies — each entry is just a
  * clickable header + one-line summary. Full content stays in the per-version files.
  *
  * Rendered rollup entry:
- *   ## [X.Y.Z](changelog/N.N.x/X.Y.Z.md) — YYYY-MM-DD · ⚠️ Breaking
+ *   ## [X.Y.Z](changelog/N.N.x/X.Y.Z.md) — YYYY-MM-DD · ⚠️ Breaking · 🛡️ Security
  *
  *   <summary>
  *
- * (The `· ⚠️ Breaking` badge only appears when `breaking: true`.)
+ * Badges only render when their flag is `true`. Order is fixed: Breaking before
+ * Security when both are set.
  *
  * Modes:
  *   • default   → regenerate CHANGELOG.md
  *   • --check   → exit 1 if CHANGELOG.md differs from what would be generated
  *
  * Missing `summary`: warning (not failure) — the entry renders header-only.
- * Summary > 250 chars, or malformed `breaking`: hard error.
+ * Summary > 250 chars, or malformed `breaking` / `security`: hard error.
  *
  * @module scripts/build-changelog
  */
@@ -50,6 +52,7 @@ interface VersionEntry {
 
 interface Frontmatter {
   breaking: boolean;
+  security: boolean;
   summary: string | null;
 }
 
@@ -75,13 +78,13 @@ function compareSemverDesc(a: string, b: string): number {
 }
 
 /**
- * Parse minimal YAML frontmatter. Only recognizes `summary` and `breaking` —
- * other keys are ignored, so the format stays extensible without touching the
- * parser. Throws on malformed values we actually care about.
+ * Parse minimal YAML frontmatter. Only recognizes `summary`, `breaking`, and
+ * `security` — other keys are ignored, so the format stays extensible without
+ * touching the parser. Throws on malformed values we actually care about.
  */
 function parseFrontmatter(content: string, fileLabel: string): Frontmatter {
   const match = content.match(/^---\n([\s\S]*?)\n---\n?/);
-  if (!match) return { summary: null, breaking: false };
+  if (!match) return { summary: null, breaking: false, security: false };
 
   const block = match[1] as string;
 
@@ -101,18 +104,21 @@ function parseFrontmatter(content: string, fileLabel: string): Frontmatter {
     );
   }
 
-  // breaking: must be literal true/false if present
-  let breaking = false;
-  const breakingMatch = block.match(/^breaking:\s*(\S+)\s*$/m);
-  if (breakingMatch) {
-    const val = breakingMatch[1];
+  const parseBool = (key: string): boolean => {
+    const m = block.match(new RegExp(`^${key}:\\s*(\\S+)\\s*$`, 'm'));
+    if (!m) return false;
+    const val = m[1];
     if (val !== 'true' && val !== 'false') {
-      throw new Error(`${fileLabel}: breaking must be 'true' or 'false', got '${val}'.`);
+      throw new Error(`${fileLabel}: ${key} must be 'true' or 'false', got '${val}'.`);
     }
-    breaking = val === 'true';
-  }
+    return val === 'true';
+  };
 
-  return { summary, breaking };
+  return {
+    summary,
+    breaking: parseBool('breaking'),
+    security: parseBool('security'),
+  };
 }
 
 /** Extract the release date from the H1 heading. */
@@ -128,8 +134,11 @@ function extractDate(body: string, fileLabel: string): string {
 
 function renderEntry(entry: VersionEntry, fm: Frontmatter, date: string): string {
   const link = `changelog/${entry.series}/${entry.version}.md`;
-  const breakingBadge = fm.breaking ? ' · ⚠️ Breaking' : '';
-  const header = `## [${entry.version}](${link}) — ${date}${breakingBadge}`;
+  const badges = [fm.breaking ? '⚠️ Breaking' : null, fm.security ? '🛡️ Security' : null].filter(
+    (b): b is string => b !== null,
+  );
+  const badgeSuffix = badges.length > 0 ? ` · ${badges.join(' · ')}` : '';
+  const header = `## [${entry.version}](${link}) — ${date}${badgeSuffix}`;
   if (fm.summary) {
     return `${header}\n\n${fm.summary}\n`;
   }
