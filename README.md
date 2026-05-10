@@ -21,7 +21,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 
 | Tool Name | Description |
 |:----------|:------------|
-| `obsidian_get_note` | Read a note as raw content, full structured form (content + frontmatter + tags + stat), structural document map, or a single section. |
+| `obsidian_get_note` | Read a note as raw content, full structured form (content + frontmatter + tags + stat, with optional outgoing links), structural document map, or a single section. |
 | `obsidian_list_notes` | List notes and subdirectories at a vault path with a recursive walk (default depth 2 — structural overview; max 20) bounded by a 1000-entry cap. Optional `extension` and `nameRegex` filters apply across the tree; regex-filtered directories are skipped without recursing into them. Returns flat `entries[]` plus a box-drawing tree in the rendered output; per-directory `truncated: true` flags where the depth limit cut off recursion. |
 | `obsidian_list_tags` | List every tag found across the vault with usage counts, including hierarchical parents. |
 | `obsidian_list_commands` | List Obsidian command-palette commands available for execution. **Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`** (paired with `obsidian_execute_command`). |
@@ -41,7 +41,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 Read a note in one of four projections, addressed by vault path, the active file, or a periodic note (`daily`, `weekly`, `monthly`, `quarterly`, `yearly`).
 
 - `format: "content"` — raw markdown body
-- `format: "full"` — content, frontmatter, tags, and file metadata
+- `format: "full"` — content, frontmatter, tags, and file metadata; pass `includeLinks: true` to also parse outgoing wiki and markdown link references from the body (vault-internal only — external URLs are filtered)
 - `format: "document-map"` — catalog of headings, block references, and frontmatter fields
 - `format: "section"` — single heading/block/frontmatter section value (requires `section`); heading sections include the full subtree under that heading
 
@@ -133,7 +133,7 @@ Permanently delete a note. When the client supports `elicit`, the server request
 
 Dispatch an Obsidian command-palette command by ID (discoverable via `obsidian_list_commands`). Behavior is command-dependent — some commands open UI, others delete files or close the vault.
 
-**Off by default.** Both `obsidian_execute_command` and its discovery partner `obsidian_list_commands` register only when the operator sets `OBSIDIAN_ENABLE_COMMANDS=true`; both are omitted from the surface otherwise.
+**Off by default.** When `OBSIDIAN_ENABLE_COMMANDS` is unset, both `obsidian_execute_command` and its discovery partner `obsidian_list_commands` are wrapped with `disabledTool()` — absent from `tools/list` (the LLM can't invoke them) but still visible in the operator-facing manifest with a hint to enable them.
 
 ---
 
@@ -152,7 +152,7 @@ Three optional env vars gate which vault paths each tool can target. **Default u
 
 **Write paths are implicitly readable** — you can't sanely edit what you can't see. So a read passes when the target matches `READ_PATHS` *or* `WRITE_PATHS`.
 
-**`OBSIDIAN_READ_ONLY=true` short-circuits before the path checks** — every write is denied regardless of `WRITE_PATHS`, and the command-palette pair is unregistered regardless of `OBSIDIAN_ENABLE_COMMANDS` (commands can mutate).
+**`OBSIDIAN_READ_ONLY=true` short-circuits before the path checks** — every write tool and the command-palette pair are wrapped with `disabledTool()` at startup (absent from `tools/list`), and any write that still reaches the service is denied at runtime regardless of `WRITE_PATHS`.
 
 Denies are typed `path_forbidden` (JSON-RPC code `Forbidden`) with the active scope echoed back in `data.recovery.hint` and `data.activeScope`, so the LLM can self-correct without inspecting server logs. Search results from `obsidian_search_notes` are filtered against `READ_PATHS` silently — surfacing a "we hid N hits" indicator would defeat the gate.
 
@@ -166,7 +166,7 @@ The startup banner logs the active scope so operators can verify their config at
 |:---|:---|:---|
 | Resource | `obsidian://vault/{+path}` | A note in the vault — content, frontmatter, tags, and file metadata. |
 | Resource | `obsidian://tags` | All tags found across the vault, with usage counts. |
-| Resource | `obsidian://status` | Server reachability, plugin version, and auth status of the Obsidian Local REST API. |
+| Resource | `obsidian://status` | Server reachability, auth status, plugin/Obsidian version info, and the plugin manifest. |
 
 All resource data is also reachable via tools — `obsidian_get_note` for `obsidian://vault/{+path}`, `obsidian_list_tags` for `obsidian://tags`. Resources exist for clients that prefer attaching a specific note or vault snapshot to a conversation.
 
