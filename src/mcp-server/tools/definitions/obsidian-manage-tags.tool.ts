@@ -59,6 +59,12 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
               .array(z.string())
               .describe('Tags already present at the targeted location(s).'),
             tags: z.array(z.string()).describe('All tags on the note after the change.'),
+            previousSizeInBytes: z.number().describe('Byte size of the note before the add.'),
+            currentSizeInBytes: z
+              .number()
+              .describe(
+                'Byte size of the note after the add. Equals `previousSizeInBytes` when no tags were applied.',
+              ),
           })
           .describe('Result for `add`.'),
         z
@@ -68,6 +74,12 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
             applied: z.array(z.string()).describe('Tags actually changed by this call.'),
             skipped: z.array(z.string()).describe('Tags absent from the targeted location(s).'),
             tags: z.array(z.string()).describe('All tags on the note after the change.'),
+            previousSizeInBytes: z.number().describe('Byte size of the note before the remove.'),
+            currentSizeInBytes: z
+              .number()
+              .describe(
+                'Byte size of the note after the remove. Equals `previousSizeInBytes` when no tags were applied.',
+              ),
           })
           .describe('Result for `remove`.'),
       ])
@@ -142,6 +154,8 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
     }
 
     const reconciled = reconcileTags(note.content, input.tags, input.operation, input.location);
+    // Delivered bytes — not note.stat.size (see ObsidianService.tryGetSize).
+    const previousSizeInBytes = Buffer.byteLength(note.content, 'utf8');
 
     if (reconciled.applied.length === 0) {
       return {
@@ -151,12 +165,16 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
           applied: reconciled.applied,
           skipped: reconciled.skipped,
           tags: note.tags,
+          previousSizeInBytes,
+          currentSizeInBytes: previousSizeInBytes,
         },
       };
     }
 
     await svc.writeNote(ctx, target, reconciled.content, 'markdown');
     const after = await svc.getNoteJson(ctx, target);
+    // Delivered bytes — not after.stat.size (see ObsidianService.tryGetSize).
+    const currentSizeInBytes = Buffer.byteLength(after.content, 'utf8');
     if (input.operation === 'add') {
       return {
         result: {
@@ -165,6 +183,8 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
           applied: reconciled.applied,
           skipped: reconciled.skipped,
           tags: after.tags,
+          previousSizeInBytes,
+          currentSizeInBytes,
         },
       };
     }
@@ -175,6 +195,8 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
         applied: reconciled.applied,
         skipped: reconciled.skipped,
         tags: after.tags,
+        previousSizeInBytes,
+        currentSizeInBytes,
       },
     };
   },
@@ -191,6 +213,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
     }
     const lines = [
       `**${result.operation === 'add' ? 'Added tags to' : 'Removed tags from'} ${result.path}** (operation: ${result.operation})`,
+      `*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`,
       `*Applied (${result.applied.length}):* ${formatTags(result.applied)}`,
       `*Skipped (${result.skipped.length}):* ${formatTags(result.skipped)}`,
       `*All tags now (${result.tags.length}):* ${formatTags(result.tags)}`,

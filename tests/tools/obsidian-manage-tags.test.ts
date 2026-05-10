@@ -90,6 +90,12 @@ describe('obsidian_manage_tags / add', () => {
     if (out.result.operation !== 'add') throw new Error('expected add branch');
     expect(out.result.applied).toEqual(['fresh']);
     expect(out.result.tags).toEqual(['existing', 'fresh']);
+    expect(out.result.previousSizeInBytes).toBe(
+      Buffer.byteLength('Body without inline tags.', 'utf8'),
+    );
+    /** Post-write GET already happens for the tag list echo — currentSize derives
+     * from Buffer.byteLength of that upstream-returned body (mock returns 'body'). */
+    expect(out.result.currentSizeInBytes).toBe(4);
   });
 
   it('skips both the write and the post-fetch when no tag changed', async () => {

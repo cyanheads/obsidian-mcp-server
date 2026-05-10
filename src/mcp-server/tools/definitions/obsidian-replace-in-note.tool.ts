@@ -58,6 +58,14 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
           .describe('Counts for one replacement entry.'),
       )
       .describe('Per-entry counts in the order replacements were applied.'),
+    previousSizeInBytes: z
+      .number()
+      .describe('Byte size of the note before replacements were applied.'),
+    currentSizeInBytes: z
+      .number()
+      .describe(
+        'Byte size of the note after replacements were applied. Equals `previousSizeInBytes` when no matches were found and no write was issued.',
+      ),
   }),
   auth: ['tool:obsidian_replace_in_note:write'],
   errors: [
@@ -108,6 +116,8 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
     const svc = getObsidianService();
     const { target } = input;
     const note = await svc.getNoteJson(ctx, target);
+    // Delivered bytes — not note.stat.size (see ObsidianService.tryGetSize).
+    const previousSizeInBytes = Buffer.byteLength(note.content, 'utf8');
 
     let body = note.content;
     const perReplacement: Array<{ search: string; count: number }> = [];
@@ -157,17 +167,26 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
       totalReplacements += count;
     }
 
+    let currentSizeInBytes = previousSizeInBytes;
     if (totalReplacements > 0) {
       await svc.writeNote(ctx, target, body, 'markdown');
+      currentSizeInBytes = await svc.getSize(ctx, { type: 'path', path: note.path });
     }
 
-    return { path: note.path, totalReplacements, perReplacement };
+    return {
+      path: note.path,
+      totalReplacements,
+      perReplacement,
+      previousSizeInBytes,
+      currentSizeInBytes,
+    };
   },
 
   format: (result) => {
     const lines = [
       `**Replaced in ${result.path}**`,
       `*Total replacements:* ${result.totalReplacements}`,
+      `*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`,
       '',
       '**Per replacement**',
     ];

@@ -1,6 +1,9 @@
 /**
  * @fileoverview obsidian_append_to_note — append content to the end of a note,
  * or to the end of a heading/block/frontmatter section via PATCH-with-append.
+ * Whole-file appends are silently upserts (POST creates the file when the path
+ * does not exist), so the response surface flags `created` and `previousSize`
+ * for agent self-correction.
  * @module mcp-server/tools/definitions/obsidian-append-to-note.tool
  */
 
@@ -11,7 +14,7 @@ import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schema
 
 export const obsidianAppendToNote = tool('obsidian_append_to_note', {
   description:
-    'Append content to a note. Without `section`, the body is appended to the end of the file. With `section`, the content is appended to the end of that heading/block/frontmatter; nested headings need `Parent::Child` syntax — use `obsidian_get_note` with `format: "document-map"` to discover available targets. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
+    'Append content to a note. **Without `section`: appends to the end of the file, or creates the file if it does not exist (your content becomes the full file).** With `section`: appends to the end of that heading/block/frontmatter; nested headings need `Parent::Child` syntax — use `obsidian_get_note` with `format: "document-map"` to discover available targets. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -31,7 +34,22 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
     path: z.string().describe('Resolved vault-relative path of the note.'),
     sectionTargeted: z
       .boolean()
-      .describe('True when the append went to a section; false for whole-file appends.'),
+      .describe(
+        'True when the append went to a heading/block/frontmatter section (PATCH); false for whole-file appends (POST).',
+      ),
+    created: z
+      .boolean()
+      .describe(
+        'True when the whole-file append created a new file. Always false for section appends — PATCH requires the file to exist. Best-effort under concurrent writers, racy between the existence check and the write.',
+      ),
+    previousSizeInBytes: z
+      .number()
+      .describe('Byte size of the note before the append. Zero when `created` is true.'),
+    currentSizeInBytes: z
+      .number()
+      .describe(
+        'Byte size of the note after the append, read from the upstream after the operation completed. Compare against `previousSizeInBytes` and your own content length to detect unexpected upstream behavior (e.g. auto-newline injection, concurrent writers).',
+      ),
   }),
   auth: ['tool:obsidian_append_to_note:write'],
   errors: [
@@ -80,10 +98,18 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
 
   async handler(input, ctx) {
     const svc = getObsidianService();
-    const { target } = input;
+
+    /**
+     * Resolve once and pin the rest of the flow to a path target so the
+     * presence probe and the write itself act on the same concrete file —
+     * avoids re-resolving `active` / `periodic` targets across calls.
+     */
+    const path = await svc.resolvePath(ctx, input.target);
+    const pathTarget = { type: 'path' as const, path };
 
     if (input.section) {
-      await svc.patchNote(ctx, target, input.content, {
+      const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
+      await svc.patchNote(ctx, pathTarget, input.content, {
         operation: 'append',
         targetType: input.section.type,
         target: input.section.target,
@@ -91,22 +117,39 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
         createTargetIfMissing: input.createTargetIfMissing,
         contentType: input.contentType,
       });
-      const path = await svc.resolvePath(ctx, target);
-      return { path, sectionTargeted: true };
+      const currentSizeInBytes = await svc.getSize(ctx, pathTarget);
+      return {
+        path,
+        sectionTargeted: true,
+        created: false,
+        previousSizeInBytes,
+        currentSizeInBytes,
+      };
     }
 
-    await svc.appendToNote(ctx, target, input.content, input.contentType);
-    const path = await svc.resolvePath(ctx, target);
-    return { path, sectionTargeted: false };
+    const previousSizeInBytes = await svc.tryGetSize(ctx, pathTarget);
+    await svc.appendToNote(ctx, pathTarget, input.content, input.contentType);
+    const currentSizeInBytes = await svc.getSize(ctx, pathTarget);
+    return {
+      path,
+      sectionTargeted: false,
+      created: previousSizeInBytes === null,
+      previousSizeInBytes: previousSizeInBytes ?? 0,
+      currentSizeInBytes,
+    };
   },
 
-  format: (result) => [
-    {
-      type: 'text',
-      text: [
-        `**Appended to ${result.path}**`,
-        `*Section targeted:* ${result.sectionTargeted}`,
-      ].join('\n'),
-    },
-  ],
+  format: (result) => {
+    const action = result.created ? 'Created' : 'Appended to';
+    const lines = [`**${action} ${result.path}**`];
+    if (result.created) {
+      lines.push(
+        '*Note:* this file did not exist before — your content is now the entire file. If you expected to add to existing content, double-check the path.',
+      );
+    }
+    lines.push(`*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`);
+    lines.push(`*Created:* ${result.created}`);
+    lines.push(`*Section targeted:* ${result.sectionTargeted}`);
+    return [{ type: 'text', text: lines.join('\n') }];
+  },
 });

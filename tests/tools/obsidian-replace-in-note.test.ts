@@ -11,6 +11,8 @@ import { setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
+const cl = (n: number) => ({ headers: { 'content-length': String(n) } });
+
 const noteJson = (content: string) => ({
   path: 'N.md',
   content,
@@ -19,22 +21,26 @@ const noteJson = (content: string) => ({
   stat: { ctime: 0, mtime: 0, size: content.length },
 });
 
+/** Stubs the GET → PUT → HEAD round-trip for a successful replace. */
+function stubReplaceFlow(beforeContent: string, afterSize: number) {
+  const pool = harness.current().pool;
+  let putBody = '';
+  pool
+    .intercept({ path: '/vault/N.md', method: 'GET' })
+    .reply(200, noteJson(beforeContent), { headers: { 'content-type': 'application/json' } });
+  pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply((opts) => {
+    putBody = String(opts.body ?? '');
+    return { statusCode: 200, data: '' };
+  });
+  pool.intercept({ path: '/vault/N.md', method: 'HEAD' }).reply(200, '', cl(afterSize));
+  return () => putBody;
+}
+
 describe('obsidian_replace_in_note', () => {
   it('applies replacements sequentially and writes the result back', async () => {
-    let putBody = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson('Hello world. Hello there.'), {
-        headers: { 'content-type': 'application/json' },
-      });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
-      .reply((opts) => {
-        putBody = String(opts.body ?? '');
-        return { statusCode: 200, data: '' };
-      });
+    const before = 'Hello world. Hello there.';
+    const after = 'Hi earth. Hi there.';
+    const getBody = stubReplaceFlow(before, Buffer.byteLength(after, 'utf8'));
 
     const out = await obsidianReplaceInNote.handler(
       obsidianReplaceInNote.input.parse({
@@ -47,15 +53,17 @@ describe('obsidian_replace_in_note', () => {
       createMockContext(),
     );
 
-    expect(putBody).toBe('Hi earth. Hi there.');
+    expect(getBody()).toBe(after);
     expect(out.totalReplacements).toBe(3);
     expect(out.perReplacement).toEqual([
       { search: 'Hello', count: 2 },
       { search: 'Hi world', count: 1 },
     ]);
+    expect(out.previousSizeInBytes).toBe(Buffer.byteLength(before, 'utf8'));
+    expect(out.currentSizeInBytes).toBe(Buffer.byteLength(after, 'utf8'));
   });
 
-  it('skips the write when no replacement matched', async () => {
+  it('skips the write when no replacement matched and currentSize equals previousSize', async () => {
     let putCalls = 0;
     harness
       .current()
@@ -79,21 +87,13 @@ describe('obsidian_replace_in_note', () => {
 
     expect(out.totalReplacements).toBe(0);
     expect(putCalls).toBe(0);
+    expect(out.previousSizeInBytes).toBe(out.currentSizeInBytes);
   });
 
   it('honors useRegex and caseSensitive flags', async () => {
-    let putBody = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson('Foo foo FOO'), { headers: { 'content-type': 'application/json' } });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
-      .reply((opts) => {
-        putBody = String(opts.body ?? '');
-        return { statusCode: 200, data: '' };
-      });
+    const before = 'Foo foo FOO';
+    const after = 'bar bar bar';
+    const getBody = stubReplaceFlow(before, Buffer.byteLength(after, 'utf8'));
 
     const out = await obsidianReplaceInNote.handler(
       obsidianReplaceInNote.input.parse({
@@ -104,24 +104,13 @@ describe('obsidian_replace_in_note', () => {
     );
 
     expect(out.totalReplacements).toBe(3);
-    expect(putBody).toBe('bar bar bar');
+    expect(getBody()).toBe(after);
   });
 
   it('honors $1/$2 capture-group references in regex replacements', async () => {
-    let putBody = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson('The quick brown fox.'), {
-        headers: { 'content-type': 'application/json' },
-      });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
-      .reply((opts) => {
-        putBody = String(opts.body ?? '');
-        return { statusCode: 200, data: '' };
-      });
+    const before = 'The quick brown fox.';
+    const after = 'The brown quick fox.';
+    const getBody = stubReplaceFlow(before, Buffer.byteLength(after, 'utf8'));
 
     const out = await obsidianReplaceInNote.handler(
       obsidianReplaceInNote.input.parse({
@@ -131,25 +120,14 @@ describe('obsidian_replace_in_note', () => {
       createMockContext(),
     );
 
-    expect(putBody).toBe('The brown quick fox.');
+    expect(getBody()).toBe(after);
     expect(out.totalReplacements).toBe(1);
   });
 
   it('honors wholeWord in literal mode (avoids substring matches)', async () => {
-    let putBody = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson('cat scatter category cat.'), {
-        headers: { 'content-type': 'application/json' },
-      });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
-      .reply((opts) => {
-        putBody = String(opts.body ?? '');
-        return { statusCode: 200, data: '' };
-      });
+    const before = 'cat scatter category cat.';
+    const after = 'dog scatter category dog.';
+    const getBody = stubReplaceFlow(before, Buffer.byteLength(after, 'utf8'));
 
     const out = await obsidianReplaceInNote.handler(
       obsidianReplaceInNote.input.parse({
@@ -159,25 +137,14 @@ describe('obsidian_replace_in_note', () => {
       createMockContext(),
     );
 
-    expect(putBody).toBe('dog scatter category dog.');
+    expect(getBody()).toBe(after);
     expect(out.totalReplacements).toBe(2);
   });
 
   it('honors wholeWord in regex mode (wraps the pattern in \\b…\\b)', async () => {
-    let putBody = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson('foo foobar foo'), {
-        headers: { 'content-type': 'application/json' },
-      });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
-      .reply((opts) => {
-        putBody = String(opts.body ?? '');
-        return { statusCode: 200, data: '' };
-      });
+    const before = 'foo foobar foo';
+    const after = 'X foobar X';
+    const getBody = stubReplaceFlow(before, Buffer.byteLength(after, 'utf8'));
 
     const out = await obsidianReplaceInNote.handler(
       obsidianReplaceInNote.input.parse({
@@ -187,25 +154,14 @@ describe('obsidian_replace_in_note', () => {
       createMockContext(),
     );
 
-    expect(putBody).toBe('X foobar X');
+    expect(getBody()).toBe(after);
     expect(out.totalReplacements).toBe(2);
   });
 
   it('honors flexibleWhitespace in literal mode (collapses runs of whitespace)', async () => {
-    let putBody = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson('the  quick\tbrown\nfox  jumps'), {
-        headers: { 'content-type': 'application/json' },
-      });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
-      .reply((opts) => {
-        putBody = String(opts.body ?? '');
-        return { statusCode: 200, data: '' };
-      });
+    const before = 'the  quick\tbrown\nfox  jumps';
+    const after = 'the  slow red\nfox  jumps';
+    const getBody = stubReplaceFlow(before, Buffer.byteLength(after, 'utf8'));
 
     const out = await obsidianReplaceInNote.handler(
       obsidianReplaceInNote.input.parse({
@@ -215,23 +171,14 @@ describe('obsidian_replace_in_note', () => {
       createMockContext(),
     );
 
-    expect(putBody).toBe('the  slow red\nfox  jumps');
+    expect(getBody()).toBe(after);
     expect(out.totalReplacements).toBe(1);
   });
 
   it('keeps `$1` literal in literal mode with wholeWord (no capture-group expansion)', async () => {
-    let putBody = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson('cat sat'), { headers: { 'content-type': 'application/json' } });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
-      .reply((opts) => {
-        putBody = String(opts.body ?? '');
-        return { statusCode: 200, data: '' };
-      });
+    const before = 'cat sat';
+    const after = 'dog$1 sat';
+    const getBody = stubReplaceFlow(before, Buffer.byteLength(after, 'utf8'));
 
     await obsidianReplaceInNote.handler(
       obsidianReplaceInNote.input.parse({
@@ -241,7 +188,7 @@ describe('obsidian_replace_in_note', () => {
       createMockContext(),
     );
 
-    expect(putBody).toBe('dog$1 sat');
+    expect(getBody()).toBe(after);
   });
 
   it('throws regex_invalid (ValidationError) on a malformed regex', async () => {

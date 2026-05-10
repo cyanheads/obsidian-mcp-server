@@ -41,6 +41,16 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       .describe(
         'True when the write created a new file. False when it replaced an existing one or targeted a section.',
       ),
+    previousSizeInBytes: z
+      .number()
+      .describe(
+        'Byte size of the note before the write. Zero when `created` is true. On overwrites this is the destructive blast radius.',
+      ),
+    currentSizeInBytes: z
+      .number()
+      .describe(
+        'Byte size of the note after the write, read from the upstream after the operation completed. Compare against `previousSizeInBytes` and your own content length to detect unexpected upstream behavior.',
+      ),
   }),
   auth: ['tool:obsidian_write_note:write'],
   errors: [
@@ -94,14 +104,22 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
 
   async handler(input, ctx) {
     const svc = getObsidianService();
-    const { target } = input;
+
+    /**
+     * Resolve once and pin the rest of the flow to a path target so the
+     * presence probe and the write act on the same concrete file — avoids
+     * re-resolving `active` / `periodic` targets across calls.
+     */
+    const path = await svc.resolvePath(ctx, input.target);
+    const pathTarget = { type: 'path' as const, path };
 
     if (input.section) {
+      const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
       const body =
         input.section.type === 'heading'
           ? stripLeadingHeading(input.content, input.section.target)
           : input.content;
-      await svc.patchNote(ctx, target, body, {
+      await svc.patchNote(ctx, pathTarget, body, {
         operation: 'replace',
         targetType: input.section.type,
         target: input.section.target,
@@ -109,13 +127,18 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
         contentType: input.contentType,
         applyIfContentPreexists: true,
       });
-      const path = await svc.resolvePath(ctx, target);
-      return { path, sectionTargeted: true, created: false };
+      const currentSizeInBytes = await svc.getSize(ctx, pathTarget);
+      return {
+        path,
+        sectionTargeted: true,
+        created: false,
+        previousSizeInBytes,
+        currentSizeInBytes,
+      };
     }
 
-    const exists = await svc.noteExists(ctx, target);
-    if (exists && !input.overwrite) {
-      const path = await svc.resolvePath(ctx, target);
+    const previousSizeInBytes = await svc.tryGetSize(ctx, pathTarget);
+    if (previousSizeInBytes !== null && !input.overwrite) {
       throw ctx.fail('file_exists', `Note '${path}' already exists.`, {
         path,
         recovery: {
@@ -124,9 +147,15 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       });
     }
 
-    await svc.writeNote(ctx, target, input.content, input.contentType);
-    const path = await svc.resolvePath(ctx, target);
-    return { path, sectionTargeted: false, created: !exists };
+    await svc.writeNote(ctx, pathTarget, input.content, input.contentType);
+    const currentSizeInBytes = await svc.getSize(ctx, pathTarget);
+    return {
+      path,
+      sectionTargeted: false,
+      created: previousSizeInBytes === null,
+      previousSizeInBytes: previousSizeInBytes ?? 0,
+      currentSizeInBytes,
+    };
   },
 
   format: (result) => [
@@ -134,6 +163,7 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       type: 'text',
       text: [
         `**${result.created ? 'Created' : 'Wrote'} ${result.path}**`,
+        `*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`,
         `*Section targeted:* ${result.sectionTargeted}`,
         `*Created:* ${result.created}`,
       ].join('\n'),

@@ -1,6 +1,8 @@
 /**
  * @fileoverview Handler tests for obsidian_write_note (whole-file PUT and
- * section-targeted PATCH).
+ * section-targeted PATCH). Covers the response surface — `created` derived
+ * from the pre-write HEAD, `previousSizeInBytes` and `currentSizeInBytes`
+ * read from upstream HEADs around the write.
  * @module tests/tools/obsidian-write-note.test
  */
 
@@ -11,12 +13,12 @@ import { setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
+const cl = (n: number) => ({ headers: { 'content-length': String(n) } });
+
 describe('obsidian_write_note (whole file)', () => {
   it('PUTs the body with text/markdown when the note does not exist', async () => {
     const pool = harness.current().pool;
-    pool
-      .intercept({ path: '/vault/Note.md', method: 'HEAD' })
-      .reply(() => ({ statusCode: 404, data: '' }));
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(404, '');
 
     let seenMethod = '';
     let seenBody = '';
@@ -28,6 +30,7 @@ describe('obsidian_write_note (whole file)', () => {
       seenContentType = headers['content-type'] ?? headers['Content-Type'] ?? '';
       return { statusCode: 200, data: '' };
     });
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(10));
 
     const out = await obsidianWriteNote.handler(
       obsidianWriteNote.input.parse({
@@ -40,14 +43,18 @@ describe('obsidian_write_note (whole file)', () => {
     expect(seenMethod).toBe('PUT');
     expect(seenBody).toBe('fresh body');
     expect(seenContentType).toBe('text/markdown');
-    expect(out).toEqual({ path: 'Note.md', sectionTargeted: false, created: true });
+    expect(out).toEqual({
+      path: 'Note.md',
+      sectionTargeted: false,
+      created: true,
+      previousSizeInBytes: 0,
+      currentSizeInBytes: 10,
+    });
   });
 
   it('refuses to clobber an existing note when overwrite is false', async () => {
     const pool = harness.current().pool;
-    pool
-      .intercept({ path: '/vault/Note.md', method: 'HEAD' })
-      .reply(() => ({ statusCode: 200, data: '' }));
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(500));
 
     let putCalled = false;
     pool.intercept({ path: '/vault/Note.md', method: 'PUT' }).reply(() => {
@@ -70,17 +77,16 @@ describe('obsidian_write_note (whole file)', () => {
     expect(putCalled).toBe(false);
   });
 
-  it('overwrites an existing note when overwrite is true', async () => {
+  it('overwrites an existing note when overwrite is true and reports both sizes', async () => {
     const pool = harness.current().pool;
-    pool
-      .intercept({ path: '/vault/Note.md', method: 'HEAD' })
-      .reply(() => ({ statusCode: 200, data: '' }));
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(5000));
 
     let seenBody = '';
     pool.intercept({ path: '/vault/Note.md', method: 'PUT' }).reply((opts) => {
       seenBody = String(opts.body ?? '');
       return { statusCode: 200, data: '' };
     });
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(11));
 
     const out = await obsidianWriteNote.handler(
       obsidianWriteNote.input.parse({
@@ -92,20 +98,27 @@ describe('obsidian_write_note (whole file)', () => {
     );
 
     expect(seenBody).toBe('replacement');
-    expect(out).toEqual({ path: 'Note.md', sectionTargeted: false, created: false });
+    expect(out).toEqual({
+      path: 'Note.md',
+      sectionTargeted: false,
+      created: false,
+      previousSizeInBytes: 5000,
+      currentSizeInBytes: 11,
+    });
   });
 });
 
 describe('obsidian_write_note (section)', () => {
   it('PATCHes with replace + heading delimiter + apply-if-content-preexists', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
+
     let seenHeaders: Record<string, string> = {};
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/Note.md', method: 'PATCH' })
-      .reply((opts) => {
-        seenHeaders = (opts.headers as Record<string, string>) ?? {};
-        return { statusCode: 200, data: '' };
-      });
+    pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
+      seenHeaders = (opts.headers as Record<string, string>) ?? {};
+      return { statusCode: 200, data: '' };
+    });
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(312));
 
     const out = await obsidianWriteNote.handler(
       obsidianWriteNote.input.parse({
@@ -122,18 +135,25 @@ describe('obsidian_write_note (section)', () => {
     expect(
       seenHeaders['apply-if-content-preexists'] ?? seenHeaders['Apply-If-Content-Preexists'],
     ).toBe('true');
-    expect(out.sectionTargeted).toBe(true);
+    expect(out).toEqual({
+      path: 'Note.md',
+      sectionTargeted: true,
+      created: false,
+      previousSizeInBytes: 300,
+      currentSizeInBytes: 312,
+    });
   });
 
   it('strips a leading duplicate heading line from content when targeting a heading', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
+
     let seenBody = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/Note.md', method: 'PATCH' })
-      .reply((opts) => {
-        seenBody = String(opts.body ?? '');
-        return { statusCode: 200, data: '' };
-      });
+    pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
+      seenBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
 
     await obsidianWriteNote.handler(
       obsidianWriteNote.input.parse({
@@ -148,14 +168,15 @@ describe('obsidian_write_note (section)', () => {
   });
 
   it('preserves content unchanged when the leading heading does not match the target', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
+
     let seenBody = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/Note.md', method: 'PATCH' })
-      .reply((opts) => {
-        seenBody = String(opts.body ?? '');
-        return { statusCode: 200, data: '' };
-      });
+    pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
+      seenBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
 
     await obsidianWriteNote.handler(
       obsidianWriteNote.input.parse({
@@ -171,9 +192,7 @@ describe('obsidian_write_note (section)', () => {
 
   it('uses application/json when contentType is "json"', async () => {
     const pool = harness.current().pool;
-    pool
-      .intercept({ path: '/vault/Note.md', method: 'HEAD' })
-      .reply(() => ({ statusCode: 404, data: '' }));
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(404, '');
 
     let seenContentType = '';
     pool.intercept({ path: '/vault/Note.md', method: 'PUT' }).reply((opts) => {
@@ -181,6 +200,7 @@ describe('obsidian_write_note (section)', () => {
       seenContentType = headers['content-type'] ?? headers['Content-Type'] ?? '';
       return { statusCode: 200, data: '' };
     });
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(7));
 
     await obsidianWriteNote.handler(
       obsidianWriteNote.input.parse({
@@ -195,15 +215,31 @@ describe('obsidian_write_note (section)', () => {
 });
 
 describe('obsidian_write_note / format()', () => {
-  it('renders the path, sectionTargeted, and created fields', () => {
+  it('renders Created banner and size delta for new files', () => {
     const blocks = obsidianWriteNote.format!({
-      path: 'A.md',
-      sectionTargeted: true,
-      created: false,
+      path: 'New.md',
+      sectionTargeted: false,
+      created: true,
+      previousSizeInBytes: 0,
+      currentSizeInBytes: 12,
     });
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('A.md');
-    expect(text).toMatch(/Section targeted:\*?\s*true/);
+    expect(text).toContain('**Created New.md**');
+    expect(text).toMatch(/Size:\*?\s*0 → 12 bytes/);
+    expect(text).toMatch(/Created:\*?\s*true/);
+  });
+
+  it('renders Wrote banner with the destructive blast radius on overwrite', () => {
+    const blocks = obsidianWriteNote.format!({
+      path: 'Existing.md',
+      sectionTargeted: false,
+      created: false,
+      previousSizeInBytes: 5000,
+      currentSizeInBytes: 11,
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('**Wrote Existing.md**');
+    expect(text).toMatch(/Size:\*?\s*5000 → 11 bytes/);
     expect(text).toMatch(/Created:\*?\s*false/);
   });
 });

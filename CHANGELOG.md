@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.1.7](changelog/3.1.x/3.1.7.md) — 2026-05-10
+
+Every mutating tool now reports `previousSizeInBytes` + `currentSizeInBytes`; `obsidian_append_to_note` gains the `created` upsert flag. Resolves [#48](https://github.com/cyanheads/obsidian-mcp-server/issues/48).
+
 ## [3.1.6](changelog/3.1.x/3.1.6.md) — 2026-05-09
 
 Pick up `mcp_tool_scopes` claim + `MCP_AUTH_DISABLE_SCOPE_CHECKS` bypass from `@cyanheads/mcp-ts-core` 0.8.20 — resolves [#47](https://github.com/cyanheads/obsidian-mcp-server/issues/47) for OIDC providers that can't override `scope`.

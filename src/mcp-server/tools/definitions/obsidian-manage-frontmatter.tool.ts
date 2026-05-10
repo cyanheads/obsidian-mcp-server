@@ -50,6 +50,8 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
             frontmatter: z
               .record(z.string(), z.unknown())
               .describe('Full frontmatter after the change.'),
+            previousSizeInBytes: z.number().describe('Byte size of the note before the set.'),
+            currentSizeInBytes: z.number().describe('Byte size of the note after the set.'),
           })
           .describe('Result for `set`.'),
         z
@@ -60,6 +62,12 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
             frontmatter: z
               .record(z.string(), z.unknown())
               .describe('Full frontmatter after the change.'),
+            previousSizeInBytes: z.number().describe('Byte size of the note before the delete.'),
+            currentSizeInBytes: z
+              .number()
+              .describe(
+                'Byte size of the note after the delete. Equals `previousSizeInBytes` when the key was already absent and no write was issued.',
+              ),
           })
           .describe('Result for `delete`.'),
       ])
@@ -134,28 +142,39 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
           ...ctx.recoveryFor('value_required'),
         });
       }
-      await svc.patchNote(ctx, target, JSON.stringify(input.value), {
+      const path = await svc.resolvePath(ctx, target);
+      const pathTarget = { type: 'path' as const, path };
+      const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
+      await svc.patchNote(ctx, pathTarget, JSON.stringify(input.value), {
         operation: 'replace',
         targetType: 'frontmatter',
         target: input.key,
         contentType: 'json',
         createTargetIfMissing: true,
       });
-      const note = await svc.getNoteJson(ctx, target);
+      const note = await svc.getNoteJson(ctx, pathTarget);
+      // Delivered bytes — not note.stat.size (see ObsidianService.tryGetSize).
+      const currentSizeInBytes = Buffer.byteLength(note.content, 'utf8');
       return {
         result: {
           operation: 'set' as const,
-          path: note.path,
+          path,
           key: input.key,
           frontmatter: note.frontmatter,
+          previousSizeInBytes,
+          currentSizeInBytes,
         },
       };
     }
 
     const note = await svc.getNoteJson(ctx, target);
+    // Delivered bytes — not note.stat.size (see ObsidianService.tryGetSize).
+    const previousSizeInBytes = Buffer.byteLength(note.content, 'utf8');
     const newContent = deleteFrontmatterKey(note.content, input.key);
+    let currentSizeInBytes = previousSizeInBytes;
     if (newContent !== note.content) {
       await svc.writeNote(ctx, target, newContent, 'markdown');
+      currentSizeInBytes = await svc.getSize(ctx, { type: 'path', path: note.path });
     }
     const projected = { ...note.frontmatter };
     delete projected[input.key];
@@ -165,6 +184,8 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
         path: note.path,
         key: input.key,
         frontmatter: projected,
+        previousSizeInBytes,
+        currentSizeInBytes,
       },
     };
   },
@@ -187,6 +208,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     const fmKeys = Object.keys(result.frontmatter);
     const lines = [
       `**Frontmatter ${result.operation} \`${result.key}\` in ${result.path}**`,
+      `*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`,
       '',
       `**Frontmatter (${fmKeys.length} keys after change)**`,
     ];

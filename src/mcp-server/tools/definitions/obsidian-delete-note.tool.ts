@@ -20,6 +20,14 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
   output: z.object({
     path: z.string().describe('Resolved vault-relative path of the deleted note.'),
     deleted: z.boolean().describe('True when the file was removed.'),
+    previousSizeInBytes: z
+      .number()
+      .describe(
+        'Byte size of the note immediately before deletion. The destructive blast radius — useful for confirming the agent destroyed what it expected.',
+      ),
+    currentSizeInBytes: z
+      .number()
+      .describe('Always 0 after a successful delete — the file no longer exists.'),
   }),
   auth: ['tool:obsidian_delete_note:write'],
   errors: [
@@ -67,13 +75,20 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
 
   async handler(input, ctx) {
     const svc = getObsidianService();
-    const { target } = input;
 
-    const path = await svc.resolvePath(ctx, target);
+    const path = await svc.resolvePath(ctx, input.target);
+    const pathTarget = { type: 'path' as const, path };
+
+    /**
+     * Probe size before showing the elicitation prompt so the user sees how
+     * much they're about to destroy. Throws `note_missing` if the file is
+     * already gone — preempts a confusing post-elicit DELETE 404.
+     */
+    const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
 
     if (ctx.elicit) {
       const confirmed = await ctx.elicit(
-        `Permanently delete '${path}'? This cannot be undone via the API; recovery would require Obsidian's local trash.`,
+        `Permanently delete '${path}' (${previousSizeInBytes} bytes)? This cannot be undone via the API; recovery would require Obsidian's local trash.`,
         z.object({
           confirm: z.boolean().describe('Set to true to delete the note. Any other value cancels.'),
         }),
@@ -86,14 +101,14 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
       }
     }
 
-    await svc.deleteNote(ctx, target);
-    return { path, deleted: true };
+    await svc.deleteNote(ctx, pathTarget);
+    return { path, deleted: true, previousSizeInBytes, currentSizeInBytes: 0 };
   },
 
   format: (result) => [
     {
       type: 'text',
-      text: `**Deleted ${result.path}** (deleted: ${result.deleted})`,
+      text: `**Deleted ${result.path}** (size: ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes)`,
     },
   ],
 });

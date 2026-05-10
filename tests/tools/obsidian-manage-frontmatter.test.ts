@@ -64,19 +64,20 @@ describe('obsidian_manage_frontmatter / get', () => {
 
 describe('obsidian_manage_frontmatter / set', () => {
   it('PATCHes the frontmatter field with JSON content type and refetches', async () => {
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'HEAD' })
+      .reply(200, '', { headers: { 'content-length': '50' } });
+
     let seenHeaders: Record<string, string> = {};
     let seenBody = '';
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'PATCH' })
-      .reply((opts) => {
-        seenHeaders = (opts.headers as Record<string, string>) ?? {};
-        seenBody = String(opts.body ?? '');
-        return { statusCode: 200, data: '' };
-      });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+    pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
+      seenHeaders = (opts.headers as Record<string, string>) ?? {};
+      seenBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
       .reply(200, noteJson('body', { priority: 9 }), {
         headers: { 'content-type': 'application/json' },
       });
@@ -97,6 +98,10 @@ describe('obsidian_manage_frontmatter / set', () => {
     expect(seenBody).toBe('9');
     if (out.result.operation !== 'set') throw new Error('expected set branch');
     expect(out.result.frontmatter).toEqual({ priority: 9 });
+    expect(out.result.previousSizeInBytes).toBe(50);
+    /** Post-state read from the post-PATCH GET — currentSize derives from
+     * Buffer.byteLength of the upstream-returned body. */
+    expect(out.result.currentSizeInBytes).toBe(Buffer.byteLength('body', 'utf8'));
   });
 
   it('throws value_required (ValidationError) when value is missing for set', async () => {
@@ -121,24 +126,23 @@ describe('obsidian_manage_frontmatter / delete', () => {
     const before = ['---', 'priority: 5', 'author: casey', '---', '', 'body'].join('\n');
     let putBody = '';
     let getCount = 0;
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(() => {
-        getCount++;
-        return {
-          statusCode: 200,
-          data: noteJson(before, { priority: 5, author: 'casey' }),
-          responseOptions: { headers: { 'content-type': 'application/json' } },
-        };
-      });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
-      .reply((opts) => {
-        putBody = String(opts.body ?? '');
-        return { statusCode: 200, data: '' };
-      });
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
+      getCount++;
+      return {
+        statusCode: 200,
+        data: noteJson(before, { priority: 5, author: 'casey' }),
+        responseOptions: { headers: { 'content-type': 'application/json' } },
+      };
+    });
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply((opts) => {
+      putBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    /** Post-write HEAD — currentSizeInBytes is read from upstream after the write. */
+    pool
+      .intercept({ path: '/vault/N.md', method: 'HEAD' })
+      .reply(200, '', { headers: { 'content-length': '20' } });
 
     const out = await obsidianManageFrontmatter.handler(
       obsidianManageFrontmatter.input.parse({
@@ -153,5 +157,7 @@ describe('obsidian_manage_frontmatter / delete', () => {
     expect(putBody).not.toContain('priority:');
     if (out.result.operation !== 'delete') throw new Error('expected delete branch');
     expect(out.result.frontmatter).toEqual({ author: 'casey' });
+    expect(out.result.previousSizeInBytes).toBe(Buffer.byteLength(before, 'utf8'));
+    expect(out.result.currentSizeInBytes).toBe(20);
   });
 });

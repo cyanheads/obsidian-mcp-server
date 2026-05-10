@@ -415,6 +415,66 @@ describe('ObsidianService.openInUi', () => {
   });
 });
 
+describe('ObsidianService.tryGetSize / getSize', () => {
+  it('returns the Content-Length header value on a 200 HEAD', async () => {
+    pool
+      .intercept({ path: '/vault/N.md', method: 'HEAD' })
+      .reply(200, '', { headers: { 'content-length': '1024' } });
+
+    const size = await service.tryGetSize(ctx, { type: 'path', path: 'N.md' });
+    expect(size).toBe(1024);
+  });
+
+  it('returns null on a 404 HEAD (file does not exist)', async () => {
+    pool.intercept({ path: '/vault/missing.md', method: 'HEAD' }).reply(404, '');
+
+    expect(await service.tryGetSize(ctx, { type: 'path', path: 'missing.md' })).toBeNull();
+  });
+
+  it('routes non-2xx, non-404 statuses through the error classifier', async () => {
+    pool.intercept({ path: '/vault/N.md', method: 'HEAD' }).reply(401, { message: 'bad token' });
+
+    await expect(service.tryGetSize(ctx, { type: 'path', path: 'N.md' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Unauthorized,
+    });
+  });
+
+  it('throws when the upstream omits Content-Length on a successful HEAD', async () => {
+    pool.intercept({ path: '/vault/N.md', method: 'HEAD' }).reply(200, '');
+
+    await expect(service.tryGetSize(ctx, { type: 'path', path: 'N.md' })).rejects.toThrow(
+      /missing Content-Length/,
+    );
+  });
+
+  it('rejects non-integer or negative Content-Length values', async () => {
+    pool
+      .intercept({ path: '/vault/N.md', method: 'HEAD' })
+      .reply(200, '', { headers: { 'content-length': 'not-a-number' } });
+
+    await expect(service.tryGetSize(ctx, { type: 'path', path: 'N.md' })).rejects.toThrow(
+      /invalid Content-Length/,
+    );
+  });
+
+  it('getSize throws note_missing on 404', async () => {
+    pool.intercept({ path: '/vault/missing.md', method: 'HEAD' }).reply(404, '');
+
+    await expect(service.getSize(ctx, { type: 'path', path: 'missing.md' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'note_missing', path: 'missing.md' },
+    });
+  });
+
+  it('getSize returns the size on a successful HEAD', async () => {
+    pool
+      .intercept({ path: '/vault/N.md', method: 'HEAD' })
+      .reply(200, '', { headers: { 'content-length': '42' } });
+
+    expect(await service.getSize(ctx, { type: 'path', path: 'N.md' })).toBe(42);
+  });
+});
+
 describe('encodeVaultPath', () => {
   it('preserves slashes between segments and encodes per-segment', () => {
     expect(encodeVaultPath('Projects/My Note.md')).toBe('Projects/My%20Note.md');

@@ -264,19 +264,25 @@ export class ObsidianService {
   }
 
   /**
-   * Probe whether a note exists at the target. Returns `true` on 2xx,
-   * `false` on 404. Any other status (auth, server) is surfaced through the
-   * normal error classifier so callers don't silently proceed past an actual
-   * problem (e.g. treating a 401 as "doesn't exist" and overwriting blindly).
+   * Byte size of a note at `target`, derived from the HEAD `Content-Length`
+   * header. Returns `null` on 404 — distinct from a 0-byte file.
    *
-   * Bypasses `#request` retries: a HEAD probe should never be retried — a
-   * 404 is the answer, not a transient failure.
+   * Source-of-truth rule for note byte sizes across mutating tools:
+   *   1. HEAD `Content-Length` (this method)       — when no GET is in flight.
+   *   2. `Buffer.byteLength(deliveredContent)`     — when a GET happens anyway (free).
+   *   3. `note.stat.size` from the JSON envelope   — REJECTED: shares the upstream
+   *      `getAbstractFileByPath` cache path with the rest of the envelope, so it
+   *      can't act as an independent cross-check (cache-desync scenario in
+   *      coddingtonbear/obsidian-local-rest-api#237). Always prefer delivered
+   *      bytes or HEAD over the metadata field.
    *
-   * Does **not** apply path-policy gating itself — currently called only by
-   * `obsidian_write_note`'s overwrite check, which already gates the target as
-   * a write before reaching here. External callers must gate before invoking.
+   * Bypasses retries (a 404 is the answer, not a transient failure) and
+   * gates readable on path targets before issuing the HEAD.
    */
-  async noteExists(ctx: Context, target: NoteTarget): Promise<boolean> {
+  async tryGetSize(ctx: Context, target: NoteTarget): Promise<number | null> {
+    if (target.type === 'path') {
+      this.#policy.assertReadable(target.path);
+    }
     const url = this.#targetToPath(target);
     const res = await this.#fetch(`${this.#config.baseUrl}${url}`, {
       method: 'HEAD',
@@ -284,9 +290,26 @@ export class ObsidianService {
       dispatcher: this.#dispatcher,
       signal: ctx.signal,
     });
-    if (res.status === 404) return false;
-    if (res.ok) return true;
-    return await this.#throwForStatus(res, url, ctx);
+    if (res.status === 404) return null;
+    if (!res.ok) await this.#throwForStatus(res, url, ctx);
+    return parseContentLength(res, url);
+  }
+
+  /**
+   * Like `tryGetSize`, but throws `note_missing` on 404 — for verification
+   * reads that come *after* a write where the file is expected to exist.
+   */
+  async getSize(ctx: Context, target: NoteTarget): Promise<number> {
+    const size = await this.tryGetSize(ctx, target);
+    if (size === null) {
+      const display = target.type === 'path' ? target.path : '(target)';
+      throw notFound(`Note not found: ${display}`, {
+        path: display,
+        reason: 'note_missing',
+        ...ctx.recoveryFor('note_missing'),
+      });
+    }
+    return size;
   }
 
   // ── Listings ─────────────────────────────────────────────────────────────
@@ -651,6 +674,25 @@ function safeUpstream(
   const trimmed = text.trim();
   if (trimmed) return { message: trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed };
   return;
+}
+
+/**
+ * Read the `Content-Length` header from a HEAD response and parse it as a
+ * non-negative integer byte count. Throws when the upstream omits the header
+ * or returns a non-numeric value — the size helpers don't fall back to GET.
+ */
+function parseContentLength(res: UndiciResponse, url: string): number {
+  const raw = res.headers.get('content-length');
+  if (raw === null) {
+    throw new Error(
+      `Obsidian Local REST API HEAD response missing Content-Length header for ${url}.`,
+    );
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`Obsidian Local REST API returned invalid Content-Length '${raw}' for ${url}.`);
+  }
+  return n;
 }
 
 function parseJsonObject(text: string): UpstreamErrorBody | undefined {

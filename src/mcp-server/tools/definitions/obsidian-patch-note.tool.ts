@@ -41,6 +41,12 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
     operation: z
       .enum(['append', 'prepend', 'replace'])
       .describe('Echoed operation that was applied.'),
+    previousSizeInBytes: z.number().describe('Byte size of the note before the patch was applied.'),
+    currentSizeInBytes: z
+      .number()
+      .describe(
+        'Byte size of the note after the patch, read from the upstream after the operation completed.',
+      ),
   }),
   auth: ['tool:obsidian_patch_note:write'],
   errors: [
@@ -89,9 +95,16 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
 
   async handler(input, ctx) {
     const svc = getObsidianService();
-    const { target } = input;
 
-    await svc.patchNote(ctx, target, input.content, {
+    /**
+     * Resolve once and pin the rest of the flow to a path target so the
+     * pre-PATCH size probe and the PATCH itself act on the same concrete file.
+     */
+    const path = await svc.resolvePath(ctx, input.target);
+    const pathTarget = { type: 'path' as const, path };
+
+    const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
+    await svc.patchNote(ctx, pathTarget, input.content, {
       operation: input.operation,
       targetType: input.section.type,
       target: input.section.target,
@@ -101,9 +114,15 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
       trimTargetWhitespace: input.patchOptions?.trimTargetWhitespace,
       contentType: input.contentType,
     });
+    const currentSizeInBytes = await svc.getSize(ctx, pathTarget);
 
-    const path = await svc.resolvePath(ctx, target);
-    return { path, section: input.section, operation: input.operation };
+    return {
+      path,
+      section: input.section,
+      operation: input.operation,
+      previousSizeInBytes,
+      currentSizeInBytes,
+    };
   },
 
   format: (result) => [
@@ -113,6 +132,7 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
         `**Patched ${result.path}**`,
         `*Operation:* ${result.operation}`,
         `*Section:* ${result.section.type} → ${result.section.target}`,
+        `*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`,
       ].join('\n'),
     },
   ],
