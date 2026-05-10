@@ -27,7 +27,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | `obsidian_list_commands` | List Obsidian command-palette commands available for execution. **Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`** (paired with `obsidian_execute_command`). |
 | `obsidian_search_notes` | Search the vault by text, Dataview DQL, or JSONLogic — capped at 100 hits with overflow indicator. |
 | `obsidian_write_note` | Create a note, replace a single section in place, or — with `overwrite: true` — clobber an existing file. Refuses whole-file writes against an existing path by default. |
-| `obsidian_append_to_note` | Append content to a note, or to a specific heading/block/frontmatter section. |
+| `obsidian_append_to_note` | Append content to a note. Without `section` it creates the file if missing — your content becomes the entire file. With `section`, appends to that heading/block/frontmatter (PATCH; the file must exist). |
 | `obsidian_patch_note` | Surgical `append` / `prepend` / `replace` against a heading, block reference, or frontmatter field. |
 | `obsidian_replace_in_note` | Body-wide search-replace inside a single note. Literal or regex matching, with `wholeWord`, `flexibleWhitespace`, `caseSensitive`, `replaceAll`, and `$1`/`$&` capture groups. |
 | `obsidian_manage_frontmatter` | Atomic `get` / `set` / `delete` on a single frontmatter key. |
@@ -68,7 +68,18 @@ Create or surgically replace, with a protective default against accidental whole
 - Without `section` — full-file `PUT`. **Refuses to clobber an existing file** unless `overwrite: true` is set. The `file_exists` (`Conflict`) error suggests `obsidian_patch_note` / `obsidian_append_to_note` / `obsidian_replace_in_note` for in-place edits.
 - With `section` — `PATCH`-with-replace against the named heading/block/frontmatter field, leaving the rest of the file untouched. The `overwrite` flag is ignored in section mode.
 
-The output reports `created: true` when the call brought a new file into existence; `false` when it replaced an existing one or targeted a section.
+The output reports `created: true` when the call brought a new file into existence; `false` when it replaced an existing one or targeted a section. Every mutating tool also returns `previousSizeInBytes` and `currentSizeInBytes` so an agent can spot accidental clobbers, unexpected upstream behavior, or a typo path that landed at the wrong file.
+
+---
+
+### `obsidian_append_to_note`
+
+A combined upsert + section-append primitive that mirrors the upstream Local REST API behavior:
+
+- Without `section` — `POST` to `/vault/{path}`. Appends when the file exists, **creates the file with your content as the entire body when it doesn't.** The output's `created: true` flags the second branch so the agent can notice when a typo path or a not-yet-created daily note silently turned into a brand-new file.
+- With `section` — `PATCH`-with-append against the named heading, block reference, or frontmatter field. The file must exist (PATCH preflight throws `note_missing` otherwise). Pass `createTargetIfMissing: true` to bring the section itself into existence inside an existing file. Block-reference targets concatenate adjacent to the block line without a separator — include a leading newline in `content` if you want one.
+
+`previousSizeInBytes` is `0` on the upsert-create branch and the actual file size otherwise; `currentSizeInBytes` is the post-write size read from the upstream after the operation. Compare deltas against `Buffer.byteLength(content)` to detect auto-newline injection or concurrent writers.
 
 ---
 
@@ -114,7 +125,7 @@ Add, remove, or list tags on a note. Reconciles both representations:
 
 ### `obsidian_delete_note`
 
-Permanently delete a note. When the client supports `elicit`, the server requests human confirmation before issuing the `DELETE`. Without elicitation, the `destructiveHint` annotation surfaces the operation in the host's approval flow.
+Permanently delete a note. When the client supports `elicit`, the server requests human confirmation before issuing the `DELETE` and the prompt includes the file's byte size — destructive blast radius visible before the user confirms. Without elicitation, the `destructiveHint` annotation surfaces the operation in the host's approval flow. The output reports `previousSizeInBytes` (size at the moment of deletion) and `currentSizeInBytes: 0`.
 
 ---
 
