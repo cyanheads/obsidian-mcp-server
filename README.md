@@ -25,7 +25,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | `obsidian_list_notes` | List notes and subdirectories at a vault path with a recursive walk (default depth 2 — structural overview; max 20) bounded by a 1000-entry cap. Optional `extension` and `nameRegex` filters apply across the tree; regex-filtered directories are skipped without recursing into them. Returns flat `entries[]` plus a box-drawing tree in the rendered output; per-directory `truncated: true` flags where the depth limit cut off recursion. |
 | `obsidian_list_tags` | List every tag found across the vault with usage counts, including hierarchical parents. |
 | `obsidian_list_commands` | List Obsidian command-palette commands available for execution. **Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`** (paired with `obsidian_execute_command`). |
-| `obsidian_search_notes` | Search the vault by text, Dataview DQL, or JSONLogic — capped at 100 hits with overflow indicator. |
+| `obsidian_search_notes` | Search the vault by text, Dataview DQL, or JSONLogic. Text-mode matches return surrounding context windows (`contextLength`) — capped at 100 hits with overflow indicator. |
 | `obsidian_write_note` | Create a note, replace a single section in place, or — with `overwrite: true` — clobber an existing file. Refuses whole-file writes against an existing path by default. |
 | `obsidian_append_to_note` | Append content to a note. Without `section` it creates the file if missing — your content becomes the entire file. With `section`, appends to that heading/block/frontmatter (PATCH; the file must exist). |
 | `obsidian_patch_note` | Surgical `append` / `prepend` / `replace` against a heading, block reference, or frontmatter field. |
@@ -53,7 +53,7 @@ Pair the document-map projection with `obsidian_patch_note` to discover edit tar
 
 Three search modes selected by `mode`:
 
-- `text` — substring match with surrounding context windows; optional `pathPrefix` filter (text mode only — passing `pathPrefix` in `dataview` or `jsonlogic` mode is rejected with `path_prefix_invalid_mode`)
+- `text` — substring match with surrounding context windows. `contextLength` controls characters of context per side of each match (default 100; bump it for more context per hit). Optional `pathPrefix` filter (text mode only — passing `pathPrefix` in `dataview` or `jsonlogic` mode is rejected with `path_prefix_invalid_mode`).
 - `dataview` — Dataview DQL (`TABLE …`) for path/date/metadata queries; `file.mtime`, `file.path`, etc. are queryable
 - `jsonlogic` — JSONLogic tree evaluated against `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`; custom `glob` and `regexp` operators
 
