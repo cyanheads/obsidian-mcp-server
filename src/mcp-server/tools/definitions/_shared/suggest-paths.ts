@@ -73,7 +73,12 @@ export async function withCaseFallback<T>(
       const list = probe.caseMatches.map((m) => `"${m}"`).join(', ');
       throw conflict(
         `Ambiguous case-insensitive matches for '${target.path}': ${list}.`,
-        { path: target.path, matches: probe.caseMatches },
+        {
+          path: target.path,
+          reason: 'ambiguous_path',
+          matches: probe.caseMatches,
+          ...ctx.recoveryFor('ambiguous_path'),
+        },
         { cause: err },
       );
     }

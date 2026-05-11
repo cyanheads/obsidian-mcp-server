@@ -166,7 +166,11 @@ describe('withCaseFallback', () => {
     ).rejects.toMatchObject({
       code: JsonRpcErrorCode.Conflict,
       message: expect.stringContaining('Ambiguous case-insensitive matches'),
-      data: { path: 'Note.md', matches: ['note.md', 'NOTE.md'] },
+      data: {
+        path: 'Note.md',
+        reason: 'ambiguous_path',
+        matches: ['note.md', 'NOTE.md'],
+      },
     });
   });
 

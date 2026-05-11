@@ -7,7 +7,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
-import { extractSection } from '@/services/obsidian/section-extractor.js';
+import { computeFenceMask, extractSection } from '@/services/obsidian/section-extractor.js';
 import { SectionSchema, TargetSchema } from './_shared/schemas.js';
 import { withCaseFallback } from './_shared/suggest-paths.js';
 
@@ -130,6 +130,12 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       when: 'The vault path does not resolve to an existing note.',
       recovery:
         'Verify the path with obsidian_list_notes or use obsidian_search_notes to locate the note.',
+    },
+    {
+      reason: 'ambiguous_path',
+      code: JsonRpcErrorCode.Conflict,
+      when: 'The parent directory contains multiple files whose names differ only in case (case-sensitive filesystems only).',
+      recovery: 'Retry with one of the exact paths listed in `matches` on the error data.',
     },
     {
       reason: 'no_active_file',
@@ -326,13 +332,17 @@ function formatIsoTime(ms: number): string {
  * `#section`) and markdown links (`[text](target)`). External URIs
  * (any `scheme:` form) are filtered out — only vault-internal references
  * remain. No existence checks; this is the link graph as written.
+ *
+ * Fenced code blocks and inline code are blanked before matching so notes
+ * documenting markdown syntax don't yield false-positive links.
  */
 function parseOutgoingLinks(
   content: string,
 ): Array<{ target: string; type: 'wikilink' | 'markdown' }> {
+  const cleaned = stripMarkdownCode(content);
   const links: Array<{ target: string; type: 'wikilink' | 'markdown' }> = [];
 
-  for (const m of content.matchAll(/!?\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g)) {
+  for (const m of cleaned.matchAll(/!?\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g)) {
     const target = m[1]?.trim();
     if (target) links.push({ target, type: 'wikilink' });
   }
@@ -342,7 +352,7 @@ function parseOutgoingLinks(
    * run. The bracketed form is the markdown spec's escape hatch for paths
    * containing spaces.
    */
-  for (const m of content.matchAll(/\[[^\]]*\]\((<[^<>\n]+>|[^)\s]+)(?:\s+"[^"]*")?\)/g)) {
+  for (const m of cleaned.matchAll(/\[[^\]]*\]\((<[^<>\n]+>|[^)\s]+)(?:\s+"[^"]*")?\)/g)) {
     let target = m[1]?.trim();
     if (!target) continue;
     if (target.startsWith('<') && target.endsWith('>')) {
@@ -354,4 +364,22 @@ function parseOutgoingLinks(
   }
 
   return links;
+}
+
+/**
+ * Return `content` with fenced code blocks and inline code spans replaced by
+ * spaces of equal length so downstream regex offsets remain coherent. Inline-
+ * code stripping is line-bounded — covers the common `` `[[example]]` `` case
+ * but not the rare multi-line backtick spans permitted by CommonMark.
+ */
+function stripMarkdownCode(content: string): string {
+  const lines = content.split('\n');
+  const inFence = computeFenceMask(lines);
+  return lines
+    .map((line, i) =>
+      inFence[i]
+        ? ' '.repeat(line.length)
+        : line.replace(/`[^`\n]+`/g, (s) => ' '.repeat(s.length)),
+    )
+    .join('\n');
 }

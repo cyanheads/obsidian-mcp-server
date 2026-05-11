@@ -51,6 +51,12 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
       recovery:
         'Verify the path with obsidian_list_notes or pass failIfMissing false to create on open.',
     },
+    {
+      reason: 'ambiguous_path',
+      code: JsonRpcErrorCode.Conflict,
+      when: 'The parent directory contains multiple files whose names differ only in case (case-sensitive filesystems only).',
+      recovery: 'Retry with one of the exact paths listed in `matches` on the error data.',
+    },
   ],
 
   async handler(input, ctx) {

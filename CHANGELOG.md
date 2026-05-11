@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.1.9](changelog/3.1.x/3.1.9.md) — 2026-05-11
+
+Section extractor and outgoing-link parser respect fenced code blocks and inline code — markdown-about-markdown notes stop yielding false-positive headings, block refs, and links. Adds `ambiguous_path` to the typed-error contract.
+
 ## [3.1.8](changelog/3.1.x/3.1.8.md) — 2026-05-11
 
 POST/PATCH bypass `withRetry` — prevents double-apply when a successful upstream write loses its response. Adds a 13-test regression suite covering the retry policy across every method.

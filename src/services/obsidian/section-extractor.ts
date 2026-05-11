@@ -48,6 +48,7 @@ function extractHeading(content: string, target: string): string {
 
   const lines = content.split('\n');
   const bodyStart = frontmatterEndLine(lines);
+  const inFence = computeFenceMask(lines, bodyStart);
   let cursor = bodyStart;
   let parentLevel = 0;
 
@@ -55,6 +56,7 @@ function extractHeading(content: string, target: string): string {
     let found = -1;
     let foundLevel = 0;
     for (let i = cursor; i < lines.length; i++) {
+      if (inFence[i]) continue;
       const m = /^(#{1,6})\s+(.*?)\s*$/.exec(lines[i] ?? '');
       if (!m) continue;
       const level = (m[1] ?? '').length;
@@ -80,6 +82,7 @@ function extractHeading(content: string, target: string): string {
   const startLine = cursor - 1;
   let endLine = lines.length;
   for (let i = cursor; i < lines.length; i++) {
+    if (inFence[i]) continue;
     const m = /^(#{1,6})\s+/.exec(lines[i] ?? '');
     if (m && (m[1] ?? '').length <= parentLevel) {
       endLine = i;
@@ -97,9 +100,11 @@ function extractHeading(content: string, target: string): string {
 function extractBlock(content: string, blockId: string): string {
   const lines = content.split('\n');
   const bodyStart = frontmatterEndLine(lines);
+  const inFence = computeFenceMask(lines, bodyStart);
   const escaped = blockId.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
   const ref = new RegExp(`(^|\\s)\\^${escaped}\\s*$`);
   for (let i = bodyStart; i < lines.length; i++) {
+    if (inFence[i]) continue;
     if (ref.test(lines[i] ?? '')) {
       let start = i;
       while (start > bodyStart) {
@@ -126,4 +131,39 @@ function frontmatterEndLine(lines: string[]): number {
     if (/^---\s*$/.test(lines[i] ?? '')) return i + 1;
   }
   return 0;
+}
+
+/**
+ * Mark line indices that fall inside fenced code blocks (` ``` ` or `~~~`) so
+ * downstream scanning doesn't false-match on markdown-about-markdown notes.
+ * The closer must match the opener's fence char, have at least as many fence
+ * chars, and carry no info string (per CommonMark). An unclosed fence extends
+ * to EOF. Pass `from` to skip a leading frontmatter block.
+ */
+export function computeFenceMask(lines: string[], from = 0): boolean[] {
+  const mask: boolean[] = new Array(lines.length).fill(false);
+  let openChar: '`' | '~' | null = null;
+  let openLen = 0;
+  for (let i = from; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    const m = /^\s{0,3}([`~]{3,})/.exec(line);
+    if (openChar === null) {
+      if (m) {
+        const fence = m[1] ?? '';
+        openChar = fence[0] as '`' | '~';
+        openLen = fence.length;
+        mask[i] = true;
+      }
+      continue;
+    }
+    mask[i] = true;
+    if (m && /^\s{0,3}[`~]{3,}\s*$/.test(line)) {
+      const fence = m[1] ?? '';
+      if (fence[0] === openChar && fence.length >= openLen) {
+        openChar = null;
+        openLen = 0;
+      }
+    }
+  }
+  return mask;
 }

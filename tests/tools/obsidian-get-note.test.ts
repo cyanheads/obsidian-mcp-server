@@ -368,6 +368,85 @@ describe('obsidian_get_note / includeLinks', () => {
       content: '[[Other]]',
     });
   });
+
+  it('ignores wikilinks and markdown links inside fenced code blocks', async () => {
+    mockFullNote(
+      [
+        '[[Real-Wiki]]',
+        '[Real-Md](real.md)',
+        '',
+        '```markdown',
+        '[[Fake-Wiki]]',
+        '[Fake-Md](fake.md)',
+        '```',
+        '',
+        '[[After-Wiki]]',
+      ].join('\n'),
+    );
+    const input = obsidianGetNote.input.parse({
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+    const out = await obsidianGetNote.handler(input, createMockContext());
+    if (out.result.format !== 'full') throw new Error('expected full branch');
+    expect(out.result.outgoingLinks).toEqual([
+      { target: 'Real-Wiki', type: 'wikilink' },
+      { target: 'After-Wiki', type: 'wikilink' },
+      { target: 'real.md', type: 'markdown' },
+    ]);
+  });
+
+  it('ignores links inside tilde-fenced code blocks too', async () => {
+    mockFullNote(
+      ['[[Real]]', '', '~~~markdown', '[[Fake]]', '~~~', '', '[[Also-Real]]'].join('\n'),
+    );
+    const input = obsidianGetNote.input.parse({
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+    const out = await obsidianGetNote.handler(input, createMockContext());
+    if (out.result.format !== 'full') throw new Error('expected full branch');
+    expect(out.result.outgoingLinks).toEqual([
+      { target: 'Real', type: 'wikilink' },
+      { target: 'Also-Real', type: 'wikilink' },
+    ]);
+  });
+
+  it('ignores wikilinks and markdown links inside inline code spans', async () => {
+    mockFullNote(
+      [
+        'Real link: [[Real]] and [Md](real.md).',
+        'Syntax: `[[fake-wiki]]` and `[label](fake.md)`.',
+      ].join('\n'),
+    );
+    const input = obsidianGetNote.input.parse({
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+    const out = await obsidianGetNote.handler(input, createMockContext());
+    if (out.result.format !== 'full') throw new Error('expected full branch');
+    expect(out.result.outgoingLinks).toEqual([
+      { target: 'Real', type: 'wikilink' },
+      { target: 'real.md', type: 'markdown' },
+    ]);
+  });
+
+  it('treats an unclosed fence as extending to EOF', async () => {
+    mockFullNote(
+      ['[[Real]]', '', '```markdown', '[[Fake-Inside-Unclosed]]', 'Still in fence.'].join('\n'),
+    );
+    const input = obsidianGetNote.input.parse({
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+    const out = await obsidianGetNote.handler(input, createMockContext());
+    if (out.result.format !== 'full') throw new Error('expected full branch');
+    expect(out.result.outgoingLinks).toEqual([{ target: 'Real', type: 'wikilink' }]);
+  });
 });
 
 describe('obsidian_get_note / format()', () => {
