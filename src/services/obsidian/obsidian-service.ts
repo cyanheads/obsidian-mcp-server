@@ -73,6 +73,13 @@ const DOCUMENT_MAP_ACCEPT = 'application/vnd.olrapi.document-map+json';
 const DATAVIEW_DQL_CT = 'application/vnd.olrapi.dataview.dql+txt';
 const JSONLOGIC_CT = 'application/vnd.olrapi.jsonlogic+json';
 
+/**
+ * Methods safe to retry on transient errors. POST/PATCH are excluded — a
+ * successful upstream write with a lost response would double-apply on retry
+ * (duplicate `append`, re-run Obsidian command).
+ */
+const RETRY_SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'PUT', 'DELETE']);
+
 export class ObsidianService {
   readonly #config: ServerConfig;
   readonly #dispatcher: Dispatcher;
@@ -484,34 +491,37 @@ export class ObsidianService {
       headers.Authorization = `Bearer ${this.#config.apiKey}`;
     }
 
-    return withRetry(
-      async () => {
-        const res = await this.#fetch(url, {
-          method: init.method,
-          headers,
-          ...(init.body !== undefined ? { body: init.body } : {}),
-          dispatcher: this.#dispatcher,
-          signal: ctx.signal,
-        });
-        if (!res.ok) {
-          await this.#throwForStatus(res, pathAndQuery, ctx);
-        }
-        return res;
-      },
-      {
-        operation: `obsidian.${init.method} ${pathAndQuery}`,
-        context: {
-          requestId: ctx.requestId,
-          timestamp: ctx.timestamp,
-          ...(ctx.tenantId !== undefined ? { tenantId: ctx.tenantId } : {}),
-          ...(ctx.traceId !== undefined ? { traceId: ctx.traceId } : {}),
-          ...(ctx.spanId !== undefined ? { spanId: ctx.spanId } : {}),
-        },
-        baseDelayMs: 200,
-        maxRetries: 3,
+    const exec = async (): Promise<UndiciResponse> => {
+      const res = await this.#fetch(url, {
+        method: init.method,
+        headers,
+        ...(init.body !== undefined ? { body: init.body } : {}),
+        dispatcher: this.#dispatcher,
         signal: ctx.signal,
+      });
+      if (!res.ok) {
+        await this.#throwForStatus(res, pathAndQuery, ctx);
+      }
+      return res;
+    };
+
+    if (!RETRY_SAFE_METHODS.has(init.method.toUpperCase())) {
+      return exec();
+    }
+
+    return withRetry(exec, {
+      operation: `obsidian.${init.method} ${pathAndQuery}`,
+      context: {
+        requestId: ctx.requestId,
+        timestamp: ctx.timestamp,
+        ...(ctx.tenantId !== undefined ? { tenantId: ctx.tenantId } : {}),
+        ...(ctx.traceId !== undefined ? { traceId: ctx.traceId } : {}),
+        ...(ctx.spanId !== undefined ? { spanId: ctx.spanId } : {}),
       },
-    );
+      baseDelayMs: 200,
+      maxRetries: 3,
+      signal: ctx.signal,
+    });
   }
 
   async #throwForStatus(res: UndiciResponse, path: string, ctx: Context): Promise<never> {

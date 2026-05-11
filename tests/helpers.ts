@@ -36,27 +36,27 @@ export function makeTestConfig(overrides: Partial<ServerConfig> = {}): ServerCon
   };
 }
 
-type PathMatcher = string | ((path: string) => boolean);
+export type PathMatcher = string | ((path: string) => boolean);
 
 interface InterceptMatcher {
   method?: string;
   path: PathMatcher;
 }
 
-interface DispatchOpts {
+export interface DispatchOpts {
   body: string | undefined;
   headers: Record<string, string>;
   method: string;
   path: string;
 }
 
-interface DynamicReply {
+export interface DynamicReply {
   data?: unknown;
   responseOptions?: { headers?: Record<string, string> };
   statusCode: number;
 }
 
-type ReplyFn = (opts: DispatchOpts) => DynamicReply;
+export type ReplyFn = (opts: DispatchOpts) => DynamicReply;
 
 interface StaticReply {
   body: unknown;

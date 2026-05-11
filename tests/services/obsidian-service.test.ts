@@ -10,7 +10,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { encodeVaultPath, type ObsidianService } from '@/services/obsidian/obsidian-service.js';
-import { setupHarness, type TestHarness } from '../helpers.js';
+import { type PathMatcher, type ReplyFn, setupHarness, type TestHarness } from '../helpers.js';
 
 const harness = setupHarness();
 let pool: TestHarness['pool'];
@@ -482,5 +482,224 @@ describe('encodeVaultPath', () => {
 
   it('strips empty leading/trailing slashes', () => {
     expect(encodeVaultPath('/foo/')).toBe('foo');
+  });
+});
+
+/**
+ * Regression tests for the retry policy. POST/PATCH must bypass retry — the
+ * default `withRetry` predicate treats raw network errors as transient and
+ * would double-apply non-idempotent writes when the upstream succeeded but
+ * the response was lost. GET/PUT/DELETE retry as normal.
+ */
+describe('ObsidianService retry policy', () => {
+  /**
+   * Queue `n` identical replies so the counter ticks once per actual fetch
+   * attempt — a single intercept would let retries fall through to "no
+   * intercept" without incrementing, hiding retry behavior.
+   */
+  function queueReplies(path: PathMatcher, method: string, n: number, reply: ReplyFn): void {
+    for (let i = 0; i < n; i++) {
+      pool.intercept({ path, method }).reply(reply);
+    }
+  }
+
+  describe('POST/PATCH never retry on transient failures', () => {
+    it('appendToNote (POST): does not retry on 503', async () => {
+      let attempts = 0;
+      queueReplies('/vault/N.md', 'POST', 4, () => {
+        attempts++;
+        return { statusCode: 503 };
+      });
+
+      await expect(
+        service.appendToNote(ctx, { type: 'path', path: 'N.md' }, 'X'),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+      expect(attempts).toBe(1);
+    });
+
+    it('appendToNote (POST): does not retry on raw network errors', async () => {
+      let attempts = 0;
+      queueReplies('/vault/N.md', 'POST', 4, () => {
+        attempts++;
+        throw new TypeError('UND_ERR_SOCKET');
+      });
+
+      await expect(
+        service.appendToNote(ctx, { type: 'path', path: 'N.md' }, 'X'),
+      ).rejects.toThrow();
+      expect(attempts).toBe(1);
+    });
+
+    it('patchNote (PATCH) append: does not retry on 503', async () => {
+      let attempts = 0;
+      queueReplies('/vault/N.md', 'PATCH', 4, () => {
+        attempts++;
+        return { statusCode: 503 };
+      });
+
+      await expect(
+        service.patchNote(ctx, { type: 'path', path: 'N.md' }, 'body', {
+          operation: 'append',
+          targetType: 'heading',
+          target: 'X',
+          contentType: 'markdown',
+        }),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+      expect(attempts).toBe(1);
+    });
+
+    it('patchNote (PATCH) prepend: does not retry on raw network errors', async () => {
+      let attempts = 0;
+      queueReplies('/vault/N.md', 'PATCH', 4, () => {
+        attempts++;
+        throw new TypeError('ECONNRESET');
+      });
+
+      await expect(
+        service.patchNote(ctx, { type: 'path', path: 'N.md' }, 'body', {
+          operation: 'prepend',
+          targetType: 'heading',
+          target: 'X',
+          contentType: 'markdown',
+        }),
+      ).rejects.toThrow();
+      expect(attempts).toBe(1);
+    });
+
+    it('executeCommand (POST): does not retry on 503', async () => {
+      let attempts = 0;
+      queueReplies('/commands/editor%3Asave/', 'POST', 4, () => {
+        attempts++;
+        return { statusCode: 503 };
+      });
+
+      await expect(service.executeCommand(ctx, 'editor:save')).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+      });
+      expect(attempts).toBe(1);
+    });
+
+    it('openInUi (POST): does not retry on 504', async () => {
+      let attempts = 0;
+      queueReplies(
+        (p) => p.startsWith('/open/'),
+        'POST',
+        4,
+        () => {
+          attempts++;
+          return { statusCode: 504 };
+        },
+      );
+
+      await expect(service.openInUi(ctx, 'N.md')).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+      });
+      expect(attempts).toBe(1);
+    });
+  });
+
+  describe('GET/PUT/DELETE retry on transient failures', () => {
+    it('getNoteContent (GET): retries on 503 then succeeds', async () => {
+      let attempts = 0;
+      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
+        attempts++;
+        return { statusCode: 503 };
+      });
+      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
+        attempts++;
+        return { statusCode: 200, data: '# hello' };
+      });
+
+      const out = await service.getNoteContent(ctx, { type: 'path', path: 'N.md' });
+      expect(out).toBe('# hello');
+      expect(attempts).toBe(2);
+    });
+
+    it('getNoteContent (GET): retries on raw network errors then succeeds', async () => {
+      let attempts = 0;
+      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
+        attempts++;
+        throw new TypeError('ECONNRESET');
+      });
+      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
+        attempts++;
+        return { statusCode: 200, data: '# hello' };
+      });
+
+      const out = await service.getNoteContent(ctx, { type: 'path', path: 'N.md' });
+      expect(out).toBe('# hello');
+      expect(attempts).toBe(2);
+    });
+
+    it('writeNote (PUT): retries on 503 then succeeds', async () => {
+      let attempts = 0;
+      pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply(() => {
+        attempts++;
+        return { statusCode: 503 };
+      });
+      pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply(() => {
+        attempts++;
+        return { statusCode: 200, data: '' };
+      });
+
+      await service.writeNote(ctx, { type: 'path', path: 'N.md' }, 'body');
+      expect(attempts).toBe(2);
+    });
+
+    it('deleteNote (DELETE): retries on 503 then succeeds', async () => {
+      let attempts = 0;
+      pool.intercept({ path: '/vault/N.md', method: 'DELETE' }).reply(() => {
+        attempts++;
+        return { statusCode: 503 };
+      });
+      pool.intercept({ path: '/vault/N.md', method: 'DELETE' }).reply(() => {
+        attempts++;
+        return { statusCode: 200, data: '' };
+      });
+
+      await service.deleteNote(ctx, { type: 'path', path: 'N.md' });
+      expect(attempts).toBe(2);
+    });
+  });
+
+  describe('non-transient errors do not retry, regardless of method', () => {
+    it('GET 404 (NotFound) is not retried', async () => {
+      let attempts = 0;
+      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
+        attempts++;
+        return { statusCode: 404, data: { message: 'gone' } };
+      });
+
+      await expect(
+        service.getNoteContent(ctx, { type: 'path', path: 'N.md' }),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
+      expect(attempts).toBe(1);
+    });
+
+    it('PUT 400 (ValidationError) is not retried', async () => {
+      let attempts = 0;
+      pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply(() => {
+        attempts++;
+        return { statusCode: 400, data: { message: 'bad' } };
+      });
+
+      await expect(
+        service.writeNote(ctx, { type: 'path', path: 'N.md' }, 'body'),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+      expect(attempts).toBe(1);
+    });
+
+    it('GET 500 (InternalError) is not retried', async () => {
+      let attempts = 0;
+      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
+        attempts++;
+        return { statusCode: 500, data: { message: 'kaboom' } };
+      });
+
+      await expect(
+        service.getNoteContent(ctx, { type: 'path', path: 'N.md' }),
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.InternalError });
+      expect(attempts).toBe(1);
+    });
   });
 });

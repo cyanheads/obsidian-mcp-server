@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.1.8](changelog/3.1.x/3.1.8.md) — 2026-05-11
+
+POST/PATCH bypass `withRetry` — prevents double-apply when a successful upstream write loses its response. Adds a 13-test regression suite covering the retry policy across every method.
+
 ## [3.1.7](changelog/3.1.x/3.1.7.md) — 2026-05-10
 
 Every mutating tool now reports `previousSizeInBytes` + `currentSizeInBytes`; `obsidian_append_to_note` gains the `created` upsert flag. Resolves [#48](https://github.com/cyanheads/obsidian-mcp-server/issues/48).
