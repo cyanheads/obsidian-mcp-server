@@ -13,11 +13,13 @@ import { allPromptDefinitions } from '@/mcp-server/prompts/definitions/index.js'
 import { allResourceDefinitions } from '@/mcp-server/resources/definitions/index.js';
 import {
   commandToolDefinitions,
+  omnisearchToolDefinitions,
   readToolDefinitions,
   writeToolDefinitions,
 } from '@/mcp-server/tools/definitions/index.js';
 import { initObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { PathPolicy } from '@/services/obsidian/path-policy.js';
+import { initOmnisearchService } from '@/services/omnisearch/omnisearch-service.js';
 
 const config = getServerConfig();
 const policy = new PathPolicy(config);
@@ -45,7 +47,16 @@ const commandTools =
         }),
       );
 
-const tools = [...readToolDefinitions, ...writeTools, ...commandTools];
+const omnisearchTools = config.enableOmnisearch
+  ? omnisearchToolDefinitions
+  : omnisearchToolDefinitions.map((def) =>
+      disabledTool(def, {
+        reason: 'Disabled by default — requires the Omnisearch community plugin HTTP server.',
+        hint: 'Set OBSIDIAN_OMNISEARCH_ENABLE=true after installing the Omnisearch plugin and enabling its HTTP server (Settings → Omnisearch → "HTTP server").',
+      }),
+    );
+
+const tools = [...readToolDefinitions, ...writeTools, ...commandTools, ...omnisearchTools];
 
 const { services } = await createApp({
   tools,
@@ -53,6 +64,9 @@ const { services } = await createApp({
   prompts: allPromptDefinitions,
   setup() {
     initObsidianService(config);
+    if (config.enableOmnisearch) {
+      initOmnisearchService(config);
+    }
   },
 });
 
@@ -67,6 +81,7 @@ const bannerCtx = requestContextService.createRequestContext({
   operation: 'startup',
   ...policy.describe(),
   enableCommands: config.enableCommands && !config.readOnly,
+  enableOmnisearch: config.enableOmnisearch,
 });
 services.logger.info('Path policy', bannerCtx);
 if (policy.readOnlyShadowsWritePaths) {

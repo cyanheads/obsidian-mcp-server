@@ -1,10 +1,10 @@
 /**
  * @fileoverview Tool registration barrel. Tools are split into read-only and
  * write groups so the entry point can wrap the write set with `disabledTool()`
- * when `OBSIDIAN_READ_ONLY=true`. The command-palette pair is exported
- * separately so the entry point wraps it with `disabledTool()` when either
- * `OBSIDIAN_ENABLE_COMMANDS=false` or `OBSIDIAN_READ_ONLY=true` — keeping this
- * module free of eager config reads.
+ * when `OBSIDIAN_READ_ONLY=true`. The command-palette pair and the Omnisearch
+ * tool are exported separately so the entry point wraps them with
+ * `disabledTool()` when their feature flag is off — keeping this module free
+ * of eager config reads.
  * @module mcp-server/tools/definitions/index
  */
 
@@ -17,6 +17,7 @@ import { obsidianListNotes } from './obsidian-list-notes.tool.js';
 import { obsidianListTags } from './obsidian-list-tags.tool.js';
 import { obsidianManageFrontmatter } from './obsidian-manage-frontmatter.tool.js';
 import { obsidianManageTags } from './obsidian-manage-tags.tool.js';
+import { obsidianOmnisearch } from './obsidian-omnisearch.tool.js';
 import { obsidianOpenInUi } from './obsidian-open-in-ui.tool.js';
 import { obsidianPatchNote } from './obsidian-patch-note.tool.js';
 import { obsidianReplaceInNote } from './obsidian-replace-in-note.tool.js';
@@ -48,3 +49,6 @@ export const baseToolDefinitions = [...readToolDefinitions, ...writeToolDefiniti
 
 /** Command-palette tools — opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`; suppressed by `OBSIDIAN_READ_ONLY=true`. */
 export const commandToolDefinitions = [obsidianListCommands, obsidianExecuteCommand];
+
+/** Omnisearch tool — opt-in via `OBSIDIAN_OMNISEARCH_ENABLE=true`; requires the Omnisearch plugin HTTP server. */
+export const omnisearchToolDefinitions = [obsidianOmnisearch];
