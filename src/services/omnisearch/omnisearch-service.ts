@@ -6,6 +6,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
+import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Agent, type Dispatcher, type RequestInit, fetch as undiciFetch } from 'undici';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
@@ -60,37 +61,56 @@ export class OmnisearchService {
 
   async search(ctx: Context, query: string): Promise<OmnisearchHit[]> {
     const path = `/search?q=${encodeURIComponent(query)}`;
-    const res = await withRetry(
-      async () => {
-        const r = await this.#fetch(`${this.#baseUrl}${path}`, {
-          method: 'GET',
-          dispatcher: this.#dispatcher,
-          signal: ctx.signal,
-        });
-        if (!r.ok) {
-          await this.#throwForStatus(r, path);
-        }
-        return r;
-      },
-      {
-        operation: `omnisearch.GET ${path}`,
-        context: {
-          requestId: ctx.requestId,
-          timestamp: ctx.timestamp,
-          ...(ctx.tenantId !== undefined ? { tenantId: ctx.tenantId } : {}),
-          ...(ctx.traceId !== undefined ? { traceId: ctx.traceId } : {}),
-          ...(ctx.spanId !== undefined ? { spanId: ctx.spanId } : {}),
+    const url = `${this.#baseUrl}${path}`;
+    try {
+      const res = await withRetry(
+        async () => {
+          const r = await this.#fetch(url, {
+            method: 'GET',
+            dispatcher: this.#dispatcher,
+            signal: ctx.signal,
+          });
+          if (!r.ok) {
+            await this.#throwForStatus(r, path, ctx);
+          }
+          return r;
         },
-        baseDelayMs: 200,
-        maxRetries: 3,
-        signal: ctx.signal,
-      },
-    );
-    const body = (await res.json()) as OmnisearchHit[];
-    return Array.isArray(body) ? body : [];
+        {
+          operation: `omnisearch.GET ${path}`,
+          context: {
+            requestId: ctx.requestId,
+            timestamp: ctx.timestamp,
+            ...(ctx.tenantId !== undefined ? { tenantId: ctx.tenantId } : {}),
+            ...(ctx.traceId !== undefined ? { traceId: ctx.traceId } : {}),
+            ...(ctx.spanId !== undefined ? { spanId: ctx.spanId } : {}),
+          },
+          baseDelayMs: 200,
+          maxRetries: 3,
+          signal: ctx.signal,
+        },
+      );
+      const body = (await res.json()) as OmnisearchHit[];
+      return Array.isArray(body) ? body : [];
+    } catch (err) {
+      if (ctx.signal?.aborted) throw err;
+      // Caller cancelled? Bubble. Otherwise re-throw connection / DNS / abort
+      // failures as the contract's `omnisearch_unreachable` reason so the
+      // recovery hint lands on the wire (httpErrorFromResponse already does
+      // this for HTTP-level errors via #throwForStatus).
+      if (err && typeof err === 'object' && 'data' in err) throw err;
+      const msg =
+        err instanceof Error
+          ? `Omnisearch unreachable at ${url}: ${err.message}`
+          : `Omnisearch unreachable at ${url}.`;
+      throw serviceUnavailable(msg, {
+        url,
+        reason: 'omnisearch_unreachable',
+        ...ctx.recoveryFor('omnisearch_unreachable'),
+      });
+    }
   }
 
-  async #throwForStatus(res: UndiciResponse, path: string): Promise<never> {
+  async #throwForStatus(res: UndiciResponse, path: string, ctx: Context): Promise<never> {
     const text = await this.#readBodySafe(res);
     const truncated = text ? (text.length > 500 ? `${text.slice(0, 500)}…` : text) : undefined;
     throw await httpErrorFromResponse(res, {
@@ -98,6 +118,8 @@ export class OmnisearchService {
       captureBody: false,
       data: {
         url: `${this.#baseUrl}${path}`,
+        reason: 'omnisearch_unreachable',
+        ...ctx.recoveryFor('omnisearch_unreachable'),
         ...(truncated !== undefined ? { body: truncated } : {}),
       },
     });
