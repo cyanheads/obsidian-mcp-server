@@ -118,9 +118,9 @@ const ServerConfigSchema = z.object({
   omnisearchBaseUrl: z
     .string()
     .url()
-    .default('http://127.0.0.1:51361')
+    .default('http://localhost:51361')
     .describe(
-      'Base URL of the Omnisearch plugin HTTP server. Configure it in Obsidian → Omnisearch settings → "HTTP server". Only consulted when OBSIDIAN_OMNISEARCH_ENABLE=true.',
+      'Base URL of the Omnisearch plugin HTTP server. Defaults to `http://localhost:51361` because on macOS the plugin binds IPv6-only (`[::1]:51361`); `localhost` lets undici happy-eyeballs reach it on either stack. If your platform binds IPv4-only, set `http://127.0.0.1:51361` instead. Configure the port in Obsidian → Omnisearch settings → "HTTP server". Only consulted when OBSIDIAN_OMNISEARCH_ENABLE=true.',
     ),
   readPaths: envPathList.describe(
     'Optional vault-relative folder allowlist for read operations. Comma-separated; prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault.',
