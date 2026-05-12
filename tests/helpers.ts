@@ -29,6 +29,8 @@ export function makeTestConfig(overrides: Partial<ServerConfig> = {}): ServerCon
     verifySsl: false,
     requestTimeoutMs: 5_000,
     enableCommands: false,
+    enableOmnisearch: false,
+    omnisearchBaseUrl: 'http://omnisearch.test',
     readPaths: undefined,
     writePaths: undefined,
     readOnly: false,

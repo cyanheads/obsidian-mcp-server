@@ -1,7 +1,7 @@
 <div align="center">
   <h1>obsidian-mcp-server</h1>
   <p><b>MCP server for Obsidian vaults — read, write, search, and surgically edit notes, tags, and frontmatter via the Local REST API plugin. STDIO or Streamable HTTP.</b>
-  <div>14 Tools • 3 Resources</div>
+  <div>15 Tools • 3 Resources</div>
   </p>
 </div>
 
@@ -17,7 +17,7 @@
 
 ## Tools
 
-Fourteen tools grouped by shape — readers fetch notes and metadata, writers create or surgically edit content, managers reconcile tags and frontmatter, and a guarded escape hatch dispatches Obsidian command-palette commands.
+Fifteen tools grouped by shape — readers fetch notes and metadata, writers create or surgically edit content, managers reconcile tags and frontmatter, a guarded escape hatch dispatches Obsidian command-palette commands, and an opt-in indexed search bridges to the Omnisearch community plugin.
 
 | Tool Name | Description |
 |:----------|:------------|
@@ -26,6 +26,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | `obsidian_list_tags` | List every tag found across the vault with usage counts, including hierarchical parents. |
 | `obsidian_list_commands` | List Obsidian command-palette commands available for execution. **Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`** (paired with `obsidian_execute_command`). |
 | `obsidian_search_notes` | Search the vault by text, Dataview DQL, or JSONLogic — capped at 100 hits with overflow indicator. |
+| `obsidian_omnisearch` | Indexed fuzzy full-text search via the Omnisearch community plugin's HTTP server. Returns Omnisearch relevance scores, matched-word lists, and excerpts. **Opt-in via `OBSIDIAN_OMNISEARCH_ENABLE=true`.** |
 | `obsidian_write_note` | Create a note, replace a single section in place, or — with `overwrite: true` — clobber an existing file. Refuses whole-file writes against an existing path by default. |
 | `obsidian_append_to_note` | Append content to a note, or to a specific heading/block/frontmatter section. |
 | `obsidian_patch_note` | Surgical `append` / `prepend` / `replace` against a heading, block reference, or frontmatter field. |
@@ -58,6 +59,20 @@ Three search modes selected by `mode`:
 - `jsonlogic` — JSONLogic tree evaluated against `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`; custom `glob` and `regexp` operators
 
 Results are capped at 100 hits. When the upstream returns more, an `excluded` indicator surfaces the overflow count and a hint to narrow the query. Text-mode hits are additionally clipped per file at `maxMatchesPerHit` (default 10) so a single match-heavy note can't blow the response budget — clipped hits carry `truncated: true` and `totalMatches`.
+
+---
+
+### `obsidian_omnisearch`
+
+Indexed fuzzy full-text search backed by the [Omnisearch community plugin](https://github.com/scambier/obsidian-omnisearch). Much faster than `obsidian_search_notes` on large vaults, and returns Omnisearch's relevance scoring, matched-word lists, and excerpts.
+
+**Off by default.** Set `OBSIDIAN_OMNISEARCH_ENABLE=true` after installing the Omnisearch plugin and enabling its HTTP server (Obsidian → Settings → Omnisearch → *Enable HTTP server*). The tool stays in the manifest as `disabled` when the flag is off so operators see why it's unavailable.
+
+`OBSIDIAN_OMNISEARCH_BASE_URL` defaults to `http://localhost:51361` — on macOS the plugin binds IPv6-only (`[::1]:51361`), so `localhost` is used to let undici happy-eyeballs reach either stack. On IPv4-only platforms set `http://127.0.0.1:51361` explicitly.
+
+Results are capped at 100 hits with the same `excluded` overflow indicator as `obsidian_search_notes`. Per-file matches clip at `maxMatchesPerFile` (default 5, 0 drops the match arrays entirely and keeps only score + excerpt). Optional `pathPrefix` filter is applied client-side. Hits are post-filtered against `OBSIDIAN_READ_PATHS` so path-policy applies uniformly with the other read tools.
+
+Upstream failures (plugin offline, HTTP 5xx, transport refused) surface as `omnisearch_unreachable` (`ServiceUnavailable`) with a recovery hint pointing operators back to the plugin setup.
 
 ---
 
@@ -143,7 +158,7 @@ Three optional env vars gate which vault paths each tool can target. **Default u
 
 **`OBSIDIAN_READ_ONLY=true` short-circuits before the path checks** — every write is denied regardless of `WRITE_PATHS`, and the command-palette pair is unregistered regardless of `OBSIDIAN_ENABLE_COMMANDS` (commands can mutate).
 
-Denies are typed `path_forbidden` (JSON-RPC code `Forbidden`) with the active scope echoed back in `data.recovery.hint` and `data.activeScope`, so the LLM can self-correct without inspecting server logs. Search results from `obsidian_search_notes` are filtered against `READ_PATHS` silently — surfacing a "we hid N hits" indicator would defeat the gate.
+Denies are typed `path_forbidden` (JSON-RPC code `Forbidden`) with the active scope echoed back in `data.recovery.hint` and `data.activeScope`, so the LLM can self-correct without inspecting server logs. Search results from `obsidian_search_notes` and `obsidian_omnisearch` are filtered against `READ_PATHS` silently — surfacing a "we hid N hits" indicator would defeat the gate.
 
 The startup banner logs the active scope so operators can verify their config at boot.
 
@@ -271,6 +286,8 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | `OBSIDIAN_VERIFY_SSL` | Verify the TLS certificate. Default `false` because the plugin uses a self-signed cert. On Node, the dispatcher's `rejectUnauthorized` option handles this without any process-wide change. On Bun, the runtime ignores that option, so the service additionally sets `NODE_TLS_REJECT_UNAUTHORIZED=0` — that fallback is scoped to Bun only. | `false` |
 | `OBSIDIAN_REQUEST_TIMEOUT_MS` | Per-request timeout in milliseconds. | `30000` |
 | `OBSIDIAN_ENABLE_COMMANDS` | Opt-in flag for the command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`). Off by default — Obsidian commands are opaque and can be destructive. | `false` |
+| `OBSIDIAN_OMNISEARCH_ENABLE` | Opt-in flag for `obsidian_omnisearch`. Requires the Omnisearch community plugin with its HTTP server enabled. | `false` |
+| `OBSIDIAN_OMNISEARCH_BASE_URL` | Base URL of the Omnisearch plugin HTTP server. Default uses `localhost` so undici happy-eyeballs reaches either IP stack (the plugin binds IPv6-only on macOS). Override with `http://127.0.0.1:51361` on IPv4-only platforms. | `http://localhost:51361` |
 | `OBSIDIAN_READ_PATHS` | Comma-separated vault-relative folder allowlist for read operations. Prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault. Write paths are implicitly readable. | unset |
 | `OBSIDIAN_WRITE_PATHS` | Comma-separated vault-relative folder allowlist for write operations. Same syntax as `OBSIDIAN_READ_PATHS`. Unset = full vault. | unset |
 | `OBSIDIAN_READ_ONLY` | Global kill switch. When `true`, denies every write regardless of `OBSIDIAN_WRITE_PATHS`, and suppresses the `OBSIDIAN_ENABLE_COMMANDS` pair (commands can mutate). | `false` |
