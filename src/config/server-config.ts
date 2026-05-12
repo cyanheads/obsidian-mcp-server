@@ -110,6 +110,18 @@ const ServerConfigSchema = z.object({
     .describe(
       'Opt-in flag for the command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`). Off by default — Obsidian commands are opaque and can be destructive.',
     ),
+  enableOmnisearch: envBoolean
+    .default(false)
+    .describe(
+      'Opt-in flag for `obsidian_omnisearch`. Off by default — requires the Omnisearch community plugin with its HTTP server enabled. When false the tool is registered as disabled so operators can see why it is unavailable.',
+    ),
+  omnisearchBaseUrl: z
+    .string()
+    .url()
+    .default('http://localhost:51361')
+    .describe(
+      'Base URL of the Omnisearch plugin HTTP server. Defaults to `http://localhost:51361` because on macOS the plugin binds IPv6-only (`[::1]:51361`); `localhost` lets undici happy-eyeballs reach it on either stack. If your platform binds IPv4-only, set `http://127.0.0.1:51361` instead. Configure the port in Obsidian → Omnisearch settings → "HTTP server". Only consulted when OBSIDIAN_OMNISEARCH_ENABLE=true.',
+    ),
   readPaths: envPathList.describe(
     'Optional vault-relative folder allowlist for read operations. Comma-separated; prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault.',
   ),
@@ -134,6 +146,8 @@ export function getServerConfig(): ServerConfig {
     verifySsl: 'OBSIDIAN_VERIFY_SSL',
     requestTimeoutMs: 'OBSIDIAN_REQUEST_TIMEOUT_MS',
     enableCommands: 'OBSIDIAN_ENABLE_COMMANDS',
+    enableOmnisearch: 'OBSIDIAN_OMNISEARCH_ENABLE',
+    omnisearchBaseUrl: 'OBSIDIAN_OMNISEARCH_BASE_URL',
     readPaths: 'OBSIDIAN_READ_PATHS',
     writePaths: 'OBSIDIAN_WRITE_PATHS',
     readOnly: 'OBSIDIAN_READ_ONLY',
