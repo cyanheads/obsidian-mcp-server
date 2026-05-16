@@ -4,7 +4,7 @@ description: >
   Cloudflare Workers deployment using `createWorkerHandler` from `@cyanheads/mcp-ts-core/worker`. Covers the full handler signature, binding types, CloudflareBindings extensibility, runtime compatibility guards, and wrangler.toml requirements.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: reference
 ---
@@ -49,6 +49,7 @@ Fresh scaffolds register definitions directly in the entry point as shown above.
 | `resources` | `AnyResourceDefinition[]` | Resource definitions to register |
 | `prompts` | `PromptDefinition[]` | Prompt definitions to register |
 | `extensions` | `Record<string, object>` | SEP-2133 extensions to advertise in server capabilities |
+| `instructions` | `string \| (env: CloudflareBindings) => string` | Server-level orientation forwarded to the model on every `initialize`. Resolver form runs inside `initializeApp(env)` so env-derived text is available (see Workers-specific warnings). Empty string treated as unset. |
 | `setup` | `(core: CoreServices) => void \| Promise<void>` | Runs after core services are ready, during the first request (lazy init inside the fetch handler) |
 | `extraEnvBindings` | `[bindingKey: string, processEnvKey: string][]` | Maps CF string bindings to `process.env` keys |
 | `extraObjectBindings` | `[bindingKey: string, globalKey: string][]` | Maps CF object bindings (KV, R2, D1, AI) to `globalThis` keys |
@@ -155,6 +156,19 @@ bucket_name = "..."
 ---
 
 ## Workers-specific warnings
+
+**`instructions` resolver runs after env injection.** When `instructions` is a function, it runs inside `initializeApp(env)` — after `injectEnvVars()` — so env-derived text reaches the model without fighting the Workers module-load lifecycle:
+
+```ts
+export default createWorkerHandler({
+  tools: [echoTool],
+  instructions: (env) =>
+    `Region: ${env.ENVIRONMENT ?? 'production'}.` +
+    (env.MAINTENANCE_MODE ? ' Read-only mode — writes disabled.' : ''),
+});
+```
+
+Plain strings work the same as on `createApp`. Type extends `Omit<CreateAppOptions, 'instructions'>`, so this is the only option whose shape differs between Node and Worker entry points.
 
 **Lazy env parsing is mandatory.** Cloudflare injects env bindings at request time via `injectEnvVars()`, after all static module imports complete. Never parse `process.env` at module top-level in Workers:
 

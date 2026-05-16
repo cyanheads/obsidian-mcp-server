@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![Version](https://img.shields.io/badge/Version-3.1.9-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![Version](https://img.shields.io/badge/Version-3.1.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -176,6 +176,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp
 
 - Declarative tool and resource definitions — single file per primitive, framework handles registration and validation
 - Unified error handling — handlers throw, framework catches, classifies, and formats. Tools advertise their failure surface via typed `errors[]` contracts.
+- Server-level `instructions` on `initialize` — surfaces deployment-specific orientation (active path policy, read-only mode, command-palette toggle) to spec-compliant clients alongside the static tool/resource catalog
 - Pluggable auth on the HTTP transport: `none`, `jwt`, `oauth`
 - Structured logging with optional OpenTelemetry tracing
 - STDIO and Streamable HTTP transports
@@ -295,7 +296,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | `MCP_AUTH_DISABLE_SCOPE_CHECKS` | When `true`, bypasses per-tool scope enforcement after the auth-context presence check. Token signature, audience, issuer, and expiry validation remain intact. Use only when a custom claim can't be injected and combine with `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_READ_ONLY` for access control. A `WARNING` is logged at startup whenever the bypass is active. | `false` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
-| `OTEL_ENABLED` | Enable OpenTelemetry. | `false` |
+| `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry) (spans, metrics, completion logs). | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 

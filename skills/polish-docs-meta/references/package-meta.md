@@ -27,7 +27,7 @@ These are set by `init` and generally don't need changes. Verify they're present
 | `main` | `"dist/index.js"` | Entry point after build |
 | `types` | `"dist/index.d.ts"` | TypeScript declarations |
 | `files` | `["dist/"]` | What npm publishes |
-| `engines` | `{ "node": ">=22.0.0" }` | Add `"bun": ">=1.2.0"` alongside Node |
+| `engines` | `{ "node": ">=24.0.0" }` | Add `"bun": ">=1.3.0"` alongside Node |
 | `packageManager` | _(often missing)_ | `"bun@1.3.2"` (or current Bun version). Signals the intended package manager. |
 | `scripts` | _(various)_ | Build, dev, test scripts |
 | `dependencies` | `@cyanheads/mcp-ts-core` | Core framework |

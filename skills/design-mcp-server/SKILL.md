@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.10"
+  version: "2.11"
   audience: external
   type: workflow
 ---
@@ -255,6 +255,7 @@ The output schema and `format` function control what the LLM reads back. Design 
 
 **Principles:**
 
+- **Server reports what only the server can know; agent decides what only the agent can know.** Schema, scopes, rate limits, and raw observable state belong to the server. Semantic correctness, intent-vs-effect matching, and recovery choice belong to the agent. For mutators, this means surfacing pre/post observable state rather than throwing on synthetic deltas the server can't authoritatively classify — `file shrunk` could be deliberate truncation or a bug; only the agent knows. See `add-tool` skill's **Mutator response design**.
 - **Include IDs and references for chaining.** If the agent might act on a result, return the identifiers it needs for follow-up tool calls.
 - **Curate vs. pass-through depends on domain.** Medical/scientific data — don't trim fields that could alter correctness. CRUD responses — return what the agent needs, not the full API payload. Match fidelity to consequence.
 - **Surface what was done, not just results.** After a write operation, include the post-state so the LLM can chain without an extra round trip.

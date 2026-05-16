@@ -1,8 +1,8 @@
 # Agent Protocol
 
 **Server:** obsidian-mcp-server
-**Version:** 3.1.9
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.8.20`
+**Version:** 3.1.10
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.1`
 **Engines:** Bun ≥1.3.11, Node ≥24.0.0
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -343,15 +343,16 @@ Each per-version file opens with YAML frontmatter:
 
 ```markdown
 ---
-summary: One-line headline, ≤250 chars  # required — powers the rollup index
+summary: One-line headline, ≤350 chars  # required — powers the rollup index
 breaking: false                          # optional — true flags breaking changes
+security: false                          # optional — true flags security fixes
 ---
 
 # 0.1.0 — YYYY-MM-DD
 ...
 ```
 
-`breaking: true` renders a `· ⚠️ Breaking` badge in the rollup — use it when consumers must update code on upgrade (signature changes, removed APIs, config renames).
+`breaking: true` renders a `· ⚠️ Breaking` badge — use it when consumers must update code on upgrade (signature changes, removed APIs, config renames). `security: true` renders a `· 🛡️ Security` badge and pairs with a `## Security` body section. When both are set, badges render `· ⚠️ Breaking · 🛡️ Security`.
 
 ---
 

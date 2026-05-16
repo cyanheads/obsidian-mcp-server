@@ -4,7 +4,7 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: reference
 ---
@@ -158,6 +158,12 @@ throw validationError(message, {
 ```
 
 `ctx.recoveryFor` is always present on `Context` (no-op when no contract), so services don't need to know which tool called them — the spread is safe either way.
+
+---
+
+## When not to throw
+
+Throw when the server has authoritative classification — auth failure, rate limit, schema violation, upstream 5xx, missing required input. Don't throw when "this looks wrong" depends on intent the server can't see. For mutators, surface raw pre- and post-mutation observable state in the response and let the agent decide whether it matches intent — the server can detect that the file shrunk, but only the agent knows whether it was supposed to. Tell: defensive code justified as a free rider on other work — audit it standalone, and it usually doesn't earn its keep.
 
 ---
 

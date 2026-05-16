@@ -347,7 +347,7 @@ Table of environment variables. Include framework vars only if the server uses n
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend. | `in-memory` |
-| `OTEL_ENABLED` | Enable OpenTelemetry. | `false` |
+| `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry) (spans, metrics, completion logs). | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 ```
@@ -363,14 +363,7 @@ Separate from Getting Started. Show dev, build + run, and Workers/Docker deploym
 
 ### Local development
 
-- **Hot-reload dev mode:**
-
-  \`\`\`sh
-  bun run dev:stdio
-  bun run dev:http
-  \`\`\`
-
-- **Build and run the production version:**
+- **Build and run:**
 
   \`\`\`sh
   # One-time build

@@ -4,7 +4,7 @@
 # to author a new release. Set that file's H1 to `# <version> — YYYY-MM-DD`
 # with a concrete date.
 
-# Required. One-line GitHub Release-style headline. ~250 character soft cap.
+# Required. One-line GitHub Release-style headline. 350 character cap.
 # Default short and scannable. Don't pad, don't stitch unrelated changes with
 # semicolons — pick the headline. Quotes required: unquoted YAML treats `: `
 # inside the value as a key separator and fails GitHub's strict parser.

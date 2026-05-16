@@ -22,6 +22,36 @@ import { PathPolicy } from '@/services/obsidian/path-policy.js';
 const config = getServerConfig();
 const policy = new PathPolicy(config);
 
+/**
+ * Build the server-level `instructions` string sent on every `initialize`.
+ * Provides baseline orientation about the server and then layers in
+ * deployment-specific lines (read-only mode, scoped paths, command-palette
+ * toggle) when those flags are active.
+ */
+function buildInstructions(): string {
+  const sections: string[] = [
+    'Obsidian vault MCP server backed by the Local REST API plugin. Use `obsidian_*` tools to search, read, and edit vault notes. Notes are addressed by vault-relative path including the file extension (e.g. `Folder/Note.md`). Tags support hierarchical `parent/child` notation; counts roll up to parents.',
+  ];
+  if (config.readOnly) {
+    sections.push(
+      'Read-only mode is active (OBSIDIAN_READ_ONLY=true): every write tool rejects every path with `path_forbidden` / `read_only_mode`.',
+    );
+  } else if (!policy.isUnrestricted) {
+    const { readPaths, writePaths } = policy.describe();
+    const render = (scope: readonly string[] | string): string =>
+      typeof scope === 'string' ? scope : scope.map((p) => `'${p}'`).join(', ');
+    sections.push(
+      `Vault path policy is enforced. Readable: ${render(readPaths)}. Writable: ${render(writePaths)}. Paths outside scope reject with \`path_forbidden\` — error data carries the active scope so you can self-correct.`,
+    );
+  }
+  if (config.enableCommands && !config.readOnly) {
+    sections.push(
+      'Command-palette tools (`obsidian_list_commands`, `obsidian_execute_command`) are enabled and can fire any Obsidian command. Commands are opaque and may be destructive — prefer dedicated tools when one fits.',
+    );
+  }
+  return sections.join('\n\n');
+}
+
 const writeTools = config.readOnly
   ? writeToolDefinitions.map((def) =>
       disabledTool(def, {
@@ -51,6 +81,7 @@ const { services } = await createApp({
   tools,
   resources: allResourceDefinitions,
   prompts: allPromptDefinitions,
+  instructions: buildInstructions(),
   setup() {
     initObsidianService(config);
   },

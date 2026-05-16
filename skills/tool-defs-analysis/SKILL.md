@@ -1,10 +1,10 @@
 ---
 name: tool-defs-analysis
 description: >
-  Read-only audit of MCP definition language across an existing surface — tools, resources, prompts. Walks every definition file and checks 10 categories the LLM reads to decide whether and how to call: voice & tense, internal leaks, audience leaks, defaults, recovery hints, output descriptions, cross-references, sparsity, examples, structure. Produces grouped findings with file:line citations and a numbered options list. Use during polish, after a refactor, or before a release. Complements `field-test` (behavior testing) and `security-pass` (security audit).
+  Read-only audit of MCP definition language across an existing surface — tools, resources, prompts. Walks every definition file and checks 12 categories the LLM reads to decide whether and how to call: voice & tense, internal leaks, audience leaks, defaults, recovery hints, output descriptions, cross-references, sparsity, examples, structure, mutator observability, unit-bearing numeric names. Produces grouped findings with file:line citations and a numbered options list. Use during polish, after a refactor, or before a release. Complements `field-test` (behavior testing) and `security-pass` (security audit).
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: audit
 ---
@@ -57,7 +57,7 @@ The `*tool.ts` / `*resource.ts` patterns also catch `*.app-tool.ts` / `*.app-res
 
 Use `TaskCreate` — one task per file. Mark each complete after its findings are captured.
 
-### 2. Walk the 10 categories per file
+### 2. Walk the 12 categories per file
 
 Read each definition file in full. Apply every category — most files trip more than one. Capture each hit with `file:line`, the offending excerpt, and a one-line fix.
 
@@ -158,6 +158,22 @@ Prior art: #74. Field-test catches this in its leak audit; this skill is the mor
 **Smell:** blank lines (`\n\n`) inside a description string, `- bullet` lines, `## Header` lines, "Operations:\n- foo: …" duplicating an enum's `.describe()` text.
 
 Prior art: #33.
+
+#### 11. Mutator observability
+
+**Look in:** tool definitions without `annotations.readOnlyHint: true` (writes/updates/deletes/appends/patches).
+
+**Check:** `output` carries a state-change discriminator (`created`, `updated`, `mutated`, `unchanged`) or before/after observable state the agent can use to confirm intent-effect match. The server reports what it observed; the agent decides whether it matches what it meant.
+
+**Smell:** mutator output is `{ path, ok }` or `{ success: true }` — no pre/post state, no discriminator. Server-side defensive throws on synthetic deltas (`file shrunk`, `count decreased`) the server can't authoritatively classify as bugs.
+
+#### 12. Unit-bearing numeric names
+
+**Look in:** every `z.number()` field in `output` schemas.
+
+**Check:** the field name carries a unit when not pinned by context — `sizeInBytes`, `durationInMs`, `priceInCents`, `latencyInMs`. The `.describe()` drops in summarization or gets truncated; the field name persists into the JSON the agent reads.
+
+**Smell:** `size`, `duration`, `price`, `latency` — bare names that force the agent to guess units or rely on description text. Exempt: `index`, `position`, `totalCount`, `itemCount` (dimensionless).
 
 ### 3. Report
 

@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.8"
+  version: "2.9"
   audience: external
   type: reference
 ---
@@ -293,6 +293,21 @@ format: (result) => {
 },
 ```
 
+### Mutator response design
+
+Mutators (write/update/delete/append/patch verbs, or `destructiveHint: true`) surface raw pre- and post-mutation observable state — not a synthetic verdict. The server can detect anomalies but can't classify them as problems; only the agent knows whether `file shrunk` is intentional truncation or a bug.
+
+```typescript
+output: z.object({
+  path: z.string().describe('Resolved target path.'),
+  created: z.boolean().describe('True when the operation created a new target.'),
+  previousSizeInBytes: z.number().describe('Byte size before the mutation. Zero when created is true.'),
+  currentSizeInBytes: z.number().describe('Byte size after the mutation. Equals previous when no-op.'),
+}),
+```
+
+The agent reads `created: true, previousSizeInBytes: 0, currentSizeInBytes: 68` and knows: brand new target, the full file content is the body. If that matches intent, fine; if not (typo path, uninitialized periodic note), the agent self-corrects without re-fetching. Anti-pattern: server-side `>=` integrity throws on mutators — the server can't distinguish intentional shrink from bug, so it throws on every shrink, including the deliberate ones.
+
 ### Sparse upstream data must stay honest
 
 When tool output comes from a third-party API, don't overstate certainty. Upstream systems often omit fields entirely; the tool schema and `format()` should preserve that uncertainty instead of collapsing it into fake `false`, `0`, or empty-string facts.
@@ -514,6 +529,7 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 
 - [ ] File created at `src/mcp-server/tools/definitions/{{tool-name}}.tool.ts`
 - [ ] All Zod schema fields have `.describe()` annotations
+- [ ] Numeric `output` fields carry units in the field name (`sizeInBytes`, `durationInMs`, `priceInCents`, `latencyInMs`) — `.describe()` may be summarized away or truncated, but the field name persists into the JSON the agent reads. Exempt: dimensionless counts (`totalCount`, `itemCount`), indices (`index`, `position`)
 - [ ] Schemas use only JSON-Schema-serializable types (no `z.custom()`, `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()`)
 - [ ] JSDoc `@fileoverview` and `@module` header present
 - [ ] Optional nested objects guarded for empty inner values from form-based clients (check `?.field` truthiness, not just object presence)

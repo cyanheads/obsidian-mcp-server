@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.1.10](changelog/3.1.x/3.1.10.md) — 2026-05-16
+
+Server-level `instructions` on `initialize` surfaces deployment-specific orientation (path policy, read-only mode, command-palette toggle) to spec-compliant clients. Framework bump to `@cyanheads/mcp-ts-core ^0.9.1`.
+
 ## [3.1.9](changelog/3.1.x/3.1.9.md) — 2026-05-11
 
 Section extractor and outgoing-link parser respect fenced code blocks and inline code — markdown-about-markdown notes stop yielding false-positive headings, block refs, and links. Adds `ambiguous_path` to the typed-error contract.

@@ -4,7 +4,7 @@
  *
  * Source of truth: `changelog/<major.minor>.x/<version>.md` — each file opens with
  * YAML frontmatter declaring:
- *   • summary (required)  — ≤250-char headline, no markdown, one line
+ *   • summary (required)  — ≤350-char headline, no markdown, one line
  *   • breaking (optional) — `true` flags releases with breaking changes
  *   • security (optional) — `true` flags releases with security fixes
  *
@@ -24,7 +24,7 @@
  *   • --check   → exit 1 if CHANGELOG.md differs from what would be generated
  *
  * Missing `summary`: warning (not failure) — the entry renders header-only.
- * Summary > 250 chars, or malformed `breaking` / `security`: hard error.
+ * Summary > 350 chars, or malformed `breaking` / `security`: hard error.
  *
  * @module scripts/build-changelog
  */
@@ -37,7 +37,7 @@ const CHANGELOG_DIR = resolve('changelog');
 const CHANGELOG_PATH = resolve('CHANGELOG.md');
 const EXCLUDED_FILES = new Set(['template.md', 'README.md']);
 const SERIES_PATTERN = /^\d+\.\d+\.x$/;
-const SUMMARY_MAX_LENGTH = 250;
+const SUMMARY_MAX_LENGTH = 350;
 
 const HEADER = `# Changelog
 
