@@ -143,9 +143,14 @@ export class PathPolicy {
 function normalize(path: string): string {
   /**
    * Match the parser's normalization rules so the candidate compares apples to
-   * apples against the configured prefixes.
+   * apples against the configured prefixes. Backslashes collapse to forward
+   * slashes so Windows-style paths (`Public\sub\note.md`) match prefixes
+   * configured with `/` separators.
    */
-  return path.replace(/^[\\/]+|[\\/]+$/g, '').toLowerCase();
+  return path
+    .replace(/\\/g, '/')
+    .replace(/^\/+|\/+$/g, '')
+    .toLowerCase();
 }
 
 function matchesAny(candidate: string, prefixes: readonly string[]): boolean {

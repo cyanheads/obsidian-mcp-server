@@ -30,7 +30,7 @@ const policy = new PathPolicy(config);
  */
 function buildInstructions(): string {
   const sections: string[] = [
-    'Obsidian vault MCP server backed by the Local REST API plugin. Use `obsidian_*` tools to search, read, and edit vault notes. Notes are addressed by vault-relative path including the file extension (e.g. `Folder/Note.md`). Tags support hierarchical `parent/child` notation; counts roll up to parents.',
+    'Use the `obsidian_*` tools to access the Obsidian vault via the Local REST API plugin: search, read, write, and patch notes, including targeted edits to headings, blocks, and YAML frontmatter. Notes are addressed by vault-relative path including the file extension (e.g. `Folder/Note.md`); tags support hierarchical `parent/child` notation, and counts roll up to parents.',
   ];
   if (config.readOnly) {
     sections.push(

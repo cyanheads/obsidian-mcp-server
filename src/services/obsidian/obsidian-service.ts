@@ -628,15 +628,29 @@ export class ObsidianService {
 }
 
 /**
- * Encode a vault-relative path for the URL. Each segment is URL-encoded so
- * folder slashes are preserved while spaces and unicode are escaped.
+ * Encode a vault-relative path for the URL. Splits on `/` and `\` (so
+ * Windows-style separators are honored), URL-encodes each segment, and
+ * rejoins with `/` since the Local REST API plugin expects forward slashes.
+ *
+ * Rejects `.` and `..` segments here rather than relying on the upstream Local
+ * REST API plugin to normalize them — `PathPolicy` short-circuits to "allow"
+ * when `OBSIDIAN_READ_PATHS` is unset, and `..` is unreserved per RFC 3986 so
+ * `encodeURIComponent` leaves it intact. This is the single chokepoint before
+ * URL construction, so guard vault escape here. Backslash is treated as a
+ * separator so `..\..\etc` traverses identically to `../../etc` and can't
+ * sneak past as a single opaque segment.
  */
 export function encodeVaultPath(path: string): string {
-  return path
-    .split('/')
-    .filter((seg) => seg.length > 0)
-    .map((seg) => encodeURIComponent(seg))
-    .join('/');
+  const segments = path.split(/[/\\]/).filter((seg) => seg.length > 0);
+  for (const seg of segments) {
+    if (seg === '.' || seg === '..') {
+      throw validationError(`Path traversal not allowed: '${path}'`, {
+        path,
+        reason: 'path_traversal',
+      });
+    }
+  }
+  return segments.map((seg) => encodeURIComponent(seg)).join('/');
 }
 
 /**

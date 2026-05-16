@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.1.11](changelog/3.1.x/3.1.11.md) — 2026-05-16 · 🛡️ Security
+
+Path-traversal hardening on the URL boundary + Windows-style separator parity across `PathPolicy` and `envPathList`. `obsidian_list_tags` gains an optional `nameRegex` filter with ReDoS guards.
+
 ## [3.1.10](changelog/3.1.x/3.1.10.md) — 2026-05-16
 
 Server-level `instructions` on `initialize` surfaces deployment-specific orientation (path policy, read-only mode, command-palette toggle) to spec-compliant clients. Framework bump to `@cyanheads/mcp-ts-core ^0.9.1`.

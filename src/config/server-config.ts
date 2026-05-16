@@ -22,7 +22,13 @@ const envBoolean = z.preprocess((val) => {
  * - `,` / `,,,` (separators only, no path content) → throw ZodError → ConfigurationError
  * - mixed empties (`a,,b`) → drop empties → `['a', 'b']`
  * - absolute path / `..` traversal → throw
- * - valid: lower-case + trim trailing slash + dedupe (preserves first occurrence order)
+ * - valid: `\` → `/` + lower-case + trim trailing slash + dedupe (preserves first occurrence order)
+ *
+ * Separator normalization is required for parity with `PathPolicy.normalize()`,
+ * which also collapses `\` → `/` on candidate paths. Without matching
+ * normalization here, a prefix like `Foo\Bar` would never match a candidate
+ * `Foo\Bar\note.md` (candidate becomes `foo/bar/note.md`, prefix stays as
+ * `foo\bar`).
  */
 const envPathList = z
   .preprocess(
@@ -67,7 +73,7 @@ const envPathList = z
             });
             return z.NEVER;
           }
-          const normalized = raw.toLowerCase().replace(/[\\/]+$/, '');
+          const normalized = raw.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '');
           if (normalized.length === 0) continue;
           if (seen.has(normalized)) continue;
           seen.add(normalized);

@@ -475,13 +475,273 @@ describe('ObsidianService.tryGetSize / getSize', () => {
   });
 });
 
-describe('encodeVaultPath', () => {
-  it('preserves slashes between segments and encodes per-segment', () => {
-    expect(encodeVaultPath('Projects/My Note.md')).toBe('Projects/My%20Note.md');
+describe('ObsidianService path-traversal enforcement', () => {
+  /**
+   * Default test config leaves `readPaths` / `writePaths` unset, so `PathPolicy`
+   * short-circuits and `encodeVaultPath` is the only thing standing between a
+   * caller-supplied path and the upstream URL. These tests assert traversal is
+   * rejected before any HTTP request is issued — no `pool.intercept` calls are
+   * set up, so an escaped fetch would surface "No mock intercept" (a generic
+   * Error classified differently than `ValidationError`) and fail the
+   * assertion below.
+   *
+   * Cross-platform: forward-slash (POSIX, HTTP-native) and backslash (Windows,
+   * LLM-guess) traversal must both be blocked at every service entry point.
+   */
+  const FS_TRAVERSAL = '../etc/passwd';
+  const WIN_TRAVERSAL = '..\\..\\Windows\\System32\\config\\SAM';
+
+  describe.each([
+    ['POSIX `../`', FS_TRAVERSAL, '../scratch'],
+    ['Windows `..\\`', WIN_TRAVERSAL, '..\\scratch'],
+    ['mixed separators', 'foo/..\\bar', 'foo\\../bar'],
+  ])('via %s traversal', (_label, target, dir) => {
+    it.each([
+      ['getNoteContent', () => service.getNoteContent(ctx, { type: 'path', path: target })],
+      ['getNoteJson', () => service.getNoteJson(ctx, { type: 'path', path: target })],
+      ['getDocumentMap', () => service.getDocumentMap(ctx, { type: 'path', path: target })],
+      ['writeNote', () => service.writeNote(ctx, { type: 'path', path: target }, 'body')],
+      ['appendToNote', () => service.appendToNote(ctx, { type: 'path', path: target }, 'body')],
+      ['deleteNote', () => service.deleteNote(ctx, { type: 'path', path: target })],
+      ['tryGetSize', () => service.tryGetSize(ctx, { type: 'path', path: target })],
+      ['getSize', () => service.getSize(ctx, { type: 'path', path: target })],
+      ['listFiles', () => service.listFiles(ctx, dir)],
+      ['openInUi', () => service.openInUi(ctx, target)],
+    ])('rejects %s with ValidationError before fetching', async (_method, call) => {
+      await expect(call()).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'path_traversal' },
+      });
+    });
   });
 
-  it('strips empty leading/trailing slashes', () => {
-    expect(encodeVaultPath('/foo/')).toBe('foo');
+  it('rejects patchNote (header-encoded target) traversal — POSIX', async () => {
+    await expect(
+      service.patchNote(ctx, { type: 'path', path: FS_TRAVERSAL }, 'body', {
+        operation: 'append',
+        targetType: 'heading',
+        target: 'H',
+      }),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+  });
+
+  it('rejects patchNote traversal — Windows', async () => {
+    await expect(
+      service.patchNote(ctx, { type: 'path', path: WIN_TRAVERSAL }, 'body', {
+        operation: 'append',
+        targetType: 'heading',
+        target: 'H',
+      }),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+  });
+
+  describe('legitimate cross-platform paths still flow through to fetch', () => {
+    /**
+     * Sanity check the inverse: encoder doesn't false-positive on legal paths.
+     * These exercise the full pipeline end-to-end with an interceptor.
+     */
+    it('Unix-style dotfile path reaches upstream', async () => {
+      pool.intercept({ path: '/vault/.obsidian/config.json', method: 'GET' }).reply(200, '# hi');
+      await expect(
+        service.getNoteContent(ctx, { type: 'path', path: '.obsidian/config.json' }),
+      ).resolves.toBe('# hi');
+    });
+
+    it('Windows-style separator normalizes to forward-slash URL', async () => {
+      pool.intercept({ path: '/vault/Projects/My%20Note.md', method: 'GET' }).reply(200, '# hi');
+      await expect(
+        service.getNoteContent(ctx, { type: 'path', path: 'Projects\\My Note.md' }),
+      ).resolves.toBe('# hi');
+    });
+
+    it('unicode filename reaches upstream URL-encoded', async () => {
+      pool
+        .intercept({ path: '/vault/notes/%F0%9F%9A%80.md', method: 'GET' })
+        .reply(200, '# rocket');
+      await expect(
+        service.getNoteContent(ctx, { type: 'path', path: 'notes/🚀.md' }),
+      ).resolves.toBe('# rocket');
+    });
+  });
+});
+
+describe('encodeVaultPath', () => {
+  describe('forward-slash paths (POSIX, HTTP-native)', () => {
+    it('preserves slashes between segments and encodes per-segment', () => {
+      expect(encodeVaultPath('Projects/My Note.md')).toBe('Projects/My%20Note.md');
+    });
+
+    it('strips empty leading/trailing slashes', () => {
+      expect(encodeVaultPath('/foo/')).toBe('foo');
+    });
+
+    it('encodes unicode (Latin, Greek, CJK, emoji) per segment', () => {
+      expect(encodeVaultPath('café/π.md')).toBe('caf%C3%A9/%CF%80.md');
+      expect(encodeVaultPath('日本語/メモ.md')).toBe(
+        '%E6%97%A5%E6%9C%AC%E8%AA%9E/%E3%83%A1%E3%83%A2.md',
+      );
+      expect(encodeVaultPath('notes/🚀.md')).toBe('notes/%F0%9F%9A%80.md');
+    });
+
+    it('encodes URL-reserved characters per segment', () => {
+      expect(encodeVaultPath('a/b c/d&e.md')).toBe('a/b%20c/d%26e.md');
+      expect(encodeVaultPath('q?/r#.md')).toBe('q%3F/r%23.md');
+      expect(encodeVaultPath('a+b/c=d.md')).toBe('a%2Bb/c%3Dd.md');
+    });
+
+    it('does not decode pre-encoded segments (preserves caller intent)', () => {
+      // Re-encoding `%` to `%25` is the safe behavior — never decode user
+      // input mid-flight.
+      expect(encodeVaultPath('Pre%20Encoded/note.md')).toBe('Pre%2520Encoded/note.md');
+    });
+
+    it('collapses consecutive slashes', () => {
+      expect(encodeVaultPath('foo//bar///baz.md')).toBe('foo/bar/baz.md');
+    });
+  });
+
+  describe('backslash paths (Windows, mixed)', () => {
+    /**
+     * Windows users (and LLMs guessing at filesystem conventions) may send
+     * paths with `\` separators. The encoder normalizes to `/` so the
+     * upstream URL is well-formed and traversal segments are detected
+     * regardless of which separator the caller used.
+     */
+    it('splits on backslash and rejoins with forward slash', () => {
+      expect(encodeVaultPath('Projects\\My Note.md')).toBe('Projects/My%20Note.md');
+    });
+
+    it('handles mixed separators', () => {
+      expect(encodeVaultPath('a/b\\c/d\\e.md')).toBe('a/b/c/d/e.md');
+    });
+
+    it('strips empty leading/trailing backslashes', () => {
+      expect(encodeVaultPath('\\foo\\')).toBe('foo');
+      expect(encodeVaultPath('\\\\foo\\\\')).toBe('foo');
+    });
+
+    it('does not split on URL-encoded backslash (%5C is a literal byte)', () => {
+      // %5C arrives as the 3-char string '%5C' (not a literal backslash),
+      // so split sees it as part of the segment.
+      expect(encodeVaultPath('foo%5Cbar.md')).toBe('foo%255Cbar.md');
+    });
+  });
+
+  describe('path-traversal guard', () => {
+    /**
+     * `..` is unreserved per RFC 3986 so encodeURIComponent leaves it intact,
+     * and PathPolicy short-circuits to allow when OBSIDIAN_READ_PATHS is
+     * unset. Without this guard, traversal would reach the upstream URL.
+     */
+    it.each([
+      ['leading ..', '../etc/passwd'],
+      ['leading ./', './foo.md'],
+      ['middle ..', 'foo/../bar.md'],
+      ['middle .', 'foo/./bar.md'],
+      ['trailing ..', 'foo/..'],
+      ['trailing .', 'foo/.'],
+      ['only ..', '..'],
+      ['only .', '.'],
+      ['only /../', '/../'],
+      ['multiple ..', '../../etc/passwd'],
+      ['leading ..\\ (Windows)', '..\\etc\\passwd'],
+      ['leading .\\ (Windows)', '.\\foo.md'],
+      ['middle ..\\ (Windows)', 'foo\\..\\bar.md'],
+      ['middle .\\ (Windows)', 'foo\\.\\bar.md'],
+      ['trailing \\..', 'foo\\..'],
+      ['multiple ..\\ (Windows)', '..\\..\\Windows\\System32\\config\\SAM'],
+      ['mixed separators with .. (forward-then-back)', 'foo/..\\bar'],
+      ['mixed separators with .. (back-then-forward)', '..\\../etc'],
+    ])('rejects %s', (_label, input) => {
+      expect(() => encodeVaultPath(input)).toThrowError(
+        expect.objectContaining({ code: JsonRpcErrorCode.ValidationError }),
+      );
+    });
+
+    it('attaches path + reason to error data', () => {
+      try {
+        encodeVaultPath('../etc/passwd');
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { path: '../etc/passwd', reason: 'path_traversal' },
+        });
+      }
+    });
+
+    it('preserves the original path string (with backslashes) in error data', () => {
+      try {
+        encodeVaultPath('..\\etc\\passwd');
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toMatchObject({
+          data: { path: '..\\etc\\passwd', reason: 'path_traversal' },
+        });
+      }
+    });
+  });
+
+  describe('legitimate dotted filenames (allowed across platforms)', () => {
+    /**
+     * Filesystems on every platform reserve `.` and `..` as the only forbidden
+     * filename strings. Anything else containing dots is a legal filename and
+     * must pass through unchanged.
+     */
+    it.each([
+      ['dotfile (Unix hidden)', '.gitignore', '.gitignore'],
+      ['hidden folder + file', '.obsidian/config.json', '.obsidian/config.json'],
+      ['double-dot prefix', '..hidden.md', '..hidden.md'],
+      ['quadruple dot file', '....md', '....md'],
+      ['embedded double-dot', 'foo..bar.md', 'foo..bar.md'],
+      ['three-dot segment (not parent-of-parent)', 'a/...b/c.md', 'a/...b/c.md'],
+      ['trailing dots in filename', 'note...md', 'note...md'],
+      ['dot in folder name', 'v1.2/notes.md', 'v1.2/notes.md'],
+      ['standard markdown', 'note.md', 'note.md'],
+    ])('allows %s', (_label, input, expected) => {
+      expect(encodeVaultPath(input)).toBe(expected);
+    });
+  });
+
+  describe('encoded-traversal vectors (already safe — documented)', () => {
+    it('does not decode percent-encoded `..` (re-encodes the %)', () => {
+      // %2e%2e is percent-encoded '..' — split sees '%2e%2e' (not '..'),
+      // so it's not flagged; encodeURIComponent re-encodes '%' to '%25',
+      // producing '%252e%252e' which the upstream decodes once back to
+      // '%2e%2e' (a literal filename, not parent-dir).
+      expect(encodeVaultPath('%2e%2e/foo')).toBe('%252e%252e/foo');
+    });
+
+    it('does not decode mixed-case percent-encoded `..`', () => {
+      expect(encodeVaultPath('%2E%2E/foo')).toBe('%252E%252E/foo');
+    });
+
+    it('does not decode percent-encoded path separator', () => {
+      // %2f decoded would be '/'; we don't decode, so it stays as part of a
+      // segment and gets re-encoded to %252f.
+      expect(encodeVaultPath('foo%2f..%2fbar')).toBe('foo%252f..%252fbar');
+    });
+  });
+
+  describe('platform-specific edge cases (pass-through, not our concern)', () => {
+    it('does not block three-dot segment (modern Win + Node treat as literal)', () => {
+      expect(encodeVaultPath('...')).toBe('...');
+      expect(encodeVaultPath('foo/.../bar')).toBe('foo/.../bar');
+    });
+
+    it('does not block Windows reserved names (upstream concern, not traversal)', () => {
+      expect(encodeVaultPath('CON.md')).toBe('CON.md');
+      expect(encodeVaultPath('PRN/foo.md')).toBe('PRN/foo.md');
+    });
+
+    it('does not block trailing-dot/space filenames (Windows quirk)', () => {
+      expect(encodeVaultPath('note. ')).toBe('note.%20');
+    });
+
+    it('encodes null byte and control chars safely', () => {
+      expect(encodeVaultPath('foo\x00bar')).toBe('foo%00bar');
+      expect(encodeVaultPath('foo\nbar')).toBe('foo%0Abar');
+    });
   });
 });
 

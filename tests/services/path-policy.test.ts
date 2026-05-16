@@ -7,8 +7,8 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { describe, expect, it } from 'vitest';
-import type { ServerConfig } from '@/config/server-config.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getServerConfig, resetServerConfig, type ServerConfig } from '@/config/server-config.js';
 import { PathPolicy } from '@/services/obsidian/path-policy.js';
 
 function cfg(overrides: Partial<ServerConfig> = {}): ServerConfig {
@@ -160,6 +160,114 @@ describe('PathPolicy normalization (matches parser rules)', () => {
     const p = new PathPolicy(cfg({ readPaths: ['projects'] }));
     expect(p.isReadable('projects')).toBe(true);
     expect(p.isReadable('projects/sub/foo.md')).toBe(true);
+  });
+});
+
+describe('PathPolicy cross-platform separators', () => {
+  /**
+   * Configured prefixes always arrive forward-slash-normalized from the
+   * config parser; user-supplied paths may use either `/` or `\`. The policy
+   * must treat them identically — otherwise Windows-style traversal like
+   * `..\foo` would bypass the prefix check by failing to match anything,
+   * and legitimate Windows paths like `Public\sub\note.md` would falsely
+   * deny.
+   */
+  it('matches Windows-style paths against forward-slash prefixes (read)', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['public'] }));
+    expect(p.isReadable('public\\foo.md')).toBe(true);
+    expect(p.isReadable('Public\\Sub\\Foo.md')).toBe(true);
+    expect(p.isReadable('secret\\foo.md')).toBe(false);
+  });
+
+  it('matches Windows-style paths against forward-slash prefixes (write)', () => {
+    const p = new PathPolicy(cfg({ writePaths: ['projects'] }));
+    expect(p.isWritable('projects\\note.md')).toBe(true);
+    expect(p.isWritable('public\\note.md')).toBe(false);
+  });
+
+  it('matches mixed-separator paths', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['public'] }));
+    expect(p.isReadable('public/sub\\foo.md')).toBe(true);
+    expect(p.isReadable('public\\sub/foo.md')).toBe(true);
+  });
+
+  it('strips leading/trailing backslashes when normalizing', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['public'] }));
+    expect(p.isReadable('\\public\\foo.md\\')).toBe(true);
+    expect(p.isReadable('\\\\public\\foo.md')).toBe(true);
+  });
+
+  it('filterReadable drops Windows-style hits outside scope', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['public'] }));
+    const out = p.filterReadable([
+      { filename: 'public\\a.md' },
+      { filename: 'secret\\b.md' },
+      { filename: 'public/sub\\c.md' },
+    ]);
+    expect(out.map((h) => h.filename)).toEqual(['public\\a.md', 'public/sub\\c.md']);
+  });
+
+  it('out-of-scope Windows path denial echoes the original separator in error data', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['public'] }));
+    try {
+      p.assertReadable('secret\\foo.md');
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      const err = e as McpError;
+      expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
+      // The wire-data path preserves the caller's original spelling so the
+      // operator sees what they sent — normalization is only for matching.
+      expect(err.data?.path).toBe('secret\\foo.md');
+    }
+  });
+});
+
+describe('PathPolicy ↔ config-parser separator integration', () => {
+  /**
+   * End-to-end demonstration of the parser/policy mismatch: an operator who
+   * configures `OBSIDIAN_READ_PATHS` with backslashes today gets a policy that
+   * silently rejects every candidate, because the parser preserves the
+   * backslash in the stored prefix while the policy's `normalize()` rewrites
+   * the candidate's backslashes to forward slashes. After the fix, the parser
+   * should also normalize separators so the two layers agree.
+   */
+  const ENV_KEYS = [
+    'OBSIDIAN_API_KEY',
+    'OBSIDIAN_READ_PATHS',
+    'OBSIDIAN_WRITE_PATHS',
+    'OBSIDIAN_READ_ONLY',
+  ] as const;
+
+  beforeEach(() => {
+    resetServerConfig();
+    for (const k of ENV_KEYS) vi.stubEnv(k, undefined as unknown as string);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetServerConfig();
+  });
+
+  it('backslash-configured prefix matches a forward-slash candidate', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', 'Foo\\Bar');
+    const policy = new PathPolicy(getServerConfig());
+    expect(policy.isReadable('foo/bar/note.md')).toBe(true);
+  });
+
+  it('backslash-configured prefix matches a backslash candidate', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', 'Foo\\Bar');
+    const policy = new PathPolicy(getServerConfig());
+    expect(policy.isReadable('Foo\\Bar\\note.md')).toBe(true);
+  });
+
+  it('backslash-configured write prefix matches both separator styles', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_WRITE_PATHS', 'Projects\\Sub');
+    const policy = new PathPolicy(getServerConfig());
+    expect(policy.isWritable('projects/sub/note.md')).toBe(true);
+    expect(policy.isWritable('Projects\\Sub\\note.md')).toBe(true);
   });
 });
 

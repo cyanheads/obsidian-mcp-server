@@ -183,3 +183,65 @@ describe('unrestricted policy — no extra calls or behavior changes', () => {
     expect(upstreamHits).toBe(1);
   });
 });
+
+describe('Windows-style paths integrate end-to-end', () => {
+  /**
+   * A user (or LLM) sending `Public\sub\note.md` should be treated identically
+   * to `public/sub/note.md`: the policy matches against the configured prefix,
+   * and the encoder produces a forward-slash URL.
+   */
+  it('Windows separators match forward-slash prefix and reach forward-slash URL', async () => {
+    const replies = new Map<string, () => Response>([
+      [
+        '/vault/Public/sub/note.md',
+        () => new Response('hello', { status: 200, headers: { 'content-type': 'text/markdown' } }),
+      ],
+    ]);
+    const svc = buildService({ readPaths: ['public'] }, replies);
+    const out = await svc.getNoteContent(ctx, { type: 'path', path: 'Public\\sub\\note.md' });
+    expect(out).toBe('hello');
+    expect(upstreamHits).toBe(1);
+  });
+
+  it('blocks Windows-style traversal in restricted-read mode (policy catches it first)', async () => {
+    const svc = buildService({ readPaths: ['public'] });
+    await expect(
+      svc.getNoteContent(ctx, { type: 'path', path: '..\\secret\\foo.md' }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+      data: { reason: 'path_forbidden' },
+    });
+    expect(upstreamHits).toBe(0);
+  });
+
+  it('blocks Windows-style traversal in unrestricted mode (encoder catches it)', async () => {
+    const svc = buildService({});
+    await expect(
+      svc.getNoteContent(ctx, { type: 'path', path: '..\\..\\Windows\\System32\\config\\SAM' }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_traversal' },
+    });
+    expect(upstreamHits).toBe(0);
+  });
+
+  it('blocks Windows-style write traversal in unrestricted mode', async () => {
+    const svc = buildService({});
+    await expect(
+      svc.writeNote(ctx, { type: 'path', path: '..\\..\\evil.md' }, 'pwned'),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_traversal' },
+    });
+    expect(upstreamHits).toBe(0);
+  });
+
+  it('Windows-style write path matches write prefix and reaches upstream', async () => {
+    const replies = new Map<string, () => Response>([
+      ['/vault/projects/note.md', () => new Response('', { status: 200 })],
+    ]);
+    const svc = buildService({ writePaths: ['projects'] }, replies);
+    await svc.writeNote(ctx, { type: 'path', path: 'projects\\note.md' }, 'x');
+    expect(upstreamHits).toBe(1);
+  });
+});

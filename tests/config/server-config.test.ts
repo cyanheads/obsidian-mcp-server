@@ -146,6 +146,37 @@ describe('OBSIDIAN_READ_PATHS / OBSIDIAN_WRITE_PATHS parsing', () => {
   });
 });
 
+describe('OBSIDIAN_READ_PATHS / OBSIDIAN_WRITE_PATHS — separator parity with PathPolicy', () => {
+  /**
+   * Regression: PathPolicy.normalize() collapses `\` → `/` on candidate paths,
+   * but the parser here only strips trailing separators — it doesn't normalize
+   * mid-string backslashes. An operator who configures
+   * `OBSIDIAN_READ_PATHS=Foo\Bar` ends up with a stored prefix of `foo\bar`
+   * that the policy can never match (candidate normalizes to `foo/bar/...`).
+   *
+   * Both layers must agree on the canonical separator. Fix is to normalize
+   * `\` → `/` in the parser too, alongside the existing case + trailing-slash
+   * normalization.
+   */
+  it('normalizes mid-string backslashes in prefixes to forward slashes', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', 'Foo\\Bar');
+    expect(getServerConfig().readPaths).toEqual(['foo/bar']);
+  });
+
+  it('normalizes mixed separators in prefixes', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_WRITE_PATHS', 'projects\\sub/dir');
+    expect(getServerConfig().writePaths).toEqual(['projects/sub/dir']);
+  });
+
+  it('dedupes prefixes that differ only in separator after normalization', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', 'foo/bar,foo\\bar,FOO\\BAR');
+    expect(getServerConfig().readPaths).toEqual(['foo/bar']);
+  });
+});
+
 describe('OBSIDIAN_READ_ONLY', () => {
   it('coerces "true"/"1" to true', () => {
     vi.stubEnv('OBSIDIAN_API_KEY', 'k');
