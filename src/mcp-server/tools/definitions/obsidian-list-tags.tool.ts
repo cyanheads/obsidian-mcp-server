@@ -9,34 +9,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
-
-/** Maximum allowed pattern length — bounds compile cost and AST surface. */
-const NAME_REGEX_MAX_LENGTH = 256;
-
-/**
- * Detects the canonical catastrophic-backtracking shape: a `+`/`*`/`{N,}`
- * quantifier immediately following a `)` whose interior already ends in a
- * `+`/`*`/`}` quantifier (e.g. `(a+)+`, `(.*)*`, `(a{2,})*`). Not exhaustive —
- * patterns with overlapping alternation like `(a|a)*` still slip through —
- * but eliminates the textbook ReDoS vector at zero runtime cost. JavaScript's
- * RegExp engine has no native execution timeout, so this static check is the
- * only defense short of running matches in a worker.
- */
-const NESTED_QUANTIFIER = /[+*}]\)[*+{]/;
-
-function nameRegexSafetyIssue(pattern: string): string | undefined {
-  if (pattern.length > NAME_REGEX_MAX_LENGTH) {
-    return `pattern exceeds ${NAME_REGEX_MAX_LENGTH}-character limit`;
-  }
-  if (NESTED_QUANTIFIER.test(pattern)) {
-    return 'pattern contains nested quantifiers (catastrophic-backtracking risk)';
-  }
-  return;
-}
+import { nameRegexSafetyIssue } from './_shared/regex-safety.js';
 
 export const obsidianListTags = tool('obsidian_list_tags', {
   description:
-    'List every tag found across the vault, with usage counts. Includes hierarchical parents — `work/tasks` contributes to both `work` and `work/tasks`. Filter to a subset with the optional `nameRegex`. To find notes by tag, use `obsidian_search_notes` in dataview mode (e.g. `TABLE FROM #work`).',
+    'List every tag found across the vault, with usage counts. Includes hierarchical parents — `work/tasks` contributes to both `work` and `work/tasks`. Filter to a subset with the optional `nameRegex`. To find notes by tag, use `obsidian_search_notes` in jsonlogic mode (e.g. `{"in": ["work", {"var": "tags"}]}`).',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     nameRegex: z
