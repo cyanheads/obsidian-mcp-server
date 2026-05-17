@@ -22,14 +22,14 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | Tool Name | Description |
 |:----------|:------------|
 | `obsidian_get_note` | Read a note as raw content, full structured form (content + frontmatter + tags + stat, with optional outgoing links), structural document map, or a single section. |
-| `obsidian_list_notes` | List notes and subdirectories at a vault path with a recursive walk (default depth 2 — structural overview; max 20) bounded by a 1000-entry cap. Optional `extension` and `nameRegex` filters apply across the tree; regex-filtered directories are skipped without recursing into them. Returns flat `entries[]` plus a box-drawing tree in the rendered output; per-directory `truncated: true` flags where the depth limit cut off recursion. |
-| `obsidian_list_tags` | List every tag found across the vault with usage counts, including hierarchical parents. Optional `nameRegex` post-filters the result set (length-capped, nested-quantifier-guarded). |
-| `obsidian_list_commands` | List Obsidian command-palette commands available for execution. **Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`** (paired with `obsidian_execute_command`). |
-| `obsidian_search_notes` | Search the vault by text, JSONLogic, or — when the Omnisearch plugin's HTTP server is reachable at startup — BM25-ranked Omnisearch. Results paginate via opaque cursors (`nextCursor` + `totalCount`); text-mode hits return surrounding context windows (`contextLength`) and clip per-file at `maxMatchesPerHit`. |
+| `obsidian_list_notes` | List notes and subdirectories under a vault path. Recursive walk (default depth 2, max depth 20; 1000-entry cap) with optional `extension` and `nameRegex` filters. |
+| `obsidian_list_tags` | List every tag found across the vault with usage counts, including hierarchical parents. Optional `nameRegex` post-filters the result set. |
+| `obsidian_list_commands` | List Obsidian command-palette commands, optionally filtered by `nameRegex` on display name. **Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`** (paired with `obsidian_execute_command`). |
+| `obsidian_search_notes` | Search the vault by text, JSONLogic, or BM25-ranked Omnisearch (when the plugin is reachable). Results paginate via opaque cursors. |
 | `obsidian_write_note` | Create a note, replace a single section in place, or — with `overwrite: true` — clobber an existing file. Refuses whole-file writes against an existing path by default. |
-| `obsidian_append_to_note` | Append content to a note. Without `section` it creates the file if missing — your content becomes the entire file. With `section`, appends to that heading/block/frontmatter (PATCH; the file must exist). |
+| `obsidian_append_to_note` | Append content to a note. Without `section`, creates the file if missing. With `section`, appends to a specific heading, block, or frontmatter field (file must exist). |
 | `obsidian_patch_note` | Surgical `append` / `prepend` / `replace` against a heading, block reference, or frontmatter field. |
-| `obsidian_replace_in_note` | Body-wide search-replace inside a single note. Literal or regex matching, with `wholeWord`, `flexibleWhitespace`, `caseSensitive`, `replaceAll`, and `$1`/`$&` capture groups. |
+| `obsidian_replace_in_note` | Body-wide search-replace inside a single note. Literal or regex matching with whole-word, whitespace-flexible, and case-sensitivity options; supports capture-group replacement. |
 | `obsidian_manage_frontmatter` | Atomic `get` / `set` / `delete` on a single frontmatter key. |
 | `obsidian_manage_tags` | Add, remove, or list tags — reconciles frontmatter `tags:` and inline `#tag` syntax. |
 | `obsidian_delete_note` | Permanently delete a note. Elicits human confirmation when the client supports it. |
