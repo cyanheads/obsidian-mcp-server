@@ -109,7 +109,7 @@ describe('obsidian_write_note (whole file)', () => {
 });
 
 describe('obsidian_write_note (section)', () => {
-  it('PATCHes with replace + heading delimiter + apply-if-content-preexists', async () => {
+  it('PATCHes with replace + heading delimiter (force-apply: no Reject header)', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
 
@@ -132,9 +132,11 @@ describe('obsidian_write_note (section)', () => {
     expect(seenHeaders.operation ?? seenHeaders.Operation).toBe('replace');
     expect(seenHeaders['target-type'] ?? seenHeaders['Target-Type']).toBe('heading');
     expect(seenHeaders['target-delimiter'] ?? seenHeaders['Target-Delimiter']).toBe('::');
+    // write-note's section replace hardcodes applyIfContentPreexists: true → no Reject header.
+    // (Replace is exempt at the plugin layer anyway; this just keeps intent explicit.)
     expect(
-      seenHeaders['apply-if-content-preexists'] ?? seenHeaders['Apply-If-Content-Preexists'],
-    ).toBe('true');
+      seenHeaders['reject-if-content-preexists'] ?? seenHeaders['Reject-If-Content-Preexists'],
+    ).toBeUndefined();
     expect(out).toEqual({
       path: 'Note.md',
       sectionTargeted: true,

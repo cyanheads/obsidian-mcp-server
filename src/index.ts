@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /**
  * @fileoverview obsidian-mcp-server entry point. Initializes the Obsidian
- * Local REST API service in `setup()` so handlers can reach it via
- * `getObsidianService()`.
+ * Local REST API service at module load so the Omnisearch probe can run
+ * before tools are constructed — `obsidian_search_notes` is built via a
+ * factory that takes Omnisearch reachability as input, so the `omnisearch`
+ * mode appears in the tool schema only when the plugin is actually reachable.
  * @module index
  */
 
@@ -12,21 +14,34 @@ import { getServerConfig } from '@/config/server-config.js';
 import { allPromptDefinitions } from '@/mcp-server/prompts/definitions/index.js';
 import { allResourceDefinitions } from '@/mcp-server/resources/definitions/index.js';
 import {
+  buildSearchNotesTool,
   commandToolDefinitions,
   readToolDefinitions,
   writeToolDefinitions,
 } from '@/mcp-server/tools/definitions/index.js';
-import { initObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { getObsidianService, initObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { PathPolicy } from '@/services/obsidian/path-policy.js';
 
 const config = getServerConfig();
 const policy = new PathPolicy(config);
 
 /**
+ * Init the service at module load (rather than inside `setup()`) so the
+ * Omnisearch probe can run before tool construction. `setup()` runs after
+ * tools are passed into `createApp()`, which is too late to influence the
+ * search-notes schema.
+ */
+initObsidianService(config);
+const obsidian = getObsidianService();
+const omnisearchReachable = await obsidian.probeOmnisearch();
+
+const searchNotesTool = buildSearchNotesTool({ omnisearchReachable });
+
+/**
  * Build the server-level `instructions` string sent on every `initialize`.
  * Provides baseline orientation about the server and then layers in
  * deployment-specific lines (read-only mode, scoped paths, command-palette
- * toggle) when those flags are active.
+ * toggle, Omnisearch availability) when those flags are active.
  */
 function buildInstructions(): string {
   const sections: string[] = [
@@ -47,6 +62,11 @@ function buildInstructions(): string {
   if (config.enableCommands && !config.readOnly) {
     sections.push(
       'Command-palette tools (`obsidian_list_commands`, `obsidian_execute_command`) are enabled and can fire any Obsidian command. Commands are opaque and may be destructive — prefer dedicated tools when one fits.',
+    );
+  }
+  if (omnisearchReachable) {
+    sections.push(
+      '`obsidian_search_notes` includes an `omnisearch` mode: BM25-ranked, typo-tolerant, with PDF/OCR coverage (via the Text Extractor plugin). Results cap at 50 upstream — narrow the query (quoted phrases, `-exclusion`, `path:` / `ext:` filters) to surface more.',
     );
   }
   return sections.join('\n\n');
@@ -75,16 +95,13 @@ const commandTools =
         }),
       );
 
-const tools = [...readToolDefinitions, ...writeTools, ...commandTools];
+const tools = [...readToolDefinitions, searchNotesTool, ...writeTools, ...commandTools];
 
 const { services } = await createApp({
   tools,
   resources: allResourceDefinitions,
   prompts: allPromptDefinitions,
   instructions: buildInstructions(),
-  setup() {
-    initObsidianService(config);
-  },
 });
 
 /**
@@ -98,8 +115,16 @@ const bannerCtx = requestContextService.createRequestContext({
   operation: 'startup',
   ...policy.describe(),
   enableCommands: config.enableCommands && !config.readOnly,
+  omnisearchUrl: obsidian.omnisearchUrl,
+  omnisearchReachable,
 });
 services.logger.info('Path policy', bannerCtx);
+services.logger.info(
+  omnisearchReachable
+    ? `Omnisearch reachable at ${obsidian.omnisearchUrl} — \`omnisearch\` mode enabled on \`obsidian_search_notes\`.`
+    : `Omnisearch not reachable at ${obsidian.omnisearchUrl} — \`omnisearch\` mode omitted from \`obsidian_search_notes\`. Set OBSIDIAN_OMNISEARCH_URL or enable the Omnisearch plugin's HTTP server to use it.`,
+  bannerCtx,
+);
 if (policy.readOnlyShadowsWritePaths) {
   services.logger.warning(
     'OBSIDIAN_WRITE_PATHS is set but ignored because OBSIDIAN_READ_ONLY=true. Unset one of the two to remove the conflict.',

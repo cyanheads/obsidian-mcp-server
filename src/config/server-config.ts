@@ -127,6 +127,13 @@ const ServerConfigSchema = z.object({
     .describe(
       'Global kill switch. When true, denies every write regardless of OBSIDIAN_WRITE_PATHS, and suppresses the OBSIDIAN_ENABLE_COMMANDS pair (commands can mutate). Defaults to false.',
     ),
+  omnisearchUrl: z
+    .string()
+    .url()
+    .optional()
+    .describe(
+      'Override URL for the Omnisearch plugin HTTP server. When unset, derives from OBSIDIAN_BASE_URL host with port 51361 (falling back to http://localhost:51361). Used to enable the optional `omnisearch` mode on `obsidian_search_notes`; if the URL is unreachable at startup, the mode is omitted from the tool schema.',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -143,6 +150,7 @@ export function getServerConfig(): ServerConfig {
     readPaths: 'OBSIDIAN_READ_PATHS',
     writePaths: 'OBSIDIAN_WRITE_PATHS',
     readOnly: 'OBSIDIAN_READ_ONLY',
+    omnisearchUrl: 'OBSIDIAN_OMNISEARCH_URL',
   });
   return _config;
 }

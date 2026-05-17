@@ -154,16 +154,17 @@ describe('ObsidianService.patchNote header building', () => {
     expect(seenHeaders['create-target-if-missing'] ?? seenHeaders['Create-Target-If-Missing']).toBe(
       'true',
     );
+    // applyIfContentPreexists: true → no Reject header (force-apply, even if duplicate).
     expect(
-      seenHeaders['apply-if-content-preexists'] ?? seenHeaders['Apply-If-Content-Preexists'],
-    ).toBe('true');
+      seenHeaders['reject-if-content-preexists'] ?? seenHeaders['Reject-If-Content-Preexists'],
+    ).toBeUndefined();
     expect(seenHeaders['trim-target-whitespace'] ?? seenHeaders['Trim-Target-Whitespace']).toBe(
       'true',
     );
     expect(seenHeaders['content-type'] ?? seenHeaders['Content-Type']).toBe('text/markdown');
   });
 
-  it('omits unset option headers when the corresponding flag is undefined', async () => {
+  it('sends Reject-If-Content-Preexists by default to preserve idempotency under retries', async () => {
     let seenHeaders: Record<string, string> = {};
     pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
       seenHeaders = (opts.headers as Record<string, string>) ?? {};
@@ -178,9 +179,13 @@ describe('ObsidianService.patchNote header building', () => {
     });
 
     expect(seenHeaders['create-target-if-missing']).toBeUndefined();
-    expect(seenHeaders['apply-if-content-preexists']).toBeUndefined();
     expect(seenHeaders['trim-target-whitespace']).toBeUndefined();
     expect(seenHeaders['content-type'] ?? seenHeaders['Content-Type']).toBe('application/json');
+    // Protective default — preserves the historical idempotent-by-default behavior
+    // under the renamed/inverted markdown-patch 1.0 flag.
+    expect(
+      seenHeaders['reject-if-content-preexists'] ?? seenHeaders['Reject-If-Content-Preexists'],
+    ).toBe('true');
   });
 });
 
@@ -351,18 +356,6 @@ describe('ObsidianService search', () => {
     await service.searchText(ctx, 'hello world', 50);
     expect(seenPath).toContain('query=hello+world');
     expect(seenPath).toContain('contextLength=50');
-  });
-
-  it('dataview search uses the DQL content type', async () => {
-    let seenContentType = '';
-    pool.intercept({ path: '/search/', method: 'POST' }).reply((opts) => {
-      const headers = opts.headers as Record<string, string>;
-      seenContentType = headers['content-type'] ?? headers['Content-Type'] ?? '';
-      return { statusCode: 200, data: [{ filename: 'x.md', result: [] }] };
-    });
-
-    await service.searchDataview(ctx, 'TABLE file.mtime FROM ""');
-    expect(seenContentType).toBe('application/vnd.olrapi.dataview.dql+txt');
   });
 
   it('jsonlogic search uses the JSONLogic content type and JSON-stringifies the body', async () => {

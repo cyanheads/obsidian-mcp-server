@@ -6,7 +6,13 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { forbidden, notFound, unauthorized, validationError } from '@cyanheads/mcp-ts-core/errors';
+import {
+  forbidden,
+  notFound,
+  serviceUnavailable,
+  unauthorized,
+  validationError,
+} from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Agent, type Dispatcher, type RequestInit, fetch as undiciFetch } from 'undici';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
@@ -18,6 +24,7 @@ import type {
   NoteTarget,
   ObsidianCommand,
   ObsidianTag,
+  OmnisearchHit,
   PatchHeaders,
   StructuredSearchHit,
   TextSearchHit,
@@ -68,9 +75,28 @@ interface RawStructuredSearchHit {
   result: unknown;
 }
 
+/**
+ * Upstream Omnisearch payload. The plugin returns one of these per file; we
+ * rename `path` to `filename` on the way out so `PathPolicy.filterReadable`
+ * can match the shape, and drop `vault` since this server is single-vault.
+ */
+interface RawOmnisearchHit {
+  basename: string;
+  excerpt: string;
+  foundWords: string[];
+  matches: Array<{ match: string; offset: number }>;
+  path: string;
+  score: number;
+  vault?: string;
+}
+
+/** Per-call timeout for the startup probe — covers the 4-tuple TCP handshake + a tiny GET. */
+const OMNISEARCH_PROBE_TIMEOUT_MS = 500;
+
+const OMNISEARCH_DEFAULT_PORT = '51361';
+
 const NOTE_JSON_ACCEPT = 'application/vnd.olrapi.note+json';
 const DOCUMENT_MAP_ACCEPT = 'application/vnd.olrapi.document-map+json';
-const DATAVIEW_DQL_CT = 'application/vnd.olrapi.dataview.dql+txt';
 const JSONLOGIC_CT = 'application/vnd.olrapi.jsonlogic+json';
 
 /**
@@ -85,6 +111,7 @@ export class ObsidianService {
   readonly #dispatcher: Dispatcher;
   readonly #fetch: ObsidianFetch;
   readonly #policy: PathPolicy;
+  readonly #omnisearchUrl: string;
 
   /**
    * @param config - Validated server config (api key, base URL, TLS, timeouts).
@@ -94,6 +121,7 @@ export class ObsidianService {
   constructor(config: ServerConfig, fetchImpl?: ObsidianFetch) {
     this.#config = config;
     this.#policy = new PathPolicy(config);
+    this.#omnisearchUrl = deriveOmnisearchUrl(config);
     /**
      * Bun's runtime ignores undici's per-dispatcher `connect.rejectUnauthorized`
      * option, so the only reliable opt-out under Bun is the process-wide
@@ -116,6 +144,11 @@ export class ObsidianService {
   /** Path-policy accessor — used by `obsidian_search_notes` to filter hits. */
   get policy(): PathPolicy {
     return this.#policy;
+  }
+
+  /** Resolved Omnisearch URL (derived from baseUrl or OBSIDIAN_OMNISEARCH_URL override). */
+  get omnisearchUrl(): string {
+    return this.#omnisearchUrl;
   }
 
   // ── Status ───────────────────────────────────────────────────────────────
@@ -361,15 +394,6 @@ export class ObsidianService {
     return (await res.json()) as RawSimpleSearchHit[];
   }
 
-  async searchDataview(ctx: Context, dql: string): Promise<StructuredSearchHit[]> {
-    const res = await this.#request(ctx, '/search/', {
-      method: 'POST',
-      headers: { 'Content-Type': DATAVIEW_DQL_CT },
-      body: dql,
-    });
-    return (await res.json()) as RawStructuredSearchHit[];
-  }
-
   async searchJsonLogic(
     ctx: Context,
     logic: Record<string, unknown>,
@@ -380,6 +404,77 @@ export class ObsidianService {
       body: JSON.stringify(logic),
     });
     return (await res.json()) as RawStructuredSearchHit[];
+  }
+
+  /**
+   * One-shot startup probe for the Omnisearch plugin's HTTP endpoint. Returns
+   * `true` only when the response is `HTTP 200`, declares `application/json`,
+   * and the body parses as a JSON array — unrouted paths on the Omnisearch
+   * server also return `200` with an empty body, so status alone is
+   * insufficient. The entry point passes the return value into the
+   * `obsidian_search_notes` factory to decide whether to expose the
+   * `omnisearch` mode.
+   */
+  async probeOmnisearch(signal?: AbortSignal): Promise<boolean> {
+    const probeSignal = signal ?? AbortSignal.timeout(OMNISEARCH_PROBE_TIMEOUT_MS);
+    try {
+      const res = await this.#fetch(`${this.#omnisearchUrl}/search?q=`, {
+        method: 'GET',
+        dispatcher: this.#dispatcher,
+        signal: probeSignal,
+      });
+      if (!res.ok) return false;
+      const contentType = res.headers.get('content-type') ?? '';
+      if (!contentType.toLowerCase().includes('application/json')) return false;
+      const body = await res.json().catch(() => undefined);
+      return Array.isArray(body);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Query the Omnisearch HTTP endpoint. Normalizes the response on the way
+   * out: decodes HTML entities + `<br>` → `\n` in `excerpt`, renames `path`
+   * to `filename`, and drops `vault`. Throws `omnisearch_unreachable`
+   * (ServiceUnavailable) on network failures or non-2xx responses — the
+   * plugin can shut down mid-session (Obsidian quits, plugin disabled), and
+   * the tool needs a distinct signal from the upstream's success cases.
+   */
+  async searchOmnisearch(ctx: Context, query: string): Promise<OmnisearchHit[]> {
+    const url = `${this.#omnisearchUrl}/search?q=${encodeURIComponent(query)}`;
+    let res: UndiciResponse;
+    try {
+      res = await this.#fetch(url, {
+        method: 'GET',
+        dispatcher: this.#dispatcher,
+        signal: ctx.signal,
+      });
+    } catch (err) {
+      if (ctx.signal?.aborted) throw err;
+      throw serviceUnavailable(
+        `Omnisearch unreachable at ${this.#omnisearchUrl}. The plugin may have stopped (Obsidian quit, plugin disabled, or mobile session).`,
+        {
+          reason: 'omnisearch_unreachable',
+          url: this.#omnisearchUrl,
+          ...ctx.recoveryFor('omnisearch_unreachable'),
+        },
+        { cause: err },
+      );
+    }
+    if (!res.ok) {
+      throw serviceUnavailable(
+        `Omnisearch returned HTTP ${res.status} at ${this.#omnisearchUrl}.`,
+        {
+          reason: 'omnisearch_unreachable',
+          url: this.#omnisearchUrl,
+          status: res.status,
+          ...ctx.recoveryFor('omnisearch_unreachable'),
+        },
+      );
+    }
+    const body = (await res.json()) as RawOmnisearchHit[];
+    return body.map(normalizeOmnisearchHit);
   }
 
   // ── UI / commands ────────────────────────────────────────────────────────
@@ -470,7 +565,17 @@ export class ObsidianService {
     };
     if (p.targetDelimiter) headers['Target-Delimiter'] = p.targetDelimiter;
     if (p.createTargetIfMissing) headers['Create-Target-If-Missing'] = 'true';
-    if (p.applyIfContentPreexists) headers['Apply-If-Content-Preexists'] = 'true';
+    /**
+     * Sense inversion: markdown-patch 1.0 (shipped with Local REST API v4.0.0)
+     * renamed `Apply-If-Content-Preexists` to `Reject-If-Content-Preexists`
+     * and flipped the default — patches now apply regardless of duplicates
+     * unless the caller opts into rejection. We keep `applyIfContentPreexists`
+     * on the public schema for caller stability and translate here: a falsy
+     * value (the public default) sends the new Reject header to preserve the
+     * historical idempotent-by-default behavior. Replace operations are
+     * exempt at the plugin layer regardless of this flag.
+     */
+    if (!p.applyIfContentPreexists) headers['Reject-If-Content-Preexists'] = 'true';
     if (p.trimTargetWhitespace) headers['Trim-Target-Whitespace'] = 'true';
     return headers;
   }
@@ -717,6 +822,61 @@ function parseContentLength(res: UndiciResponse, url: string): number {
     throw new Error(`Obsidian Local REST API returned invalid Content-Length '${raw}' for ${url}.`);
   }
   return n;
+}
+
+/**
+ * Resolve the Omnisearch URL. Override wins. Otherwise: take the host from
+ * `OBSIDIAN_BASE_URL`, force `http:` (Omnisearch is HTTP-only), swap port
+ * `27123/27124` → `51361`. `127.0.0.1` is mapped to `localhost` since
+ * Omnisearch's current Node listener binds IPv4 only but the platform's
+ * loopback resolver is flexible — `localhost` insulates us if a future
+ * build switches binding. Falls back to `http://localhost:51361` on any
+ * URL parse failure (config validation catches malformed `baseUrl`, so this
+ * is belt-and-suspenders).
+ */
+function deriveOmnisearchUrl(config: ServerConfig): string {
+  if (config.omnisearchUrl) return config.omnisearchUrl.replace(/\/+$/, '');
+  try {
+    const u = new URL(config.baseUrl);
+    const host = u.hostname === '127.0.0.1' ? 'localhost' : u.hostname;
+    return `http://${host}:${OMNISEARCH_DEFAULT_PORT}`;
+  } catch {
+    return `http://localhost:${OMNISEARCH_DEFAULT_PORT}`;
+  }
+}
+
+function normalizeOmnisearchHit(raw: RawOmnisearchHit): OmnisearchHit {
+  return {
+    basename: raw.basename,
+    excerpt: cleanExcerpt(raw.excerpt),
+    filename: raw.path,
+    foundWords: raw.foundWords,
+    matches: raw.matches,
+    score: raw.score,
+  };
+}
+
+/**
+ * Normalize Omnisearch's excerpt HTML: `<br>` → `\n`, decode the entities
+ * the upstream actually emits (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#039;`,
+ * `&apos;`, plus numeric `&#NNN;` / `&#xNN;`). `<mark>` tags are preserved —
+ * they highlight the match span and are interpretable as emphasis.
+ */
+function cleanExcerpt(excerpt: string): string {
+  return excerpt
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => safeCodePoint(parseInt(n, 16)))
+    .replace(/&#(\d+);/g, (_, n) => safeCodePoint(Number(n)))
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function safeCodePoint(cp: number): string {
+  if (!Number.isInteger(cp) || cp < 0 || cp > 0x10ffff) return '';
+  return String.fromCodePoint(cp);
 }
 
 function parseJsonObject(text: string): UpstreamErrorBody | undefined {

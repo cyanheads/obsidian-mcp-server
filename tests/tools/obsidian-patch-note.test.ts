@@ -41,9 +41,10 @@ describe('obsidian_patch_note', () => {
 
     expect(seenHeaders.operation ?? seenHeaders.Operation).toBe('prepend');
     expect(seenHeaders['target-type'] ?? seenHeaders['Target-Type']).toBe('block');
+    // applyIfContentPreexists: true → omit the Reject header (force-apply path).
     expect(
-      seenHeaders['apply-if-content-preexists'] ?? seenHeaders['Apply-If-Content-Preexists'],
-    ).toBe('true');
+      seenHeaders['reject-if-content-preexists'] ?? seenHeaders['Reject-If-Content-Preexists'],
+    ).toBeUndefined();
     expect(seenHeaders['trim-target-whitespace'] ?? seenHeaders['Trim-Target-Whitespace']).toBe(
       'true',
     );

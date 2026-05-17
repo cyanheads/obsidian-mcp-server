@@ -4,7 +4,9 @@
  * when `OBSIDIAN_READ_ONLY=true`. The command-palette pair is exported
  * separately so the entry point wraps it with `disabledTool()` when either
  * `OBSIDIAN_ENABLE_COMMANDS=false` or `OBSIDIAN_READ_ONLY=true` — keeping this
- * module free of eager config reads.
+ * module free of eager config reads. `obsidian_search_notes` is exposed as a
+ * factory (`buildSearchNotesTool`) because its mode enum is conditional on
+ * Omnisearch reachability, which is only known after the startup probe runs.
  * @module mcp-server/tools/definitions/index
  */
 
@@ -20,15 +22,20 @@ import { obsidianManageTags } from './obsidian-manage-tags.tool.js';
 import { obsidianOpenInUi } from './obsidian-open-in-ui.tool.js';
 import { obsidianPatchNote } from './obsidian-patch-note.tool.js';
 import { obsidianReplaceInNote } from './obsidian-replace-in-note.tool.js';
-import { obsidianSearchNotes } from './obsidian-search-notes.tool.js';
 import { obsidianWriteNote } from './obsidian-write-note.tool.js';
 
-/** Read-only tools — always registered, even with `OBSIDIAN_READ_ONLY=true`. */
+export { buildSearchNotesTool } from './obsidian-search-notes.tool.js';
+
+/**
+ * Read-only tools that don't depend on runtime probes — always registered,
+ * even with `OBSIDIAN_READ_ONLY=true`. `obsidian_search_notes` is constructed
+ * separately in the entry point via `buildSearchNotesTool` so its mode enum
+ * can reflect Omnisearch reachability.
+ */
 export const readToolDefinitions = [
   obsidianGetNote,
   obsidianListNotes,
   obsidianListTags,
-  obsidianSearchNotes,
   obsidianOpenInUi,
 ];
 
@@ -42,9 +49,6 @@ export const writeToolDefinitions = [
   obsidianManageTags,
   obsidianDeleteNote,
 ];
-
-/** Combined base set — preserves the previous registration order. */
-export const baseToolDefinitions = [...readToolDefinitions, ...writeToolDefinitions];
 
 /** Command-palette tools — opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`; suppressed by `OBSIDIAN_READ_ONLY=true`. */
 export const commandToolDefinitions = [obsidianListCommands, obsidianExecuteCommand];

@@ -61,7 +61,7 @@ export interface ObsidianCommand {
   name: string;
 }
 
-export type SearchMode = 'text' | 'dataview' | 'jsonlogic';
+export type SearchMode = 'text' | 'jsonlogic' | 'omnisearch';
 
 export interface TextSearchHit {
   filename: string;
@@ -77,7 +77,29 @@ export interface StructuredSearchHit {
   result: unknown;
 }
 
+/**
+ * Normalized Omnisearch hit. The upstream `path` is renamed to `filename` so
+ * the shape composes with `PathPolicy.filterReadable`. `excerpt` has had its
+ * HTML entities decoded and `<br>` tags converted to newlines. `vault` is
+ * dropped — this server is single-vault.
+ */
+export interface OmnisearchHit {
+  basename: string;
+  excerpt: string;
+  filename: string;
+  foundWords: string[];
+  matches: Array<{ match: string; offset: number }>;
+  score: number;
+}
+
 export interface PatchHeaders {
+  /**
+   * When false/undefined (the protective default), the patch is rejected if
+   * matching content already exists in the target. Set to true to force-apply
+   * even when it would duplicate. The wire header is `Reject-If-Content-
+   * Preexists` (markdown-patch 1.0+) — the service inverts this flag on the
+   * way out. Replace operations are exempt at the plugin layer.
+   */
   applyIfContentPreexists?: boolean | undefined;
   contentType?: 'markdown' | 'json' | undefined;
   createTargetIfMissing?: boolean | undefined;
