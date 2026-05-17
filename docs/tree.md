@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-05-09 10:34:06
+Generated on: 2026-05-17 21:35:06
 
 ```text
 obsidian-mcp-server/
@@ -117,6 +117,7 @@ obsidian-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── _shared/
+│   │           │   ├── regex-safety.ts
 │   │           │   ├── schemas.ts
 │   │           │   └── suggest-paths.ts
 │   │           ├── index.ts
@@ -171,7 +172,8 @@ obsidian-mcp-server/
 │   │   ├── obsidian-search-notes.test.ts
 │   │   ├── obsidian-write-note.test.ts
 │   │   └── suggest-paths.test.ts
-│   └── helpers.ts
+│   ├── helpers.ts
+│   └── instructions.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore

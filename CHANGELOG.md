@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.2.0](changelog/3.2.x/3.2.0.md) — 2026-05-17 · ⚠️ Breaking
+
+`obsidian_search_notes` gains BM25-ranked Omnisearch mode (auto-detected) and MCP-spec cursor pagination across all branches; `obsidian_list_commands` gains a `nameRegex` filter; PATCH headers track markdown-patch 1.0 from Local REST API v4.0.0+.
+
 ## [3.1.11](changelog/3.1.x/3.1.11.md) — 2026-05-16 · 🛡️ Security
 
 Path-traversal hardening on the URL boundary + Windows-style separator parity across `PathPolicy` and `envPathList`. `obsidian_list_tags` gains an optional `nameRegex` filter with ReDoS guards.

@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![Version](https://img.shields.io/badge/Version-3.1.11-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![Version](https://img.shields.io/badge/Version-3.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
@@ -25,7 +25,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | `obsidian_list_notes` | List notes and subdirectories at a vault path with a recursive walk (default depth 2 — structural overview; max 20) bounded by a 1000-entry cap. Optional `extension` and `nameRegex` filters apply across the tree; regex-filtered directories are skipped without recursing into them. Returns flat `entries[]` plus a box-drawing tree in the rendered output; per-directory `truncated: true` flags where the depth limit cut off recursion. |
 | `obsidian_list_tags` | List every tag found across the vault with usage counts, including hierarchical parents. Optional `nameRegex` post-filters the result set (length-capped, nested-quantifier-guarded). |
 | `obsidian_list_commands` | List Obsidian command-palette commands available for execution. **Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`** (paired with `obsidian_execute_command`). |
-| `obsidian_search_notes` | Search the vault by text, Dataview DQL, or JSONLogic. Text-mode matches return surrounding context windows (`contextLength`) — capped at 100 hits with overflow indicator. |
+| `obsidian_search_notes` | Search the vault by text, JSONLogic, or — when the Omnisearch plugin's HTTP server is reachable at startup — BM25-ranked Omnisearch. Results paginate via opaque cursors (`nextCursor` + `totalCount`); text-mode hits return surrounding context windows (`contextLength`) and clip per-file at `maxMatchesPerHit`. |
 | `obsidian_write_note` | Create a note, replace a single section in place, or — with `overwrite: true` — clobber an existing file. Refuses whole-file writes against an existing path by default. |
 | `obsidian_append_to_note` | Append content to a note. Without `section` it creates the file if missing — your content becomes the entire file. With `section`, appends to that heading/block/frontmatter (PATCH; the file must exist). |
 | `obsidian_patch_note` | Surgical `append` / `prepend` / `replace` against a heading, block reference, or frontmatter field. |
@@ -51,13 +51,13 @@ Pair the document-map projection with `obsidian_patch_note` to discover edit tar
 
 ### `obsidian_search_notes`
 
-Three search modes selected by `mode`:
+Up to three search modes selected by `mode`:
 
-- `text` — substring match with surrounding context windows. `contextLength` controls characters of context per side of each match (default 100; bump it for more context per hit). Optional `pathPrefix` filter (text mode only — passing `pathPrefix` in `dataview` or `jsonlogic` mode is rejected with `path_prefix_invalid_mode`).
-- `dataview` — Dataview DQL (`TABLE …`) for path/date/metadata queries; `file.mtime`, `file.path`, etc. are queryable
+- `text` — substring match with surrounding context windows. `contextLength` controls characters of context per side of each match (default 100; bump it for more context per hit). Optional `pathPrefix` filter (text mode only — passing `pathPrefix` in any other mode is rejected with `path_prefix_invalid_mode`).
 - `jsonlogic` — JSONLogic tree evaluated against `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`; custom `glob` and `regexp` operators
+- `omnisearch` — BM25-ranked search via the community [Omnisearch](https://github.com/scambier/obsidian-omnisearch) plugin. Supports quoted phrases, `-exclusion`, `path:` / `ext:` filters, typo tolerance, and PDF + OCR coverage (via [Text Extractor](https://github.com/scambier/obsidian-text-extractor)). Only present in the mode enum when the plugin's HTTP server is reachable at startup; the upstream hard-caps results at 50 — narrow the query to surface more (the response carries `truncated: true` when the cap was likely hit).
 
-Results are capped at 100 hits. When the upstream returns more, an `excluded` indicator surfaces the overflow count and a hint to narrow the query. Text-mode hits are additionally clipped per file at `maxMatchesPerHit` (default 10) so a single match-heavy note can't blow the response budget — clipped hits carry `truncated: true` and `totalMatches`.
+Results paginate via opaque cursors per the [MCP 2025-06-18 spec](https://modelcontextprotocol.io/specification/2025-06-18/utils/pagination): omit `cursor` for the first page, then pass `nextCursor` from the prior response. Every result carries `totalCount` (post-path-policy, pre-pagination); `nextCursor` is omitted on the last page. Text-mode hits are additionally clipped per file at `maxMatchesPerHit` (default 10) so a single match-heavy note can't blow the response budget — clipped hits carry `truncated: true` and `totalMatches`.
 
 ---
 
@@ -188,7 +188,7 @@ Obsidian-specific:
 - Wraps the [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin — typed client, deterministic error mapping
 - Section-aware editing across headings, block references, and frontmatter fields via `PATCH`-with-target operations
 - Tag reconciliation across both representations: frontmatter `tags:` array and inline `#tag` syntax (skipping fenced code blocks)
-- Search across three modes: text, Dataview DQL, JSONLogic — with overflow indicator when results exceed the 100-hit cap
+- Search across up to three modes: text, JSONLogic, and (when the plugin is reachable) BM25-ranked Omnisearch — cursor-paginated per the MCP 2025-06-18 spec, with per-file match clipping in text mode
 - Optional human-in-the-loop confirmation for destructive deletes via `ctx.elicit`
 - Folder-scoped read/write permissions via `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` and a global `OBSIDIAN_READ_ONLY` kill switch — denies are typed `path_forbidden` with the active scope echoed back in the error data
 - Opt-in command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`) — registered only when `OBSIDIAN_ENABLE_COMMANDS=true`
@@ -244,7 +244,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 ### Prerequisites
 
 - [Bun v1.3.11](https://bun.sh/) or higher (or Node.js v24+).
-- The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin installed and enabled in your vault. Generate an API key in **Settings → Community Plugins → Local REST API** and copy it into `OBSIDIAN_API_KEY`.
+- The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin **v4.0.0 or later** installed and enabled in your vault. Generate an API key in **Settings → Community Plugins → Local REST API** and copy it into `OBSIDIAN_API_KEY`.
 - This server defaults to `http://127.0.0.1:27123` for simplicity. Enable **"Non-encrypted (HTTP) Server"** in the plugin settings to use it. To use the always-on HTTPS port instead, set `OBSIDIAN_BASE_URL=https://127.0.0.1:27124`; the plugin's self-signed cert is handled by `OBSIDIAN_VERIFY_SSL=false` (the default).
 
 ### Installation
@@ -286,6 +286,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | `OBSIDIAN_READ_PATHS` | Comma-separated vault-relative folder allowlist for read operations. Prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault. Write paths are implicitly readable. | unset |
 | `OBSIDIAN_WRITE_PATHS` | Comma-separated vault-relative folder allowlist for write operations. Same syntax as `OBSIDIAN_READ_PATHS`. Unset = full vault. | unset |
 | `OBSIDIAN_READ_ONLY` | Global kill switch. When `true`, denies every write regardless of `OBSIDIAN_WRITE_PATHS`, and suppresses the `OBSIDIAN_ENABLE_COMMANDS` pair (commands can mutate). | `false` |
+| `OBSIDIAN_OMNISEARCH_URL` | Override URL for the [Omnisearch](https://github.com/scambier/obsidian-omnisearch) plugin's HTTP server. When unset, derives from `OBSIDIAN_BASE_URL` host with port `51361` (falling back to `http://localhost:51361`). Probed once at startup — if reachable, the `omnisearch` mode is added to `obsidian_search_notes`; otherwise it's omitted from the tool schema. Restart the server to re-probe. | derived |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_HOST` | Host for the HTTP server. | `127.0.0.1` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |

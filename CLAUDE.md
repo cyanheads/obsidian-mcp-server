@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** obsidian-mcp-server
-**Version:** 3.1.10
+**Version:** 3.2.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.1`
 **Engines:** Bun ≥1.3.11, Node ≥24.0.0
 
@@ -247,7 +247,7 @@ src/
   mcp-server/
     tools/definitions/
       _shared/schemas.ts                # Shared TargetSchema + SectionSchema reused across tools
-      index.ts                          # baseToolDefinitions[] + conditional commandToolDefinitions[]
+      index.ts                          # read/write/command tool sets + buildSearchNotesTool factory (Omnisearch-aware)
       obsidian-*.tool.ts                # 14 tool definitions (12 base + 2 opt-in command-palette pair)
     resources/definitions/
       index.ts                          # allResourceDefinitions[]
