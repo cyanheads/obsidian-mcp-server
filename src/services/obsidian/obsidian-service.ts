@@ -31,6 +31,8 @@ import type {
   VaultStatus,
 } from './types.js';
 
+export const OBSIDIAN_AGENT_KEEP_ALIVE_TIMEOUT_MS = 4_000;
+
 type UndiciResponse = Awaited<ReturnType<typeof undiciFetch>>;
 
 /**
@@ -43,6 +45,16 @@ export type ObsidianFetch = (
   url: string,
   init: RequestInit & { dispatcher?: Dispatcher; signal?: AbortSignal },
 ) => Promise<UndiciResponse>;
+
+export function buildObsidianAgentOptions(config: ServerConfig): ConstructorParameters<typeof Agent>[0] {
+  return {
+    connect: { rejectUnauthorized: config.verifySsl },
+    headersTimeout: config.requestTimeoutMs,
+    bodyTimeout: config.requestTimeoutMs,
+    keepAliveTimeout: OBSIDIAN_AGENT_KEEP_ALIVE_TIMEOUT_MS,
+    keepAliveMaxTimeout: OBSIDIAN_AGENT_KEEP_ALIVE_TIMEOUT_MS,
+  };
+}
 
 interface UpstreamErrorBody {
   errorCode?: number;
@@ -133,11 +145,7 @@ export class ObsidianService {
     if (!config.verifySsl && typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') {
       process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     }
-    this.#dispatcher = new Agent({
-      connect: { rejectUnauthorized: config.verifySsl },
-      headersTimeout: config.requestTimeoutMs,
-      bodyTimeout: config.requestTimeoutMs,
-    });
+    this.#dispatcher = new Agent(buildObsidianAgentOptions(config));
     this.#fetch = fetchImpl ?? (undiciFetch as ObsidianFetch);
   }
 
