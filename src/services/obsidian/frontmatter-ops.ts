@@ -7,7 +7,7 @@
 
 import { type Document, isMap, parseDocument } from 'yaml';
 
-const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+const FM_RE = /^---(?:\r\n|\n)([\s\S]*?)^---(?:\r\n|\n|$)/m;
 
 interface Splice {
   body: string;

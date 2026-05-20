@@ -12,7 +12,7 @@ import {
   reconcileTags,
 } from '@/services/obsidian/frontmatter-ops.js';
 
-const FM_BLOCK_RE = /^---\n([\s\S]*?)\n---\n?/;
+const FM_BLOCK_RE = /^---(?:\r\n|\n)([\s\S]*?)^---(?:\r\n|\n|$)/m;
 
 function readFrontmatter(content: string): Record<string, unknown> {
   const m = FM_BLOCK_RE.exec(content);
@@ -46,6 +46,11 @@ describe('deleteFrontmatterKey', () => {
     expect(out.startsWith('---')).toBe(false);
     expect(out).toContain('Body.');
   });
+
+  it('recognizes an empty frontmatter block when deleting an absent key', () => {
+    const input = ['---', '---', '# H', 'Body.'].join('\n');
+    expect(deleteFrontmatterKey(input, 'missing')).toBe(input);
+  });
 });
 
 describe('reconcileTags / add', () => {
@@ -55,6 +60,27 @@ describe('reconcileTags / add', () => {
     expect(r.applied).toEqual(['b']);
     expect(r.skipped).toEqual([]);
     expect(readFrontmatter(r.content).tags).toEqual(['a', 'b']);
+  });
+
+  it('adds a tag to an empty frontmatter block without duplicating it', () => {
+    const input = ['---', '---', '# H', 'Body.'].join('\n');
+    const r = reconcileTags(input, ['fresh'], 'add', 'frontmatter');
+
+    expect(r.applied).toEqual(['fresh']);
+    expect(r.skipped).toEqual([]);
+    expect(readFrontmatter(r.content).tags).toEqual(['fresh']);
+    expect(r.content).not.toContain('\n---\n---\n');
+    expect(r.content).toContain('# H\nBody.');
+  });
+
+  it('adds a tag to an empty CRLF frontmatter block without duplicating it', () => {
+    const input = '---\r\n---\r\n# H\r\nBody.\r\n';
+    const r = reconcileTags(input, ['fresh'], 'add', 'frontmatter');
+
+    expect(r.applied).toEqual(['fresh']);
+    expect(readFrontmatter(r.content).tags).toEqual(['fresh']);
+    expect(r.content).not.toContain('\r\n---\r\n---\r\n');
+    expect(r.content).toContain('# H\r\nBody.\r\n');
   });
 
   it('marks an already-present frontmatter tag as skipped', () => {
