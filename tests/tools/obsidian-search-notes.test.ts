@@ -271,6 +271,13 @@ describe('obsidian_search_notes / jsonlogic', () => {
       data: { reason: 'logic_required' },
     });
   });
+
+  it('documents custom JSONLogic operator argument order as pattern first', () => {
+    const logicRequired = obsidianSearchNotes.errors.find((e) => e.reason === 'logic_required');
+    expect(logicRequired?.recovery).toContain('{"glob": ["Projects/*.md", {"var": "path"}]}');
+    expect(logicRequired?.recovery).toContain('[pattern, value]');
+    expect(logicRequired?.recovery).not.toContain('{"glob": [{"var": "path"}, "Projects/*.md"]}');
+  });
 });
 
 describe('obsidian_search_notes / omnisearch (mode-conditional)', () => {

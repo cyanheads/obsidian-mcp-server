@@ -116,8 +116,8 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       .enum(modeEnum)
       .describe(
         omnisearchReachable
-          ? 'Which search algorithm to run. `text` matches a substring case-insensitively across filenames and note bodies, returning surrounding context windows. `jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`, plus `glob` and `regexp` operators. `omnisearch` runs a BM25-ranked query via the Omnisearch plugin — supports quoted phrases, `-exclusion`, `path:` / `ext:` filters, typo tolerance, and PDF/OCR (with Text Extractor); upstream caps results at 50.'
-          : 'Which search algorithm to run. `text` matches a substring case-insensitively across filenames and note bodies, returning surrounding context windows. `jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`, plus `glob` and `regexp` operators.',
+          ? 'Which search algorithm to run. `text` matches a substring case-insensitively across filenames and note bodies, returning surrounding context windows. `jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`, plus `glob` and `regexp` operators whose argument order is `[pattern, value]`. `omnisearch` runs a BM25-ranked query via the Omnisearch plugin — supports quoted phrases, `-exclusion`, `path:` / `ext:` filters, typo tolerance, and PDF/OCR (with Text Extractor); upstream caps results at 50.'
+          : 'Which search algorithm to run. `text` matches a substring case-insensitively across filenames and note bodies, returning surrounding context windows. `jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`, plus `glob` and `regexp` operators whose argument order is `[pattern, value]`.',
       ),
     query: z
       .string()
@@ -241,7 +241,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       code: JsonRpcErrorCode.ValidationError,
       when: '`logic` is missing for `jsonlogic` mode.',
       recovery:
-        'Pass a JSONLogic tree as `logic`, e.g. `{"glob": [{"var": "path"}, "Projects/*.md"]}`.',
+        'Pass a JSONLogic tree as `logic`, e.g. `{"glob": ["Projects/*.md", {"var": "path"}]}` (custom operator argument order is `[pattern, value]`).',
     },
     {
       reason: 'omnisearch_unreachable',
