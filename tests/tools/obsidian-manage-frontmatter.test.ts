@@ -104,6 +104,56 @@ describe('obsidian_manage_frontmatter / set', () => {
     expect(out.result.currentSizeInBytes).toBe(Buffer.byteLength('body', 'utf8'));
   });
 
+  /**
+   * Regression coverage for the typed `value` union. Each JSON type must reach
+   * the PATCH body as its own `JSON.stringify` form (a single encoding layer)
+   * and round-trip back through the post-PATCH GET unchanged — no extra
+   * stringification. With a typeless `z.unknown()` input the rendered JSON
+   * Schema carries no `type`, which leads MCP clients to pre-stringify
+   * non-string values and double-encode them (e.g. `[1,2]` stored as the
+   * string `"[1,2]"`); the explicit union gives clients the type information
+   * to serialize correctly.
+   */
+  it.each([
+    { label: 'string', value: 'done', body: '"done"' },
+    { label: 'boolean', value: true, body: 'true' },
+    { label: 'array', value: ['alpha', 'beta'], body: '["alpha","beta"]' },
+    { label: 'object', value: { a: 1 }, body: '{"a":1}' },
+  ])('serializes a $label value as a single JSON layer in the PATCH body', async ({
+    value,
+    body,
+  }) => {
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'HEAD' })
+      .reply(200, '', { headers: { 'content-length': '50' } });
+
+    let seenBody = '';
+    pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
+      seenBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('body', { field: value }), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const out = await obsidianManageFrontmatter.handler(
+      obsidianManageFrontmatter.input.parse({
+        operation: 'set',
+        target: { type: 'path', path: 'N.md' },
+        key: 'field',
+        value,
+      }),
+      createMockContext(),
+    );
+
+    expect(seenBody).toBe(body);
+    if (out.result.operation !== 'set') throw new Error('expected set branch');
+    expect(out.result.frontmatter).toEqual({ field: value });
+  });
+
   it('throws value_required (ValidationError) when value is missing for set', async () => {
     await expect(
       obsidianManageFrontmatter.handler(
