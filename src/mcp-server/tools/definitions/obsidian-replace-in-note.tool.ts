@@ -85,7 +85,7 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
     {
       reason: 'path_forbidden',
       code: JsonRpcErrorCode.Forbidden,
-      when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes. (The pre-read also requires the path to be readable.)',
+      when: 'The target path is outside OBSIDIAN_WRITE_PATHS, inside OBSIDIAN_DENY_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes. (The pre-read also requires the path to be readable.)',
       recovery:
         'Use a path inside the configured write scope. The error data echoes the active scope.',
     },

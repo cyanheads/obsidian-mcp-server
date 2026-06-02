@@ -20,6 +20,7 @@ function cfg(overrides: Partial<ServerConfig> = {}): ServerConfig {
     enableCommands: false,
     readPaths: undefined,
     writePaths: undefined,
+    denyPaths: undefined,
     readOnly: false,
     ...overrides,
   };
@@ -36,6 +37,10 @@ describe('PathPolicy.isUnrestricted', () => {
 
   it('is false when writePaths is set', () => {
     expect(new PathPolicy(cfg({ writePaths: ['projects'] })).isUnrestricted).toBe(false);
+  });
+
+  it('is false when denyPaths is set', () => {
+    expect(new PathPolicy(cfg({ denyPaths: ['private'] })).isUnrestricted).toBe(false);
   });
 
   it('is false when readOnly is true', () => {
@@ -89,6 +94,31 @@ describe('PathPolicy writes — truth table', () => {
   });
 });
 
+describe('PathPolicy deny paths — allow then deny', () => {
+  it('deny-only allows ordinary paths but rejects denied paths for reads and writes', () => {
+    const p = new PathPolicy(cfg({ denyPaths: ['private'] }));
+    expect(p.isReadable('public/foo.md')).toBe(true);
+    expect(p.isWritable('public/foo.md')).toBe(true);
+    expect(p.isReadable('private/foo.md')).toBe(false);
+    expect(p.isWritable('private/foo.md')).toBe(false);
+  });
+
+  it('read allowlist applies before denylist', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['public'], denyPaths: ['public/private'] }));
+    expect(p.isReadable('public/a.md')).toBe(true);
+    expect(p.isReadable('public/private/a.md')).toBe(false);
+    expect(p.isReadable('secret/a.md')).toBe(false);
+  });
+
+  it('denylist overrides write-implies-read', () => {
+    const p = new PathPolicy(cfg({ writePaths: ['projects'], denyPaths: ['projects/private'] }));
+    expect(p.isReadable('projects/a.md')).toBe(true);
+    expect(p.isWritable('projects/a.md')).toBe(true);
+    expect(p.isReadable('projects/private/a.md')).toBe(false);
+    expect(p.isWritable('projects/private/a.md')).toBe(false);
+  });
+});
+
 describe('PathPolicy.assertReadable', () => {
   it('throws Forbidden with subreason outside_read_paths', () => {
     const p = new PathPolicy(cfg({ readPaths: ['public'] }));
@@ -110,6 +140,39 @@ describe('PathPolicy.assertReadable', () => {
     expect(err.message).toMatch(/not readable/);
     expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/Allowed prefixes/);
     expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/'public'/);
+  });
+
+  it('throws Forbidden with subreason denied_path when path matches denyPaths', () => {
+    const p = new PathPolicy(cfg({ denyPaths: ['private', 'projects/secret'] }));
+    let caught: unknown;
+    try {
+      p.assertReadable('private/foo.md');
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const err = caught as McpError;
+    expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
+    expect(err.data?.reason).toBe('path_forbidden');
+    expect(err.data?.subreason).toBe('denied_path');
+    expect(err.data?.op).toBe('read');
+    expect(err.data?.path).toBe('private/foo.md');
+    expect(err.data?.activeScope).toEqual(['private', 'projects/secret']);
+    expect(err.message).toMatch(/OBSIDIAN_DENY_PATHS/);
+    expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/OBSIDIAN_DENY_PATHS/);
+    expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/'private'/);
+  });
+
+  it('reports denied_path before outside_read_paths when the path is both denied and not allowed', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['public'], denyPaths: ['secret'] }));
+    try {
+      p.assertReadable('secret/foo.md');
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      const err = e as McpError;
+      expect(err.data?.subreason).toBe('denied_path');
+      expect(err.data?.activeScope).toEqual(['secret']);
+    }
   });
 });
 
@@ -140,6 +203,30 @@ describe('PathPolicy.assertWritable', () => {
       expect(err.data?.activeScope).toEqual([]);
     }
     expect.assertions(5);
+  });
+
+  it('routes denied_path before read_only_mode when READ_ONLY=true and the path is denied', () => {
+    const p = new PathPolicy(cfg({ denyPaths: ['secret'], readOnly: true }));
+    try {
+      p.assertWritable('secret/foo.md');
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      const err = e as McpError;
+      expect(err.data?.subreason).toBe('denied_path');
+      expect(err.data?.activeScope).toEqual(['secret']);
+    }
+  });
+
+  it('reports denied_path before outside_write_paths when the path is both denied and not allowed', () => {
+    const p = new PathPolicy(cfg({ writePaths: ['projects'], denyPaths: ['secret'] }));
+    try {
+      p.assertWritable('secret/foo.md');
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      const err = e as McpError;
+      expect(err.data?.subreason).toBe('denied_path');
+      expect(err.data?.activeScope).toEqual(['secret']);
+    }
   });
 });
 
@@ -235,6 +322,7 @@ describe('PathPolicy ↔ config-parser separator integration', () => {
     'OBSIDIAN_API_KEY',
     'OBSIDIAN_READ_PATHS',
     'OBSIDIAN_WRITE_PATHS',
+    'OBSIDIAN_DENY_PATHS',
     'OBSIDIAN_READ_ONLY',
   ] as const;
 
@@ -287,6 +375,16 @@ describe('PathPolicy.filterReadable (silent search filter)', () => {
     const hits = [{ filename: 'any/a.md' }, { filename: 'any/b.md' }];
     expect(p.filterReadable(hits)).toEqual(hits);
   });
+
+  it('drops denied hits even when readPaths is unset', () => {
+    const p = new PathPolicy(cfg({ denyPaths: ['private'] }));
+    const out = p.filterReadable([
+      { filename: 'public/a.md' },
+      { filename: 'private/b.md' },
+      { filename: 'private/sub/c.md' },
+    ]);
+    expect(out.map((h) => h.filename)).toEqual(['public/a.md']);
+  });
 });
 
 describe('PathPolicy.describe (banner data)', () => {
@@ -294,6 +392,7 @@ describe('PathPolicy.describe (banner data)', () => {
     expect(new PathPolicy(cfg()).describe()).toEqual({
       readPaths: 'full vault',
       writePaths: 'full vault',
+      denyPaths: 'none',
       readOnly: false,
     });
   });

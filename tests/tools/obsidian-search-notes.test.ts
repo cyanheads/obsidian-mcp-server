@@ -686,6 +686,45 @@ describe('obsidian_search_notes — path-policy post-filter', () => {
     expect(out.result.totalCount).toBe(2);
   });
 
+  it('drops text hits inside denyPaths silently and shrinks totalCount', async () => {
+    const fetchImpl: ObsidianFetch = async (url) => {
+      const u = new URL(url);
+      if (u.pathname.startsWith('/search/simple/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              filename: 'public/a.md',
+              score: 1,
+              matches: [{ context: 'a', match: { start: 0, end: 1 } }],
+            },
+            {
+              filename: 'private/b.md',
+              score: 1,
+              matches: [{ context: 'b', match: { start: 0, end: 1 } }],
+            },
+            {
+              filename: 'public/sub/c.md',
+              score: 1,
+              matches: [{ context: 'c', match: { start: 0, end: 1 } }],
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      throw new Error(`unexpected ${u.pathname}`);
+    };
+    const svc = new ObsidianService(makeTestConfig({ denyPaths: ['private'] }), fetchImpl);
+    setObsidianService(svc);
+
+    const out = await obsidianSearchNotes.handler(
+      obsidianSearchNotes.input.parse({ mode: 'text', query: 'x' }),
+      createMockContext(),
+    );
+    if (out.result.mode !== 'text') throw new Error('expected text branch');
+    expect(out.result.hits.map((h) => h.filename)).toEqual(['public/a.md', 'public/sub/c.md']);
+    expect(out.result.totalCount).toBe(2);
+  });
+
   it('filters jsonlogic hits against readPaths', async () => {
     const fetchImpl: ObsidianFetch = async () =>
       new Response(

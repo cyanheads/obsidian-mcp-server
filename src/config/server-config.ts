@@ -123,6 +123,9 @@ const ServerConfigSchema = z.object({
   writePaths: envPathList.describe(
     'Optional vault-relative folder allowlist for write operations. Same syntax as OBSIDIAN_READ_PATHS. Write paths are implicitly readable. Unset = full vault.',
   ),
+  denyPaths: envPathList.describe(
+    'Optional vault-relative folder denylist for read and write operations. Same syntax as OBSIDIAN_READ_PATHS; applied after allowlists so denied subfolders override allowed parents. Unset = no denylist.',
+  ),
   readOnly: envBoolean
     .default(false)
     .describe(
@@ -153,6 +156,7 @@ export function getServerConfig(): ServerConfig {
     enableCommands: 'OBSIDIAN_ENABLE_COMMANDS',
     readPaths: 'OBSIDIAN_READ_PATHS',
     writePaths: 'OBSIDIAN_WRITE_PATHS',
+    denyPaths: 'OBSIDIAN_DENY_PATHS',
     readOnly: 'OBSIDIAN_READ_ONLY',
     omnisearchUrl: 'OBSIDIAN_OMNISEARCH_URL',
   });

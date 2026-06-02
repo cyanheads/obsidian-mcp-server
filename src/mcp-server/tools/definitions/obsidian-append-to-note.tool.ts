@@ -62,7 +62,7 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
     {
       reason: 'path_forbidden',
       code: JsonRpcErrorCode.Forbidden,
-      when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes.',
+      when: 'The target path is outside OBSIDIAN_WRITE_PATHS, inside OBSIDIAN_DENY_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes.',
       recovery:
         'Use a path inside the configured write scope. The error data echoes the active scope.',
     },

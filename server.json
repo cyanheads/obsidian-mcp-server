@@ -72,6 +72,12 @@
           "isRequired": false
         },
         {
+          "name": "OBSIDIAN_DENY_PATHS",
+          "description": "Optional comma-separated vault-relative folder denylist for reads and writes. Same syntax as OBSIDIAN_READ_PATHS; applied after allowlists so denied subfolders override allowed parents. Example: 'projects/private/'.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
           "name": "OBSIDIAN_READ_ONLY",
           "description": "Global read-only kill switch. When true, every write is denied regardless of OBSIDIAN_WRITE_PATHS, and the command-palette pair is suppressed (commands can mutate). Useful for shared or public-facing deployments.",
           "format": "string",
@@ -156,6 +162,12 @@
         {
           "name": "OBSIDIAN_WRITE_PATHS",
           "description": "Optional comma-separated vault-relative folder allowlist for writes. Same syntax as OBSIDIAN_READ_PATHS. Unset = full vault. Example: 'projects/,scratch/'.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "OBSIDIAN_DENY_PATHS",
+          "description": "Optional comma-separated vault-relative folder denylist for reads and writes. Same syntax as OBSIDIAN_READ_PATHS; applied after allowlists so denied subfolders override allowed parents. Example: 'projects/private/'.",
           "format": "string",
           "isRequired": false
         },

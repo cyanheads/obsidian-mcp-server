@@ -39,7 +39,7 @@ export const obsidianVaultNote = resource('obsidian://vault/{+path}', {
     {
       reason: 'path_forbidden',
       code: JsonRpcErrorCode.Forbidden,
-      when: 'The requested path is outside OBSIDIAN_READ_PATHS (and OBSIDIAN_WRITE_PATHS, since write paths imply read access).',
+      when: 'The requested path is outside OBSIDIAN_READ_PATHS (and OBSIDIAN_WRITE_PATHS, since write paths imply read access), or inside OBSIDIAN_DENY_PATHS.',
       recovery:
         'Use a path inside the configured read scope. The error data echoes the active scope.',
     },

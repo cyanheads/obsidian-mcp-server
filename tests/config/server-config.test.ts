@@ -15,6 +15,7 @@ const ENV_KEYS = [
   'OBSIDIAN_ENABLE_COMMANDS',
   'OBSIDIAN_READ_PATHS',
   'OBSIDIAN_WRITE_PATHS',
+  'OBSIDIAN_DENY_PATHS',
   'OBSIDIAN_READ_ONLY',
   'OBSIDIAN_OMNISEARCH_URL',
 ] as const;
@@ -42,6 +43,7 @@ describe('getServerConfig', () => {
       enableCommands: false,
       readPaths: undefined,
       writePaths: undefined,
+      denyPaths: undefined,
       readOnly: false,
     });
   });
@@ -153,6 +155,26 @@ describe('OBSIDIAN_READ_PATHS / OBSIDIAN_WRITE_PATHS parsing', () => {
   });
 });
 
+describe('OBSIDIAN_DENY_PATHS parsing', () => {
+  it('parses comma-separated paths and normalizes case + trailing slashes', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_DENY_PATHS', 'Private/,public/secret/');
+    expect(getServerConfig().denyPaths).toEqual(['private', 'public/secret']);
+  });
+
+  it('throws on absolute paths', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_DENY_PATHS', '/etc/passwd');
+    expect(() => getServerConfig()).toThrow(/OBSIDIAN_DENY_PATHS/);
+  });
+
+  it('throws on `..` traversal', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_DENY_PATHS', 'projects/../secret');
+    expect(() => getServerConfig()).toThrow(/OBSIDIAN_DENY_PATHS/);
+  });
+});
+
 describe('OBSIDIAN_READ_PATHS / OBSIDIAN_WRITE_PATHS — separator parity with PathPolicy', () => {
   /**
    * Regression: PathPolicy.normalize() collapses `\` → `/` on candidate paths,
@@ -181,6 +203,12 @@ describe('OBSIDIAN_READ_PATHS / OBSIDIAN_WRITE_PATHS — separator parity with P
     vi.stubEnv('OBSIDIAN_API_KEY', 'k');
     vi.stubEnv('OBSIDIAN_READ_PATHS', 'foo/bar,foo\\bar,FOO\\BAR');
     expect(getServerConfig().readPaths).toEqual(['foo/bar']);
+  });
+
+  it('normalizes deny prefixes with the same separator rules', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_DENY_PATHS', 'Private\\Sub');
+    expect(getServerConfig().denyPaths).toEqual(['private/sub']);
   });
 });
 
