@@ -12,7 +12,7 @@ import {
   reconcileTags,
 } from '@/services/obsidian/frontmatter-ops.js';
 
-const FM_BLOCK_RE = /^---(?:\r\n|\n)([\s\S]*?)^---(?:\r\n|\n|$)/m;
+const FM_BLOCK_RE = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?:\r?\n|$)/;
 
 function readFrontmatter(content: string): Record<string, unknown> {
   const m = FM_BLOCK_RE.exec(content);
@@ -38,6 +38,13 @@ describe('deleteFrontmatterKey', () => {
   it('returns content unchanged when there is no frontmatter', () => {
     const input = '# Just a heading\nbody';
     expect(deleteFrontmatterKey(input, 'title')).toBe(input);
+  });
+
+  it('leaves a body with thematic-break `---` lines untouched (no false frontmatter match)', () => {
+    // No frontmatter, but two `---` lines in the body. A multiline-anchored regex
+    // would mis-match these as a frontmatter block and corrupt the content.
+    const input = ['intro', '---', 'x', '---', 'body'].join('\n');
+    expect(deleteFrontmatterKey(input, 'missing')).toBe(input);
   });
 
   it('strips the entire frontmatter block when the last key is removed', () => {
