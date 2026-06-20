@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against this MCP server's own repo. Use for server-specific issues — tool logic, service integrations, config problems, or domain bugs that aren't caused by the framework.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: workflow
 ---
@@ -32,10 +32,15 @@ For general `gh` CLI workflows outside issue filing (PRs, workflows, API access)
 gh repo view --json nameWithOwner -q '.nameWithOwner'
 ```
 
-2. **Search existing issues**:
+2. **Search existing issues** — if a close match exists (same symptom, different tool; same tool, different symptom; closed issue that might cover the new case), add a comment on that issue instead of filing a new one — unless the symptom or scope is distinct enough to warrant separate tracking:
 
 ```bash
-gh issue list --search "your error message or keyword"
+gh issue list --search "your error message or keyword" --state all
+
+# Assess a close match before commenting — is it already linked to a fix or referenced elsewhere?
+gh issue view <number> --comments
+gh api 'repos/{owner}/{repo}/issues/<number>/timeline' --paginate \
+  --jq '.[] | select(.event=="cross-referenced") | .source.issue | "\(.repository.full_name)#\(.number) — \(.title)"'
 ```
 
 3. **Reproduce the issue** — confirm it's reproducible. Note the exact input, transport mode, and any relevant env vars.
@@ -176,17 +181,19 @@ gh label create surplus-token-idea --color FF10F0 --description "Worth exploring
 
 ### Attaching logs or large output
 
+Note: `--body-file` replaces the entire body — it does not supplement a `--body` flag. For structured bugs with logs, either embed the log content in the `Additional context` section of a normal `--body`, or file the issue first and add the log as a comment:
+
 ```bash
 bun run rebuild && bun run start:stdio 2>&1 | head -200 > /tmp/server-error.log
 
-# As part of a new issue
+# As part of a new issue (the log becomes the entire body — no template fields)
 gh issue create \
   --title "bug(ingest): crashes on large payload" \
   --label "bug" \
   --assignee "@me" \
   --body-file /tmp/server-error.log
 
-# Or as a comment on an existing issue
+# Or as a comment on an existing issue (preferred — keeps the structured body intact)
 gh issue comment <number> --body-file /tmp/server-error.log
 ```
 
@@ -278,8 +285,8 @@ When genuinely ambiguous, file against this server's repo and note that it might
 ## Following Up
 
 ```bash
-# View issue details
-gh issue view <number>
+# View issue details (with comment thread)
+gh issue view <number> --comments
 
 # Add context
 gh issue comment <number> --body "Additional findings..."
@@ -294,6 +301,9 @@ gh issue close <number> --reason completed --comment "Fixed in <commit or PR>"
 ## Checklist
 
 - [ ] Confirmed bug is in server code, not the framework
-- [ ] Searched existing issues — no duplicate found
+- [ ] Searched existing issues — no duplicate found; close matches commented instead of duplicated
 - [ ] All secrets, credentials, and tokens redacted
-- [ ] Issue filed with: version, runtime, repro steps, actual vs expected behavior
+- [ ] Title follows `type(scope): description` format
+- [ ] Primary label assigned (`bug` / `enhancement` / `documentation`)
+- [ ] If bug: version, runtime, repro steps, actual vs expected behavior included
+- [ ] If feature: Proposal and Scope sections present; Out of scope defined

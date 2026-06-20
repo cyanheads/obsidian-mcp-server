@@ -4,7 +4,7 @@ description: >
   Authentication, authorization, and multi-tenancy patterns for `@cyanheads/mcp-ts-core`. Use when implementing auth scopes on tools/resources, configuring auth modes (none/jwt/oauth), working with JWT/OAuth env vars, or understanding how tenantId flows through ctx.state.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: reference
 ---
@@ -141,7 +141,8 @@ A `WARNING`-level log is emitted at startup whenever the flag is active so opera
 | `GET /healthz` | No |
 | `GET /mcp` | No |
 | `POST /mcp` | Yes (when auth enabled) |
-| `OPTIONS /mcp` | Yes (when auth enabled) |
+| `DELETE /mcp` | Yes (when auth enabled) — session termination |
+| `OPTIONS /mcp` | No (handled by CORS middleware before auth) |
 
 **CORS:** Set `MCP_ALLOWED_ORIGINS` to a comma-separated list of allowed origins, or `*` for open access.
 
@@ -196,7 +197,7 @@ interface AuthContext {
   clientId: string;        // Required — 'cid' or 'client_id' JWT claim
   scopes: string[];        // Required — union of 'scp', 'scope', and 'mcp_tool_scopes' claims
   sub: string;             // Required — 'sub' claim; falls back to clientId when absent
-  token: string;           // Required — raw JWT or OAuth bearer token string
+  token?: string;          // Optional — raw JWT or OAuth bearer token string (present when transport provides it)
   tenantId?: string;       // Optional — 'tid' claim; present only for multi-tenant tokens
 }
 ```

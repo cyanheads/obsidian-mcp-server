@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: reference
 ---
@@ -149,6 +149,8 @@ await instance.registerTable('recent_fetch', rows, { ttlMs: 30 * 60 * 1000 });
 Run SQL across registered tables. Returns at most `rowLimit` rows (default 10 000). When the result exceeds `rowLimit`, the response carries `truncated: true` and `rowCount` reflects the number of materialized rows (not the full result set). For full result sets and exact counts, pass `registerAs` — the result is materialized as a new canvas table; the response carries a `preview` slice and the exact `rowCount`.
 
 Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`) with a recovery hint to re-stage the table or call `describe()`. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape.
+
+A `SELECT` that parses but fails to prepare for any other reason — a mistyped column, an unknown function, an invalid expression — throws `ValidationError` (`data.reason: 'invalid_sql'`) and preserves the DuckDB binder detail in `data.binderMessage` (e.g. `Referenced column "x" not found...`, often with a candidate suggestion). This is distinct from `non_select_statement`, reserved for statements that genuinely aren't `SELECT`s — here the shape is fine, so the agent should fix the named column or function.
 
 ```ts
 const result = await instance.query(`

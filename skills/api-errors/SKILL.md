@@ -4,14 +4,14 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: reference
 ---
 
 ## Overview
 
-Error handling in `@cyanheads/mcp-ts-core` follows a strict layered pattern: tool and resource handlers throw `McpError` freely (no try/catch), the handler factory catches and normalizes all errors, and services use `ErrorHandler.tryCatch` for graceful recovery.
+Error handling in `@cyanheads/mcp-ts-core` follows a strict layered pattern: tool and resource handlers throw `McpError` freely (no try/catch), the handler factory catches and normalizes all errors, and services use `ErrorHandler.tryCatch` for structured logging and wrapping.
 
 **Imports:**
 
@@ -64,7 +64,7 @@ export const fetchTool = tool('fetch_articles', {
 |:--------|:---------|
 | Compile time | `ctx.fail('typo')` is a TS error. Auto-completes declared reasons. |
 | Runtime | `ctx.fail(reason, msg?, data?, options?)` builds an `McpError(contract.code, msg, { ...data, reason }, options)` — `data.reason` is auto-populated from the contract and cannot be overridden by caller-supplied data (spread first, then `reason` written last), so observers see a stable identifier. `options` accepts `{ cause }` for ES2022 error chaining. |
-| Lint (startup) | Each `code` validated against `JsonRpcErrorCode`. Reasons validated as snake_case + unique within contract. `recovery` validated as non-empty and ≥ 5 words. |
+| Lint (devcheck) | Each `code` validated against `JsonRpcErrorCode`. Reasons validated as snake_case + unique within contract. `recovery` validated as non-empty and ≥ 5 words. Build-time only — not invoked at server startup. |
 | Lint (conformance) | If the handler `throw new McpError(JsonRpcErrorCode.X)` outside `ctx.fail`, conformance check warns when X isn't declared. |
 
 > **`recovery` is opt-in resolution, not auto-population.** The contract `recovery` is required metadata documenting the agent's next move when this failure mode fires (a forcing function for thoughtful guidance — placeholders like "Try again." get flagged by the linter). It does **not** automatically appear in runtime `data.recovery.hint` — the framework never injects it without an explicit signal at the throw site. Authors opt in by spreading `ctx.recoveryFor('reason')` into the `data` argument, the same way `ctx.fail('reason')` opts into resolving the contract `code`. What the author types at the throw site is what flows to the wire, with no hidden transformation; the resolver is just a typed lookup keyed by the same `reason` the author already typed.
@@ -126,7 +126,7 @@ throw ctx.fail('no_match', `No item ${id}`, {
 
 ### Carrying contract `reason` from services
 
-Services don't have `ctx`, so they can't call `ctx.fail`. To make a service-thrown failure carry the contract's `reason` on the wire, **pass `data: { reason: 'X' }` to the factory**. The framework's auto-classifier preserves `data` unchanged, so clients see the same `error.data.reason` they'd see from `ctx.fail`:
+Services don't receive `ctx` automatically (unlike handlers), so they can't call `ctx.fail` directly — though `ctx` can be passed as a parameter when needed. To make a service-thrown failure carry the contract's `reason` on the wire, **pass `data: { reason: 'X' }` to the factory**. The framework's auto-classifier preserves `data` unchanged, so clients see the same `error.data.reason` they'd see from `ctx.fail`:
 
 ```ts
 // my-service.ts
@@ -271,7 +271,7 @@ Use factories or `McpError` directly when the code must be exact — auto-classi
 The framework applies these steps in order — first match wins:
 
 1. **`McpError` instance** — `error.code` is preserved as-is; no classification needed.
-2. **JS constructor name** — matched against a fixed table (e.g. `TypeError` → `ValidationError`).
+2. **JS constructor name** — matched against a fixed table (e.g. `ZodError` → `ValidationError`, `SyntaxError` → `ValidationError`). Note: `TypeError` is intentionally excluded — runtime TypeErrors are programmer errors, not validation failures.
 3. **Provider-specific patterns** — HTTP status codes, AWS exception names, Supabase, OpenRouter. Checked before common patterns because they are more specific (e.g. `status code 429` beats the generic `rate limit` pattern).
 4. **Common message/name patterns** — broad keyword patterns covering auth, not-found, validation, etc. First match wins; order matters.
 5. **`AbortError` name** — `error.name === 'AbortError'` → `Timeout`.
@@ -344,7 +344,7 @@ Checked before common patterns. Cover: AWS exception names, HTTP status codes, D
 | Tool/resource handlers | Throw `McpError` — no try/catch |
 | Handler factory (tools) | Catches all errors, normalizes to `McpError`, sets `isError: true`, mirrors error across both client surfaces (see [Error-path parity](#error-path-parity)) |
 | Handler factory (resources) | Catches and re-throws to the SDK, which routes through the JSON-RPC error envelope |
-| Services/setup code | `ErrorHandler.tryCatch` for graceful recovery |
+| Services/setup code | `ErrorHandler.tryCatch` for structured logging and wrapping (always rethrows — never swallows) |
 
 ### Error-path parity
 

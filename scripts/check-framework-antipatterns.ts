@@ -36,7 +36,17 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import process from 'node:process';
+
+// All rules scan via `git grep`, which exits 128 (not a finding) outside a repo.
+// A fresh `init` scaffold has no `.git` until the user runs `git init`, so skip
+// cleanly rather than crash on the first run. Mirrors build-changelog.ts's
+// early-exit when its source directory is absent.
+if (!existsSync('.git')) {
+  console.log('Skipped: not a git repository.');
+  process.exit(0);
+}
 
 interface Rule {
   id: string;

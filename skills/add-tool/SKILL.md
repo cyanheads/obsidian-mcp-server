@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.14"
+  version: "2.15"
   audience: external
   type: reference
 ---
@@ -251,6 +251,20 @@ enrichmentTrailer: {
 ```
 
 `structuredContent` always keeps the full structured value; `enrichmentTrailer` only controls the human-facing `content[]` line.
+
+### Image / audio output belongs in `ctx.content`
+
+When a tool produces image or audio bytes for the calling model to *see or hear* — a rendered chart, a generated frame, synthesized speech — emit them via `ctx.content`, not an `output` field. `ctx.content.image(data, mimeType)` / `.audio(data, mimeType)` prepend a content block to `content[]` after `format()` runs and **never** write to `structuredContent`, so the base64 is carried once instead of duplicating into the typed output. Like `ctx.enrich`, it lives on the base `Context` and is callable from the service layer.
+
+```ts
+async handler(input, ctx) {
+  const png = await render(input.spec);                 // base64 PNG
+  ctx.content.image(png, 'image/png');                  // → content[] block, not structuredContent
+  return { width: input.spec.w, height: input.spec.h }; // typed result stays small
+},
+```
+
+The alternative — declaring `previewData: z.string()` in `output` and emitting the block from `format()` — ships the bytes twice (once in `structuredContent`, once in the block). Reserve `output` for data the agent reasons over; route raw media through `ctx.content`. Test with `getContentBlocks(ctx)`. Full reference: `skills/api-context` § `ctx.content`.
 
 ### Capped lists must disclose truncation
 

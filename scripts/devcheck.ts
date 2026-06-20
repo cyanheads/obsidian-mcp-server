@@ -229,6 +229,15 @@ const Shell = {
 
 const ROOT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/**
+ * Whether the project root is inside a git repository. The git-dependent checks
+ * (TODOs/FIXMEs, Tracked Secrets, Framework Antipatterns) shell out to
+ * `git grep`/`git ls-files`, which exit 128 — not a real finding — when there's
+ * no repo. A fresh `init` scaffold has no `.git` until the user runs `git init`,
+ * so those checks guard on this and skip cleanly instead of failing.
+ */
+const isGitRepo = (): boolean => existsSync(path.join(ROOT_DIR, '.git'));
+
 // ── Project-local config (devcheck.config.json) ─────────────────────
 
 interface DevcheckConfig {
@@ -356,6 +365,7 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-todos',
     canFix: false,
     getCommand: (ctx) => {
+      if (!isGitRepo()) return null; // no repo to grep — fresh scaffold before `git init`
       // git grep -n (line number) -E (extended regex) -i (case-insensitive)
       const baseCmd = ['git', 'grep', '-nEi', '\\b(TODO|FIXME)\\b'];
       // Exclude files where TODO/FIXME appears as prose or intentional stubs
@@ -388,18 +398,21 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-secrets',
     canFix: false,
     // Check if common sensitive files are tracked by git.
-    getCommand: () => [
-      'git',
-      'ls-files',
-      '*.env*',
-      '**/.npmrc',
-      '**/.netrc',
-      '**/credentials.json',
-      '**/*.pem',
-      '**/*.key',
-      '**/secret*',
-      '**/.htpasswd',
-    ],
+    getCommand: () => {
+      if (!isGitRepo()) return null; // no repo — `git ls-files` would exit 128, not a finding
+      return [
+        'git',
+        'ls-files',
+        '*.env*',
+        '**/.npmrc',
+        '**/.netrc',
+        '**/credentials.json',
+        '**/*.pem',
+        '**/*.key',
+        '**/secret*',
+        '**/.htpasswd',
+      ];
+    },
     // Success if output is empty OR only contains safe patterns.
     isSuccess: (result, _mode) => {
       if (result.exitCode !== 0) return false;
@@ -424,10 +437,16 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-packaging',
     canFix: false,
     // Validates env var alignment between manifest.json (MCPB bundle) and
-    // server.json (MCP Registry). Skipped cleanly when manifest.json is absent
-    // — consumers who deleted it for an HTTP-only deploy are unaffected.
+    // server.json (MCP Registry), plus plugin marketplace manifests (#240).
+    // Runs when manifest.json OR any plugin manifest is present; skipped cleanly
+    // when none exist — consumers on an HTTP-only deploy are unaffected.
     getCommand: () => {
-      if (!existsSync(path.join(ROOT_DIR, 'manifest.json'))) return null;
+      const hasManifest = existsSync(path.join(ROOT_DIR, 'manifest.json'));
+      const hasPluginManifest =
+        existsSync(path.join(ROOT_DIR, '.claude-plugin/plugin.json')) ||
+        existsSync(path.join(ROOT_DIR, '.codex-plugin/plugin.json')) ||
+        existsSync(path.join(ROOT_DIR, '.codex-plugin/mcp.json'));
+      if (!hasManifest && !hasPluginManifest) return null;
       return ['bun', 'run', 'scripts/lint-packaging.ts'];
     },
     tip: (c) =>
@@ -437,9 +456,25 @@ const ALL_CHECKS: Check[] = [
     name: 'Framework Antipatterns',
     flag: '--no-framework-antipatterns',
     canFix: false,
-    getCommand: () => ['bun', 'run', 'scripts/check-framework-antipatterns.ts'],
+    // Runs `git grep` per rule; skip cleanly without a repo (fresh scaffold before `git init`).
+    getCommand: () => {
+      if (!isGitRepo()) return null;
+      return ['bun', 'run', 'scripts/check-framework-antipatterns.ts'];
+    },
     tip: (c) =>
       `Remove the flagged SDK-coupling shortcut. See ${c.bold('scripts/check-framework-antipatterns.ts')} for rule rationale.`,
+  },
+  {
+    name: 'Dependency Specifiers',
+    flag: '--no-dep-specifiers',
+    canFix: false,
+    // Rejects floating specifiers (latest/*/dist-tags) in package.json + the
+    // bun.lock workspaces map (#246). Static and local — no network, no git —
+    // so it runs in the default and --fast passes. Shipped to consumers via
+    // package.json `files:`; reads package.json/bun.lock directly, no guard.
+    getCommand: () => ['bun', 'run', 'scripts/check-dependency-specifiers.ts'],
+    tip: (c) =>
+      `Pin the flagged dep to a concrete range; after ${c.bold('bun update --latest')} run a plain ${c.bold('bun install')} to reconcile ${c.bold('bun.lock')}.`,
   },
   {
     name: 'Open-Indexed Interfaces',

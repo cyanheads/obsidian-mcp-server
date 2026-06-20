@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -167,7 +167,7 @@ Activated when both `SUPABASE_URL` and `SUPABASE_ANON_KEY` are set.
 | Env Var | `AppConfig` field | Default | Notes |
 |:--------|:-----------------|:--------|:------|
 | `OTEL_ENABLED` | `openTelemetry.enabled` | `false` | Enable OpenTelemetry export |
-| `OTEL_SERVICE_NAME` | `openTelemetry.serviceName` | `package.json` `name` | |
+| `OTEL_SERVICE_NAME` | `openTelemetry.serviceName` | `createApp` `name` → `package.json` `name` | Seeded from `createApp({ name })` when unset; an env value wins |
 | `OTEL_SERVICE_VERSION` | `openTelemetry.serviceVersion` | `package.json` `version` | |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `openTelemetry.tracesEndpoint` | — | OTLP traces endpoint URL |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `openTelemetry.metricsEndpoint` | — | OTLP metrics endpoint URL |

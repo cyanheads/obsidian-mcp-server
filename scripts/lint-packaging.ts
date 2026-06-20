@@ -32,6 +32,15 @@
  *      `createWorkerHandler()` (src/index.ts, src/worker.ts) and manifest
  *      `display_name` must equal the unscoped package name; a partial
  *      `name`/`title` pair warns without failing (issue #231).
+ *  10. Plugin marketplace manifests (`.claude-plugin/plugin.json`,
+ *      `.codex-plugin/plugin.json`, `.codex-plugin/mcp.json`): non-empty
+ *      descriptions, and identity/install correctness — display fields
+ *      (`name`, server key, `interface.displayName`) carry the unscoped machine
+ *      name while the `npx -y` install arg carries the full `package.json`
+ *      name (scoped if scoped). An unscoped install arg for a scoped package
+ *      is a guaranteed install 404. Gated by `devcheck.config.json`
+ *      `packaging.pluginManifests` (default on); each manifest is skipped
+ *      cleanly when absent (issue #240).
  *
  * Every check skips cleanly when its input is absent — consumers who deleted
  * `manifest.json` for an HTTP-only deploy, or who haven't built a bundle,
@@ -374,6 +383,128 @@ export function checkManifestIdentity(manifest: Manifest, unscopedName: string):
   return [];
 }
 
+/** Parsed plugin marketplace manifests; an absent manifest is `undefined`. */
+export interface PluginManifestInputs {
+  claudePlugin?: unknown;
+  codexMcp?: unknown;
+  codexPlugin?: unknown;
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+const isNonEmptyString = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0;
+
+/** The `npx -y <pkg>` install target is the arg after the `-y` flag (args[1]). */
+function installArg(entry: Record<string, unknown>): unknown {
+  return Array.isArray(entry.args) ? entry.args[1] : undefined;
+}
+
+/**
+ * Check 10: plugin marketplace manifests. Display fields (`name`, server key,
+ * `interface.displayName`) must equal the unscoped machine name; the install
+ * arg must equal the full `package.json` name (the real `npx` target). Empty
+ * descriptions ship blank marketplace cards. Each manifest is validated only
+ * when present, so HTTP-only and non-plugin consumers are unaffected. The
+ * caller gates the whole check on `packaging.pluginManifests`.
+ */
+export function checkPluginManifests(
+  inputs: PluginManifestInputs,
+  unscopedName: string,
+  fullName: string,
+): string[] {
+  const errors: string[] = [];
+  const optOut =
+    '(or set "packaging": { "pluginManifests": false } in devcheck.config.json to opt out)';
+
+  // ── .claude-plugin/plugin.json ──
+  const claude = inputs.claudePlugin;
+  if (isRecord(claude)) {
+    const f = '.claude-plugin/plugin.json';
+    if (!isNonEmptyString(claude.description)) {
+      errors.push(`${f} "description" is empty — populate it ${optOut}`);
+    }
+    if (claude.name !== unscopedName) {
+      errors.push(
+        `${f} "name" is "${String(claude.name)}" — must equal the unscoped package name "${unscopedName}"`,
+      );
+    }
+    const servers = claude.mcpServers;
+    if (isRecord(servers)) {
+      if (!(unscopedName in servers)) {
+        errors.push(
+          `${f} mcpServers has no "${unscopedName}" entry — the server key must be the unscoped package name`,
+        );
+      }
+      const entry = servers[unscopedName];
+      if (isRecord(entry) && installArg(entry) !== fullName) {
+        errors.push(
+          `${f} mcpServers["${unscopedName}"] install arg is "${String(installArg(entry))}" — ` +
+            `must be the full package name "${fullName}" (the npx -y target; an unscoped arg for a scoped package 404s)`,
+        );
+      }
+    }
+  }
+
+  // ── .codex-plugin/plugin.json ──
+  const codex = inputs.codexPlugin;
+  if (isRecord(codex)) {
+    const f = '.codex-plugin/plugin.json';
+    if (!isNonEmptyString(codex.description)) {
+      errors.push(`${f} "description" is empty — populate it ${optOut}`);
+    }
+    if (codex.name !== unscopedName) {
+      errors.push(
+        `${f} "name" is "${String(codex.name)}" — must equal the unscoped package name "${unscopedName}"`,
+      );
+    }
+    const iface = codex.interface;
+    if (isRecord(iface)) {
+      if (iface.displayName !== unscopedName) {
+        errors.push(
+          `${f} interface.displayName is "${String(iface.displayName)}" — must equal the unscoped package name "${unscopedName}"`,
+        );
+      }
+      if (!isNonEmptyString(iface.shortDescription)) {
+        errors.push(`${f} interface.shortDescription is empty — populate it ${optOut}`);
+      }
+      if (!isNonEmptyString(iface.longDescription)) {
+        errors.push(`${f} interface.longDescription is empty — populate it ${optOut}`);
+      }
+    } else {
+      errors.push(
+        `${f} is missing the "interface" object (displayName / shortDescription / longDescription)`,
+      );
+    }
+  }
+
+  // ── .codex-plugin/mcp.json ──
+  const codexMcp = inputs.codexMcp;
+  if (isRecord(codexMcp)) {
+    const f = '.codex-plugin/mcp.json';
+    if (!(unscopedName in codexMcp)) {
+      errors.push(
+        `${f} has no "${unscopedName}" server entry — the server key must be the unscoped package name`,
+      );
+    }
+    const entry = codexMcp[unscopedName];
+    if (isRecord(entry) && installArg(entry) !== fullName) {
+      errors.push(
+        `${f} "${unscopedName}" install arg is "${String(installArg(entry))}" — ` +
+          `must be the full package name "${fullName}" (the npx -y target)`,
+      );
+    }
+  }
+
+  return errors;
+}
+
+/** Read `packaging.pluginManifests` from devcheck.config.json; default on. */
+function pluginManifestsEnabled(): boolean {
+  const cfg = tryReadJson<{ packaging?: { pluginManifests?: boolean } }>(
+    resolve('devcheck.config.json'),
+  );
+  return cfg?.packaging?.pluginManifests ?? true;
+}
+
 async function main(): Promise<void> {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -493,6 +624,27 @@ async function main(): Promise<void> {
       const result = checkEntrypointIdentity(readFileSync(entryPath, 'utf-8'), unscopedName, entry);
       errors.push(...result.errors);
       warnings.push(...result.warnings);
+    }
+  }
+
+  // ── Plugin marketplace manifests (check 10) ──
+  if (unscopedName && pkg?.name) {
+    if (pluginManifestsEnabled()) {
+      errors.push(
+        ...checkPluginManifests(
+          {
+            claudePlugin: tryReadJson(resolve('.claude-plugin/plugin.json')),
+            codexPlugin: tryReadJson(resolve('.codex-plugin/plugin.json')),
+            codexMcp: tryReadJson(resolve('.codex-plugin/mcp.json')),
+          },
+          unscopedName,
+          pkg.name,
+        ),
+      );
+    } else {
+      notes.push(
+        'Plugin-manifest checks disabled via devcheck.config.json packaging.pluginManifests.',
+      );
     }
   }
 

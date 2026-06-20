@@ -1,10 +1,10 @@
 ---
 name: api-context
 description: >
-  Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.progress`, `ctx.enrich`), and when to use each.
+  Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.elicit`, `ctx.progress`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: reference
 ---
@@ -62,6 +62,12 @@ interface Context {
   // when no `enrichment` block), strictly typed on HandlerContext<R, E> against the
   // declared fields. Kind-tagged helpers: enrich.notice / .total / .echo.
   readonly enrich: Enrich;
+
+  // Non-text content blocks (image/audio bytes) for the calling model — prepended
+  // to content[] after format() runs, never placed in structuredContent. Always
+  // present (no-op when never called). Helpers: content.image / .audio; content(block)
+  // pushes a raw ContentBlock.
+  readonly content: ContentCollect;
 
   // Opt-in contract resolver — always present (returns {} when no contract is attached
   // or the reason is unknown), strictly typed on HandlerContext<R> against declared reasons.
@@ -637,6 +643,52 @@ See `add-tool`'s **Tool Response Design** and `skills/api-linter` (`enrichment-*
 
 ---
 
+## `ctx.content`
+
+Always present on `Context`. Collects **non-text content blocks** — image or audio bytes the calling model should see or hear — and prepends them to the tool's `content[]` after `format()` runs. Collected blocks **never** enter `structuredContent`, so the base64 payload is carried once (in `content[]`) instead of duplicating into the typed output field. The media counterpart to `ctx.enrich`: both ride alongside the domain result without bloating it.
+
+```ts
+export const renderChart = tool('render_chart', {
+  description: 'Render a chart from a series and return its summary.',
+  input: z.object({ series: z.array(z.number()).describe('Data points') }),
+  output: z.object({ points: z.number().describe('Number of points plotted') }),
+  async handler(input, ctx) {
+    const png = await draw(input.series);          // base64 PNG
+    ctx.content.image(png, 'image/png');           // → content[] block, NOT structuredContent
+    return { points: input.series.length };        // the typed result stays small
+  },
+});
+```
+
+Without `ctx.content`, the only way to surface bytes to the model is to declare them in `output` and emit an image block from `format()` — which ships the base64 twice (once in `structuredContent`, once in the block). `ctx.content` removes the duplication.
+
+### Signature
+
+```ts
+// Callable — push a raw ContentBlock (escape hatch for embedded resources, resource links):
+ctx.content(block: ContentBlock): void
+
+// Typed helpers for the two base64 media blocks:
+ctx.content.image(data: string, mimeType: string): void   // → { type: 'image', data, mimeType }
+ctx.content.audio(data: string, mimeType: string): void   // → { type: 'audio', data, mimeType }
+```
+
+### Behavior
+
+| Aspect | Detail |
+|:-------|:-------|
+| `content[]` only | Blocks are prepended to `content[]` and never written to `structuredContent`. Data meant for the typed result stays on the handler's return value. |
+| Order | `content[]` is `[...collected blocks, ...format()/JSON output, ...enrichment trailer]` — media first, domain content next, enrichment trailer last. |
+| Accumulation | Each call appends; blocks render in call order. |
+| No-op | A handler that never calls `ctx.content` produces a `content[]` / `structuredContent` byte-identical to before — the feature is purely additive and opt-in. |
+| Error path | If the handler throws, collected blocks are dropped — a failed call returns the error result only, never a partial image. |
+| Service usage | Services accepting `ctx: Context` can call `ctx.content(...)`; the blocks reach `content[]` exactly as if the handler had. |
+| No schema involvement | Blocks bypass `output` entirely, so no linter rule requires them in `format()` and they never appear in the advertised `outputSchema`. |
+
+Test content blocks with `getContentBlocks(ctx)` from `@cyanheads/mcp-ts-core/testing`.
+
+---
+
 ## Quick reference
 
 | Property | Type | Present when |
@@ -652,6 +704,7 @@ See `add-tool`'s **Tool Response Design** and `skills/api-linter` (`enrichment-*
 | `ctx.state` | `ContextState` | Always (throws if `tenantId` missing) |
 | `ctx.signal` | `AbortSignal` | Always |
 | `ctx.enrich` | `Enrich` | Always; typed on `HandlerContext<R, E>` when an `enrichment` block is declared |
+| `ctx.content` | `ContentCollect` | Always — prepends image/audio blocks to `content[]`, never `structuredContent` |
 | `ctx.elicit` | `function \| undefined` | Client supports elicitation |
 | `ctx.notifyResourceListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped (see [§ list-changed notifications](#list-changed-notifications-ctxnotify)) |
 | `ctx.notifyResourceUpdated` | `function \| undefined` | Always in handler ctx; delivery request-scoped |

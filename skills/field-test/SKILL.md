@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.5"
+  version: "2.6"
   audience: external
   type: debug
 ---
@@ -19,7 +19,7 @@ Unit tests (`add-test` skill) verify handler logic with mocked context. Field te
 
 This skill drives an HTTP server because curl + JSON-RPC is the most reliable harness for shell-based agents. The same handlers run on both transports — only the framing differs — so HTTP exercises the full functional surface.
 
-**Stdio coverage is a boot check only.** Run `bun run rebuild && bun run start:stdio`, confirm the startup logs look clean (banner, expected tool/resource counts, no errors/warnings, no missing-config gripes), then kill it. Pino logs go to stderr in stdio mode (stdout is reserved for JSON-RPC), so they print straight to the terminal when you run interactively. No need to call tools over stdio — the HTTP pass already covered handler behavior.
+**Stdio coverage is a boot check only — run this before Step 1.** Run `bun run rebuild && bun run start:stdio`, confirm the startup logs look clean (banner, expected tool/resource counts, no errors/warnings, no missing-config gripes), then kill it. Pino logs go to stderr in stdio mode (stdout is reserved for JSON-RPC), so they print straight to the terminal when you run interactively. No need to call tools over stdio — the HTTP pass already covered handler behavior.
 
 ---
 
@@ -193,7 +193,7 @@ Capture `pid`, `url`, `port`, `log` from the `mcp_start` output — every later 
 
 - `MCP_HTTP_PORT` is a *starting* port — the server auto-increments if taken. Helper parses the real URL from the log (`HTTP transport listening at ...`).
 - If `bun run rebuild` fails, stop. Don't field-test broken code — fix the build first.
-- If a server is already listening on the project's port (`lsof -i :<port>`), confirm with the user before killing it; it may be their own session.
+- If a server is already listening on the project's port (`lsof -i :<port>`), confirm with the user before killing it; it may be their own session. If the user isn't available to confirm, abort the field test and surface the port conflict in your response.
 
 ### 2. Initialize the session
 
@@ -251,7 +251,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 | Resource declared an `errors: [...]` contract | Error contract (resource): trigger ≥1 declared failure mode by reading a URI that exercises it. Resources re-throw errors at the JSON-RPC level — verify `error.code` matches the contract entry and `error.data.reason` is the declared reason. (Resources don't use the `result.isError` envelope — they fail the request itself.) |
 | Mutator (write/update/delete/append/patch verbs, or `destructiveHint: true`) | Mutator response observability: run an intentionally-ambiguous input (typo path, wrong ID, already-deleted target). Confirm the response carries enough state (pre/post values, state-change discriminator) for the agent to detect intent-effect divergence without re-fetching. |
 
-**Resources.** Happy path, not-found URI, `list` if defined, pagination if used.
+**Resources.** Happy path, not-found URI (use a syntactically valid but non-existent ID — e.g., substitute a fake ID into the URI template), `list` if defined, pagination if used.
 **Prompts.** Happy path, defaults omitted, skim message quality.
 
 **Sampling for large servers.** If more than 15 tools, run the universal battery on all, but pick roughly 30–40% for situational testing. Weight toward: write-shaped tools, complex schemas, external deps. List which ones you skipped in the report.
@@ -285,7 +285,7 @@ mcp_stop <pid> <log>
 rm -f /tmp/<project-name>-field-test-<ID>.sh
 ```
 
-Kills the background server, removes the server log, then removes the helper script itself. Do this *before* writing the report so nothing leaks into the next session.
+Kills the background server, removes the server log, then removes the helper script itself. Do this *before* writing the report so nothing leaks into the next session. If `mcp_stop` warns the PID is still alive after SIGKILL, note it in the report and proceed — don't block on a zombie process.
 
 ### 7. Report
 
@@ -332,13 +332,15 @@ End with:
 
 ## Checklist
 
-- [ ] Server built and started; real port parsed from log
+- [ ] Stdio boot check completed — `bun run rebuild && bun run start:stdio` shows clean startup (banner, expected counts, no errors)
+- [ ] HTTP server built and started; real port parsed from log
 - [ ] Session initialized; `notifications/initialized` sent
 - [ ] Catalog surfaced and presented; descriptions audited for leaks (implementation details, meta-coaching, consumer-aware phrasing)
-- [ ] Universal battery run on every definition
+- [ ] Universal battery run on every definition (happy path, parity, input error)
 - [ ] Situational categories applied only when triggered
+- [ ] **If >15 tools:** sampled 30–40% for situational testing; skipped definitions listed in report
 - [ ] **If a tool declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; `result.structuredContent.error.code` and `data.reason` verified against the contract entry
 - [ ] **If a resource declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; top-level JSON-RPC `error.code` and `error.data.reason` verified against the contract entry
 - [ ] External-state / auth-gated tools handled explicitly (run, skip, or confirm)
-- [ ] Server stopped; state file removed
+- [ ] Server stopped; server log and helper script removed
 - [ ] Report: summary paragraph → grouped findings → numbered options

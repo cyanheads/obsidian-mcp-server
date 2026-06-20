@@ -4,7 +4,7 @@ description: >
   Pick and run a multi-phase workflow that chains foundational task skills (`git-wrapup`, `release-and-publish`, `maintenance`, `field-test`, `setup`, etc.) end-to-end. Routes user intent to a workflow file under `workflows/` — greenfield builds, maintenance + release, field-test + fix, or known-work + release. Single source for the universal rules (no commits without authorization, no destructive git, no marketing language), the orchestrator posture (own the goal, ground sub-agents in primary sources, verify against the goal), and the sub-agent strategy (orient block, parallel fanout, isolation, normalization) that apply across every workflow. Sub-agents are an optional capability — workflows run linearly when fanout isn't available.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: workflow
 ---
@@ -140,7 +140,7 @@ The sub-agent reads the primary sources directly during orient (step 6) — do n
 
 ### Isolation rules
 
-1. **Bash `git` only in parallel sub-agents.** Do not let parallel sub-agents call `mcp__git-mcp-server__*` tools — session state (`set_working_dir`) leaks across parallel calls in the same orchestrator session, causing silent no-ops, wrong-directory operations, and false "tag already exists" errors. Bash `git` in the agent's CWD is reliable. The orchestrator may still use `git-mcp-server` itself in serial.
+1. **Bash `git` in each sub-agent's own CWD.** Parallel sub-agents run git through the shell against their own working directory — independent, no shared state across agents.
 
 2. **Sub-agents do not receive this orchestrations skill or workflow files.** Their prompts include Tier 1 skill paths only. This prevents recursive sub-agent spawning — if a sub-agent decides it needs to fan out work, that's a signal the orchestrator sliced the work too wide. Re-slice; don't let the sub-agent recurse.
 

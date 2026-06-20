@@ -1,7 +1,7 @@
 {
   "name": "obsidian-mcp-server",
-  "version": "3.2.7",
-  "description": "MCP server for Obsidian vaults — read, write, search, and surgically edit notes, tags, and frontmatter via the Local REST API plugin. STDIO or Streamable HTTP.",
+  "version": "3.2.8",
+  "description": "Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "obsidian-mcp-server",
     "shortDescription": "Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP.",
-    "longDescription": "MCP server for Obsidian vaults — read, write, search, and surgically edit notes, tags, and frontmatter through the Local REST API plugin. STDIO or Streamable HTTP.",
+    "longDescription": "Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP. STDIO or Streamable HTTP.",
     "developerName": "cyanheads",
     "category": "productivity",
     "capabilities": ["Read"],

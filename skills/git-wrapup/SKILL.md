@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts) and an annotated tag. Verify, commit, tag. Stops at "committed and tagged locally" — no push, no publish. The release-and-publish skill picks up from here. Distilled from the git_wrapup_instructions protocol.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.4"
   audience: external
   type: workflow
 ---
@@ -159,7 +159,7 @@ Use `-m` with embedded newlines in the string (the commit `-m`-only constraint a
 ```
 <theme — omit version number, GitHub prepends v<VERSION>:>
 
-<1-2 sentence context: what this release does>
+<optional context — one concise line, two max>
 
 <Sections — Keep a Changelog names, only those with entries>
 
@@ -182,6 +182,7 @@ Dependency bumps:
 
 **Rules:**
 - Subject line omits the version number (GitHub prepends `v<VERSION>:` to the release title)
+- **No narrative preamble** — context under the subject is one concise line, two max; never paragraph blocks. Detail belongs in the bullets
 - Not a CHANGELOG copy — terse, scannable
 - No marketing adjectives
 - Length is earned — two-line tags are fine for small patches
@@ -204,7 +205,7 @@ If the working tree isn't clean or the tag doesn't point at HEAD, something went
 - **Local only.** No `git push`, no remote operations
 - **Never stash.** Not for quick checks, not for testing, not for any reason
 - **Never destructive.** No `git reset --hard`, `git restore .`, `git clean -f`, `git checkout -- .`
-- **Bash git only** when running inside orchestrated sub-agents (git-mcp-server session state leaks across parallel agents)
+- **Bash git only.** Drive every git operation through the shell
 - If `v<version>` already exists as a tag, **halt and report the conflict** — include the version string, existing tag SHA, and current HEAD SHA so the caller can resolve it. Do not delete or move tags without explicit authorization
 
 ## Checklist
