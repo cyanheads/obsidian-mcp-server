@@ -61,7 +61,7 @@ export const PatchOptionsSchema = z
       .boolean()
       .default(false)
       .describe(
-        'When false (default), the patch is rejected if the supplied content already appears in the target — idempotent against agent retries. Set to true to force-apply even when it would duplicate. Replace operations are unaffected (the plugin exempts them).',
+        'When false (default), the patch is rejected if the supplied content already appears in the target — idempotent against retries. Set to true to force-apply even when it would duplicate. Replace operations are never rejected.',
       ),
     trimTargetWhitespace: z
       .boolean()

@@ -319,8 +319,9 @@ export const obsidianGetNote = tool('obsidian_get_note', {
         type: 'text',
         text: [
           `**${result.path}** (format: ${result.format})`,
-          `*Section:* ${result.section.type} → ${result.section.target} (valueText/valueJson)`,
+          `*Section:* ${result.section.type} → ${result.section.target}`,
           '',
+          '**Value:**',
           value,
         ].join('\n'),
       },

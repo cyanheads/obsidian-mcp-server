@@ -122,13 +122,13 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       .string()
       .optional()
       .describe(
-        'The query string. Required for `text` and `omnisearch` modes; ignored in `jsonlogic` mode (use `logic` instead — passing a JSONLogic tree here will fail Zod validation since this field must be a string).',
+        'The query string. Required for `text` and `omnisearch` modes; ignored in `jsonlogic` mode (use `logic` instead — this field must be a string, so passing a JSONLogic tree here is rejected).',
       ),
     logic: z
       .record(z.string(), z.unknown())
       .optional()
       .describe(
-        'JSONLogic tree. Required for `jsonlogic` mode; ignored in `text` and `omnisearch` modes (use `query` instead — passing a string here will fail Zod validation since this field must be an object).',
+        'JSONLogic tree. Required for `jsonlogic` mode; ignored in `text` and `omnisearch` modes (use `query` instead — this field must be an object, so passing a string here is rejected).',
       ),
     contextLength: z
       .number()
@@ -139,7 +139,9 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
     pathPrefix: z
       .string()
       .optional()
-      .describe('Filter returned filenames by prefix (text mode only, applied client-side).'),
+      .describe(
+        'Filter returned filenames by prefix (text mode only, applied after matching — does not narrow the search itself).',
+      ),
     maxMatchesPerHit: z
       .number()
       .int()
