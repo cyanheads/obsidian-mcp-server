@@ -20,6 +20,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService, type ObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { nameRegexSafetyIssue } from './_shared/regex-safety.js';
 
 const DEFAULT_DEPTH = 2;
 const MAX_DEPTH = 20;
@@ -75,7 +76,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
       .string()
       .optional()
       .describe(
-        'Optional ECMAScript regex (no flags) applied to entry names. Matches both files and directories; directories that fail the regex are skipped without recursing into them.',
+        'Optional ECMAScript regex (no flags, ≤256 chars, no nested quantifiers like `(a+)+`) applied to entry names. Matches both files and directories; directories that fail the regex are skipped without recursing into them.',
       ),
     depth: z
       .number()
@@ -138,6 +139,13 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
         'Use a valid ECMAScript regex (e.g. `^Project.*\\.md$`), or omit nameRegex to disable filtering.',
     },
     {
+      reason: 'regex_unsafe',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The supplied `nameRegex` is well-formed but exceeds the 256-character limit or contains nested quantifiers known to cause catastrophic backtracking.',
+      recovery:
+        'Avoid nested quantifiers like `(a+)+` or `(.*)*`. Use a simpler pattern (e.g. `^Project.*\\.md$`), or omit nameRegex to disable filtering.',
+    },
+    {
       reason: 'path_forbidden',
       code: JsonRpcErrorCode.Forbidden,
       when: 'The supplied `path` is outside OBSIDIAN_READ_PATHS (root listings always pass; specific subdirectories must be readable).',
@@ -158,6 +166,13 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
 
     let regex: RegExp | undefined;
     if (input.nameRegex) {
+      const safetyIssue = nameRegexSafetyIssue(input.nameRegex);
+      if (safetyIssue) {
+        throw ctx.fail('regex_unsafe', `Unsafe nameRegex: ${safetyIssue}`, {
+          nameRegex: input.nameRegex,
+          ...ctx.recoveryFor('regex_unsafe'),
+        });
+      }
       try {
         regex = new RegExp(input.nameRegex);
       } catch (err) {

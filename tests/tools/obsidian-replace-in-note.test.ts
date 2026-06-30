@@ -210,4 +210,29 @@ describe('obsidian_replace_in_note', () => {
       data: { reason: 'regex_invalid' },
     });
   });
+
+  it('throws regex_unsafe (ValidationError) for a catastrophic-backtracking useRegex pattern', async () => {
+    // The note is read first, but the guard must reject before the pattern is
+    // compiled and run over the body. No PUT intercept is registered, so any
+    // write attempt would fail the test.
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!'), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    await expect(
+      obsidianReplaceInNote.handler(
+        obsidianReplaceInNote.input.parse({
+          target: { type: 'path', path: 'N.md' },
+          replacements: [{ search: '(a+)+$', useRegex: true, replace: 'x' }],
+        }),
+        createMockContext({ errors: obsidianReplaceInNote.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'regex_unsafe' },
+    });
+  });
 });

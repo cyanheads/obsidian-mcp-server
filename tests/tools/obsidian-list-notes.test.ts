@@ -199,6 +199,20 @@ describe('obsidian_list_notes / caps and errors', () => {
       data: { reason: 'regex_invalid' },
     });
   });
+
+  it('throws regex_unsafe (ValidationError) for a catastrophic-backtracking nameRegex before any vault access', async () => {
+    // No pool intercept is registered: if the static guard didn't reject first,
+    // the walk would issue a GET and throw "no mock intercept" instead.
+    await expect(
+      obsidianListNotes.handler(
+        obsidianListNotes.input.parse({ nameRegex: '(a+)+$' }),
+        createMockContext({ errors: obsidianListNotes.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'regex_unsafe' },
+    });
+  });
 });
 
 describe('obsidian_list_notes / format()', () => {

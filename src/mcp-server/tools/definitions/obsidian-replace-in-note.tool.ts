@@ -8,13 +8,26 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { nameRegexSafetyIssue } from './_shared/regex-safety.js';
 import { TargetSchema } from './_shared/schemas.js';
+
+/**
+ * Length cap for `useRegex` patterns — higher than the 256 default for name
+ * filters, since body-wide replace patterns are legitimately longer. The
+ * nested-quantifier guard applies regardless of length.
+ */
+const REPLACE_REGEX_MAX_LENGTH = 1024;
 
 const ReplacementSchema = z
   .object({
     search: z.string().min(1).describe('Substring or regex pattern to match.'),
     replace: z.string().describe('Replacement text. Empty string deletes matches.'),
-    useRegex: z.boolean().default(false).describe('Treat `search` as an ECMAScript regex pattern.'),
+    useRegex: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Treat `search` as an ECMAScript regex pattern (≤1024 chars, no nested quantifiers like `(a+)+` — catastrophic-backtracking guard).',
+      ),
     caseSensitive: z.boolean().default(true).describe('When false, match case-insensitively.'),
     wholeWord: z
       .boolean()
@@ -84,6 +97,13 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
         'Use a valid ECMAScript regex, or set useRegex to false to match `search` as a literal string.',
     },
     {
+      reason: 'regex_unsafe',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A `useRegex: true` replacement supplied a `search` pattern that is well-formed but exceeds the 1024-character limit or contains nested quantifiers known to cause catastrophic backtracking against the note body.',
+      recovery:
+        'Avoid nested quantifiers like `(a+)+` or `(.*)*`. Use a simpler pattern, or set useRegex to false to match `search` as a literal string.',
+    },
+    {
       reason: 'note_missing',
       code: JsonRpcErrorCode.NotFound,
       when: 'The vault path does not resolve to an existing note.',
@@ -127,6 +147,13 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
       let count = 0;
       if (r.useRegex) {
         const pattern = r.wholeWord ? `\\b(?:${r.search})\\b` : r.search;
+        const safetyIssue = nameRegexSafetyIssue(pattern, REPLACE_REGEX_MAX_LENGTH);
+        if (safetyIssue) {
+          throw ctx.fail('regex_unsafe', `Unsafe regex '${r.search}': ${safetyIssue}`, {
+            search: r.search,
+            ...ctx.recoveryFor('regex_unsafe'),
+          });
+        }
         let re: RegExp;
         try {
           re = new RegExp(pattern, `${r.replaceAll ? 'g' : ''}${r.caseSensitive ? '' : 'i'}`);
