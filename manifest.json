@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "obsidian-mcp-server",
-  "version": "3.2.8",
+  "version": "3.2.9",
   "description": "Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads"

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.2.9](changelog/3.2.x/3.2.9.md) — 2026-06-30 · 🛡️ Security
+
+ReDoS guards reject catastrophic-backtracking regex on obsidian_list_notes and obsidian_replace_in_note (#88); obsidian_manage_frontmatter / obsidian_manage_tags edits preserve comments, quoting, and plain dates (#89); tool description polish (#86); mcp-ts-core ^0.10.10
+
 ## [3.2.8](changelog/3.2.x/3.2.8.md) — 2026-06-20
 
 Unscoped Cursor/VS Code install deeplinks (scoped args 404 for this unscoped package), normalized package descriptions, mcp-ts-core ^0.10.9 adoption (dep-specifier + plugin-manifest devcheck guards)
