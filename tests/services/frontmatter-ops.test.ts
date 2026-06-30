@@ -133,6 +133,49 @@ describe('reconcileTags / remove', () => {
   });
 });
 
+describe('frontmatter round-trip fidelity (surgical edits)', () => {
+  const handAuthored = [
+    '---',
+    '# status explainer',
+    'status: draft   # flip to published when ready',
+    'priority: 1',
+    'aliases:',
+    '  - "My Note"',
+    '  - "MN"',
+    'tags:',
+    '  - work',
+    'date: 2026-06-29',
+    '---',
+    '',
+    '# Body',
+  ].join('\n');
+
+  it('adds a tag without dropping comments, unquoting aliases, or reformatting a plain date', () => {
+    const r = reconcileTags(handAuthored, ['urgent'], 'add', 'frontmatter');
+    // Only the targeted field changed.
+    expect(r.applied).toEqual(['urgent']);
+    expect(readFrontmatter(r.content).tags).toEqual(['work', 'urgent']);
+    // Untouched fields survive verbatim.
+    expect(r.content).toContain('# status explainer');
+    expect(r.content).toContain('# flip to published when ready');
+    expect(r.content).toContain('date: 2026-06-29');
+    expect(r.content).not.toContain('2026-06-29T00:00:00');
+    expect(r.content).toContain('"My Note"');
+    expect(r.content).toContain('# Body');
+  });
+
+  it('deletes an unrelated key without reformatting the surviving date or dropping comments', () => {
+    const out = deleteFrontmatterKey(handAuthored, 'priority');
+    expect(readFrontmatter(out).priority).toBeUndefined();
+    expect(out).not.toContain('priority:');
+    // Surviving fields keep their hand-authored form.
+    expect(out).toContain('# status explainer');
+    expect(out).toContain('date: 2026-06-29');
+    expect(out).not.toContain('2026-06-29T00:00:00');
+    expect(out).toContain('"My Note"');
+  });
+});
+
 describe('listTagsFromContent', () => {
   it('splits frontmatter and inline tags, deduplicating', () => {
     const content = ['Body with #foo and #bar.', 'Another #foo.'].join('\n');

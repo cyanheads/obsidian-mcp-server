@@ -5,7 +5,7 @@
  * @module services/obsidian/frontmatter-ops
  */
 
-import { dump as yamlDump, load as yamlLoad } from 'js-yaml';
+import { type Document, isMap, parseDocument } from 'yaml';
 
 const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
@@ -26,18 +26,22 @@ function splice(content: string): Splice {
   };
 }
 
-function loadFrontmatter(yamlText: string): Record<string, unknown> {
-  const loaded = yamlLoad(yamlText) as Record<string, unknown> | null | undefined;
-  return loaded && typeof loaded === 'object' ? loaded : {};
-}
-
-function emit(frontmatter: Record<string, unknown>, body: string): string {
-  const keys = Object.keys(frontmatter);
-  if (keys.length === 0) {
+/**
+ * Re-emit the parsed frontmatter document between `---` fences, preserving the
+ * comments, quoting, and scalar formatting of every untouched node — the reason
+ * these helpers parse with `yaml`'s CST-backed `parseDocument` and edit nodes in
+ * place rather than round-tripping the block through a plain object (which drops
+ * comments and rewrites untouched scalars, e.g. `date: 2026-06-29` → an ISO
+ * timestamp). When no keys remain, the whole block is dropped and the body's
+ * leading whitespace trimmed.
+ */
+function serializeFrontmatter(doc: Document, body: string): string {
+  const node = doc.contents;
+  if (!node || (isMap(node) && node.items.length === 0)) {
     return body.replace(/^\s+/, '');
   }
-  const yamlText = yamlDump(frontmatter, { lineWidth: 1000, noRefs: true });
-  return `---\n${yamlText.trimEnd()}\n---\n${body.startsWith('\n') ? body.slice(1) : body}`;
+  const yamlText = doc.toString({ lineWidth: 0 }).trimEnd();
+  return `---\n${yamlText}\n---\n${body.startsWith('\n') ? body.slice(1) : body}`;
 }
 
 /**
@@ -48,10 +52,10 @@ function emit(frontmatter: Record<string, unknown>, body: string): string {
 export function deleteFrontmatterKey(content: string, key: string): string {
   const { hasFrontmatter, yamlText, body } = splice(content);
   if (!hasFrontmatter) return content;
-  const fm = loadFrontmatter(yamlText);
-  if (!(key in fm)) return content;
-  delete fm[key];
-  return emit(fm, body);
+  const doc = parseDocument(yamlText);
+  if (!doc.has(key)) return content;
+  doc.delete(key);
+  return serializeFrontmatter(doc, body);
 }
 
 export interface TagReconcileResult {
@@ -107,7 +111,8 @@ function mutateFrontmatterTags(
   skipped: Set<string>,
 ): string {
   const { hasFrontmatter, yamlText, body } = splice(content);
-  const fm = hasFrontmatter ? { ...loadFrontmatter(yamlText) } : {};
+  const doc = parseDocument(hasFrontmatter ? yamlText : '');
+  const fm = (doc.toJS() ?? {}) as Record<string, unknown>;
 
   const existing = normalizeTagList(fm.tags);
   const set = new Set(existing);
@@ -136,15 +141,12 @@ function mutateFrontmatterTags(
 
   const ordered = [...set];
   if (ordered.length === 0) {
-    delete fm.tags;
+    doc.delete('tags');
   } else {
-    fm.tags = ordered;
+    doc.set('tags', ordered);
   }
 
-  if (Object.keys(fm).length === 0) {
-    return body.replace(/^\s+/, '');
-  }
-  return emit(fm, body);
+  return serializeFrontmatter(doc, body);
 }
 
 function normalizeTagList(value: unknown): string[] {
