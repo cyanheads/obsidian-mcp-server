@@ -7,7 +7,12 @@
 
 import { type Document, isMap, parseDocument } from 'yaml';
 
-const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+// Anchored to string start only (NO /m flag): the opening `---` must be the very
+// first line. With /m the opening `^---` could match a `---` line mid-body, and
+// splice() slices via m[0].length assuming the match is at index 0 → silent content
+// corruption on notes that have no frontmatter but contain `---` lines in the body.
+// The optional content group lets an empty block (`---\n---\n`) still match.
+const FM_RE = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?:\r?\n|$)/;
 
 interface Splice {
   body: string;
