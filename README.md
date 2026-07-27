@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.cyanheads%2Fobsidian-mcp-server.svg)](https://mcptoplist.com/server/io.github.cyanheads%2Fobsidian-mcp-server)
+
 <div align="center">
   <h1>obsidian-mcp-server</h1>
   <p><b>Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP. STDIO or Streamable HTTP.</b>
