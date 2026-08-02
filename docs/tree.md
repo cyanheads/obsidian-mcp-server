@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 08:40:24
+Generated on: 2026-08-02 19:45:41
 
 ```text
 obsidian-mcp-server/
@@ -13,10 +13,12 @@ obsidian-mcp-server/
 │   └── plugin.json
 ├── .gemini/
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -204,6 +206,7 @@ obsidian-mcp-server/
 │   └── instructions.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md

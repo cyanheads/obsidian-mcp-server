@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.2.10](changelog/3.2.x/3.2.10.md) — 2026-08-02 · 🛡️ Security
+
+Markdown-Patch-Version: 1 pinned on every PATCH and document-map fetch, restoring section-targeted writes against Local REST API v5.x (#94); bare heading leaves resolve to a unique full path or reject as ambiguous_section (#75); bunfig.toml gains a 3-day release-age guard and Socket scanner; mcp-ts-core ^0.11.1
+
 ## [3.2.9](changelog/3.2.x/3.2.9.md) — 2026-06-30 · 🛡️ Security
 
 ReDoS guards reject catastrophic-backtracking regex on obsidian_list_notes and obsidian_replace_in_note (#88); obsidian_manage_frontmatter / obsidian_manage_tags edits preserve comments, quoting, and plain dates (#89); tool description polish (#86); mcp-ts-core ^0.10.10
