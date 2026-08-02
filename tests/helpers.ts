@@ -179,5 +179,29 @@ function buildResponse(reply: ReplyFn | StaticReply, opts: DispatchOpts): Respon
   if (!finalHeaders.has('content-type') && isJsonLike) {
     finalHeaders.set('content-type', 'application/json');
   }
+  if (!finalHeaders.has('content-disposition') && servesAFile(opts, body)) {
+    finalHeaders.set('content-disposition', `attachment; filename="${fileNameOf(opts.path)}"`);
+  }
   return new Response(text, { status, headers: finalHeaders });
+}
+
+/**
+ * Reproduce the one upstream header contract the service reads rather than
+ * just forwards. Local REST API serves a file from `/vault/<path>` with
+ * `Content-Disposition: attachment; filename="…"` and a folder from the same
+ * route with a bare `application/json` listing, which is how
+ * `ObsidianService` tells a note read from a directory read. Fixtures that
+ * mean "this path is a folder" reply with a `files` array and get no
+ * disposition, matching the upstream; every other `/vault/` reply is a file.
+ * An explicit `content-disposition` in the fixture always wins.
+ */
+function servesAFile(opts: DispatchOpts, body: unknown): boolean {
+  if (!opts.path.startsWith('/vault/')) return false;
+  if (opts.path.endsWith('/')) return false;
+  return !(body !== null && typeof body === 'object' && 'files' in body);
+}
+
+/** Left percent-encoded — `Headers` rejects values outside Latin-1, and the service only reads the header's presence. */
+function fileNameOf(path: string): string {
+  return path.split('?')[0]?.slice('/vault/'.length) ?? path;
 }

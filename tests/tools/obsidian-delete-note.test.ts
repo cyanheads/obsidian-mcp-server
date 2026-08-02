@@ -7,7 +7,8 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it, vi } from 'vitest';
 import { obsidianDeleteNote } from '@/mcp-server/tools/definitions/obsidian-delete-note.tool.js';
-import { setupHarness } from '../helpers.js';
+import { ObsidianService, setObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { makeTestConfig, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -114,5 +115,56 @@ describe('obsidian_delete_note', () => {
     ).rejects.toMatchObject({
       data: expect.objectContaining({ reason: 'note_missing' }),
     });
+  });
+
+  /**
+   * `DELETE /vault/<dir>` succeeds upstream and removes the folder with
+   * everything under it, so the pre-delete probe has to recognize a folder and
+   * stop before the request is sent — the assertion that matters is that no
+   * DELETE was issued.
+   */
+  it('refuses a path that names a folder and issues no DELETE', async () => {
+    const requests: string[] = [];
+    setObsidianService(
+      new ObsidianService(makeTestConfig(), async (url, init) => {
+        requests.push(`${(init.method ?? 'GET').toUpperCase()} ${new URL(url).pathname}`);
+        return new Response('', {
+          status: 200,
+          headers: { 'content-type': 'application/json; charset=utf-8', 'content-length': '226' },
+        });
+      }),
+    );
+
+    await expect(
+      obsidianDeleteNote.handler(
+        obsidianDeleteNote.input.parse({ target: { type: 'path', path: 'Inbox' } }),
+        createMockContext({ errors: obsidianDeleteNote.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_is_directory', path: 'Inbox' },
+    });
+    expect(requests).toEqual(['HEAD /vault/Inbox']);
+  });
+
+  it('rejects a dot-segment path with path_traversal before any request', async () => {
+    const requests: string[] = [];
+    setObsidianService(
+      new ObsidianService(makeTestConfig(), async (url) => {
+        requests.push(new URL(url).pathname);
+        return new Response('', { status: 200 });
+      }),
+    );
+
+    await expect(
+      obsidianDeleteNote.handler(
+        obsidianDeleteNote.input.parse({ target: { type: 'path', path: '../outside.md' } }),
+        createMockContext({ errors: obsidianDeleteNote.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_traversal' },
+    });
+    expect(requests).toEqual([]);
   });
 });

@@ -211,6 +211,7 @@ export class ObsidianService {
       const res = await this.#request(ctx, url, {
         method: 'GET',
         headers: { Accept: 'text/markdown' },
+        noteRead: true,
       });
       return await res.text();
     }
@@ -363,6 +364,7 @@ export class ObsidianService {
     });
     if (res.status === 404) return null;
     if (!res.ok) await this.#throwForStatus(res, url, ctx);
+    this.#assertNotDirectory(res, url, ctx);
     return parseContentLength(res, url);
   }
 
@@ -518,9 +520,26 @@ export class ObsidianService {
     await this.#request(ctx, `/commands/${encodeURIComponent(commandId)}/`, { method: 'POST' });
   }
 
-  async openInUi(ctx: Context, path: string, opts?: { newLeaf?: boolean }): Promise<void> {
-    /** Gated as a read — opening a note in the UI doesn't mutate its content. */
-    this.#policy.assertReadable(path);
+  /**
+   * Open a file in the Obsidian UI.
+   *
+   * Obsidian materializes the file when the path does not exist, so the call
+   * is only a read when the caller has established that the file is already
+   * there. `createIfMissing` marks the create-capable variant and gates it as
+   * a write, which is what makes `OBSIDIAN_READ_ONLY` and
+   * `OBSIDIAN_WRITE_PATHS` constrain it — the creation happens inside Obsidian
+   * and never passes through any other write check.
+   */
+  async openInUi(
+    ctx: Context,
+    path: string,
+    opts?: { newLeaf?: boolean; createIfMissing?: boolean },
+  ): Promise<void> {
+    if (opts?.createIfMissing) {
+      this.#policy.assertWritable(path);
+    } else {
+      this.#policy.assertReadable(path);
+    }
     const params = new URLSearchParams();
     if (opts?.newLeaf) params.set('newLeaf', 'true');
     const qs = params.toString();
@@ -557,6 +576,7 @@ export class ObsidianService {
     const res = await this.#request(ctx, url, {
       method: 'GET',
       headers: { Accept: NOTE_JSON_ACCEPT },
+      noteRead: true,
     });
     return (await res.json()) as NoteJson;
   }
@@ -570,6 +590,7 @@ export class ObsidianService {
         Accept: DOCUMENT_MAP_ACCEPT,
         [MARKDOWN_PATCH_VERSION_HEADER]: MARKDOWN_PATCH_VERSION,
       },
+      noteRead: true,
     });
     return (await res.json()) as DocumentMap;
   }
@@ -672,6 +693,8 @@ export class ObsidianService {
       headers?: Record<string, string>;
       body?: string;
       skipAuth?: boolean;
+      /** Set on requests that expect a single note back — enables the directory guard. */
+      noteRead?: boolean;
     },
   ): Promise<UndiciResponse> {
     const url = `${this.#config.baseUrl}${pathAndQuery}`;
@@ -690,6 +713,9 @@ export class ObsidianService {
       });
       if (!res.ok) {
         await this.#throwForStatus(res, pathAndQuery, ctx);
+      }
+      if (init.noteRead) {
+        this.#assertNotDirectory(res, pathAndQuery, ctx);
       }
       return res;
     };
@@ -710,6 +736,36 @@ export class ObsidianService {
       baseDelayMs: 200,
       maxRetries: 3,
       signal: ctx.signal,
+    });
+  }
+
+  /**
+   * Reject a `2xx` note read that actually served a folder listing. The Local
+   * REST API answers `GET`/`HEAD /vault/<dir>` with `200` and a JSON listing
+   * for every `Accept` type, so status never distinguishes a directory from a
+   * note and each read projection fails differently downstream — the markdown
+   * one silently returns the listing as note body, the JSON ones fail schema
+   * validation with no reason attached.
+   *
+   * The discriminator is a pair of response headers, verified against Local
+   * REST API v5.0.3: a file read always carries `Content-Disposition:
+   * attachment; filename="…"` (whatever its own media type — a vault `.json`
+   * file reports `application/json` too, which is why content type alone can't
+   * decide it), while the folder listing carries no such header and is always
+   * `application/json`. Scoped to `/vault/` because that is the only route
+   * where a path can name a directory; `/active/` and `/periodic/` always
+   * resolve to one file.
+   */
+  #assertNotDirectory(res: UndiciResponse, path: string, ctx: Context): void {
+    if (!path.startsWith('/vault/')) return;
+    if (res.headers.get('content-disposition') !== null) return;
+    const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+    if (!contentType.includes('application/json')) return;
+    const display = displayPath(path);
+    throw validationError(`${display} is a directory, not a note.`, {
+      path: display,
+      reason: 'path_is_directory',
+      ...ctx.recoveryFor('path_is_directory'),
     });
   }
 
@@ -843,9 +899,18 @@ export function encodeVaultPath(path: string): string {
   const segments = path.split(/[/\\]/).filter((seg) => seg.length > 0);
   for (const seg of segments) {
     if (seg === '.' || seg === '..') {
+      /**
+       * Recovery is written inline rather than resolved from the calling
+       * tool's contract: this is a free function with no `ctx` to hand to
+       * `ctx.recoveryFor`, and the guidance is the same static sentence every
+       * contract declares for `path_traversal`.
+       */
       throw validationError(`Path traversal not allowed: '${path}'`, {
         path,
         reason: 'path_traversal',
+        recovery: {
+          hint: 'Supply a vault-relative path with no `.` or `..` segments, e.g. "Projects/Note.md". Use obsidian_list_notes to browse the vault.',
+        },
       });
     }
   }

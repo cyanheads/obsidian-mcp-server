@@ -50,6 +50,13 @@ export const obsidianVaultNote = resource('obsidian://vault/{+path}', {
       recovery:
         'Verify the path with obsidian_list_notes or use obsidian_search_notes to locate the note.',
     },
+    {
+      reason: 'path_is_directory',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The requested path names a folder rather than a note file.',
+      recovery:
+        'Call obsidian_list_notes with this path to list the folder, then request the URI of one of the files it returns.',
+    },
   ],
 
   async handler(params, ctx) {

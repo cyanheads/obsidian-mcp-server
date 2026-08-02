@@ -2,6 +2,12 @@
  * @fileoverview obsidian_open_in_ui — open a file in the Obsidian app UI.
  * Defaults to `failIfMissing: true` because Obsidian silently creates files on
  * open otherwise; opt out for an "open or create" flow.
+ *
+ * The existence probe runs on both paths. It is what lets `createdIfMissing`
+ * report what actually happened, and it is the point where an open that would
+ * create a file is gated as a write — so opening a note that already exists
+ * keeps working under `OBSIDIAN_READ_ONLY`, while the create-capable branch is
+ * refused there and outside `OBSIDIAN_WRITE_PATHS`.
  * @module mcp-server/tools/definitions/obsidian-open-in-ui.tool
  */
 
@@ -13,15 +19,15 @@ import { withCaseFallback } from './_shared/suggest-paths.js';
 
 export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
   description:
-    'Open a file in the Obsidian app UI. By default fails when the path does not exist; the `failIfMissing` flag controls the open-or-create behavior.',
-  annotations: { openWorldHint: true },
+    'Open a file in the Obsidian app UI. By default fails when the path does not exist; the `failIfMissing` flag controls the open-or-create behavior. Opening an existing file needs read access; opening a missing one creates it, so that case needs write access to the path.',
+  annotations: { openWorldHint: true, destructiveHint: false, idempotentHint: true },
   input: z.object({
     path: z.string().min(1).describe('Vault-relative path of the file to open.'),
     failIfMissing: z
       .boolean()
       .default(true)
       .describe(
-        'When true (default), fails if the file does not exist. When false, allows Obsidian to create the file on open.',
+        'When true (default), fails if the file does not exist. When false, allows Obsidian to create the file on open — which requires write access to the path and is rejected in read-only mode.',
       ),
     newLeaf: z
       .boolean()
@@ -40,9 +46,9 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
     {
       reason: 'path_forbidden',
       code: JsonRpcErrorCode.Forbidden,
-      when: 'The target path is outside OBSIDIAN_READ_PATHS (and OBSIDIAN_WRITE_PATHS, since write paths imply read access).',
+      when: 'The path is outside OBSIDIAN_READ_PATHS, or — when the file does not exist and `failIfMissing: false` would have Obsidian create it — outside OBSIDIAN_WRITE_PATHS or blocked by OBSIDIAN_READ_ONLY=true.',
       recovery:
-        'Use a path inside the configured read scope. The error data echoes the active scope.',
+        'Open a path inside the configured scope. The error data echoes the active scope and whether read or write access was the one denied.',
     },
     {
       reason: 'note_missing',
@@ -57,20 +63,32 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
       when: 'The parent directory contains multiple files whose names differ only in case (case-sensitive filesystems only).',
       recovery: 'Retry with one of the exact paths listed in `matches` on the error data.',
     },
+    {
+      reason: 'path_is_directory',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The supplied path names a folder rather than a file.',
+      recovery:
+        'Call obsidian_list_notes with this path to list the folder, then open one of the files it returns.',
+    },
+    {
+      reason: 'path_traversal',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The path contains a `.` or `..` segment, which is rejected to prevent vault escape.',
+      recovery:
+        'Supply a vault-relative path with no `.` or `..` segments, e.g. "Projects/Note.md". Use obsidian_list_notes to browse the vault.',
+    },
   ],
 
   async handler(input, ctx) {
     const svc = getObsidianService();
     const target: NoteTarget = { type: 'path', path: input.path };
 
-    if (!input.failIfMissing) {
-      // Caller opted into "open or create" — skip the existence probe and let
-      // Obsidian create the file on open.
-      await svc.openInUi(ctx, input.path, { newLeaf: input.newLeaf });
-      return { path: input.path, opened: true, createdIfMissing: true };
-    }
-
+    /**
+     * Obsidian creates the file when `/open/` names a path that isn't there,
+     * so the probe is the only place an open can be told from a create.
+     */
     let resolvedPath = input.path;
+    let existed = true;
 
     try {
       const { resolvedPath: rp } = await withCaseFallback(ctx, svc, target, (t) =>
@@ -83,34 +101,40 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
       // service tags path 404s with `reason: 'note_missing'` in its error data.
       const reason = err instanceof McpError ? err.data?.reason : undefined;
       if (reason !== 'note_missing') throw err;
-      const suggestions = (err instanceof McpError && (err.data?.suggestions as string[])) || [];
-      const hintParts: string[] = [];
-      if (suggestions.length > 0) {
-        hintParts.push(`Did you mean: ${suggestions.map((s) => `"${s}"`).join(', ')}?`);
+      existed = false;
+      if (input.failIfMissing) {
+        const suggestions = (err instanceof McpError && (err.data?.suggestions as string[])) || [];
+        const hintParts: string[] = [];
+        if (suggestions.length > 0) {
+          hintParts.push(`Did you mean: ${suggestions.map((s) => `"${s}"`).join(', ')}?`);
+        }
+        // Lead with verification so a typo doesn't get materialized as an empty
+        // file by following the recovery hint blindly. Creation stays as the
+        // explicit opt-in second path.
+        hintParts.push(
+          'Verify the path with obsidian_list_notes or obsidian_search_notes — or, if creation is intended, retry with failIfMissing: false.',
+        );
+        throw ctx.fail(
+          'note_missing',
+          `Cannot open '${input.path}' — file does not exist.`,
+          {
+            path: input.path,
+            ...(suggestions.length > 0 ? { suggestions } : {}),
+            recovery: { hint: hintParts.join(' ') },
+          },
+          { cause: err },
+        );
       }
-      // Lead with verification so a typo doesn't get materialized as an empty
-      // file by following the recovery hint blindly. Creation stays as the
-      // explicit opt-in second path.
-      hintParts.push(
-        'Verify the path with obsidian_list_notes or obsidian_search_notes — or, if creation is intended, retry with failIfMissing: false.',
-      );
-      throw ctx.fail(
-        'note_missing',
-        `Cannot open '${input.path}' — file does not exist.`,
-        {
-          path: input.path,
-          ...(suggestions.length > 0 ? { suggestions } : {}),
-          recovery: { hint: hintParts.join(' ') },
-        },
-        { cause: err },
-      );
     }
 
-    await svc.openInUi(ctx, resolvedPath, { newLeaf: input.newLeaf });
+    await svc.openInUi(ctx, resolvedPath, {
+      newLeaf: input.newLeaf,
+      createIfMissing: !existed,
+    });
     return {
       path: resolvedPath,
       opened: true,
-      createdIfMissing: false,
+      createdIfMissing: !existed,
     };
   },
 

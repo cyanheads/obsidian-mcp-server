@@ -50,4 +50,31 @@ describe('obsidian://vault/{+path}', () => {
       ),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
   });
+
+  it('rejects a path that names a folder instead of failing schema validation', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Inbox', method: 'GET' })
+      .reply(
+        200,
+        { files: ['a.md', 'nested/'] },
+        { headers: { 'content-type': 'application/json; charset=utf-8' } },
+      );
+
+    await expect(
+      obsidianVaultNote.handler(
+        obsidianVaultNote.params!.parse({ path: 'Inbox' }),
+        createMockContext({
+          uri: new URL('obsidian://vault/Inbox'),
+          errors: obsidianVaultNote.errors,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'path_is_directory',
+        recovery: { hint: expect.stringContaining('obsidian_list_notes') },
+      },
+    });
+  });
 });

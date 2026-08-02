@@ -9,8 +9,14 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { encodeVaultPath, type ObsidianService } from '@/services/obsidian/obsidian-service.js';
-import { type PathMatcher, type ReplyFn, setupHarness, type TestHarness } from '../helpers.js';
+import { encodeVaultPath, ObsidianService } from '@/services/obsidian/obsidian-service.js';
+import {
+  makeTestConfig,
+  type PathMatcher,
+  type ReplyFn,
+  setupHarness,
+  type TestHarness,
+} from '../helpers.js';
 
 const harness = setupHarness();
 let pool: TestHarness['pool'];
@@ -643,6 +649,184 @@ describe('ObsidianService.tryGetSize / getSize', () => {
       .reply(200, '', { headers: { 'content-length': '42' } });
 
     expect(await service.getSize(ctx, { type: 'path', path: 'N.md' })).toBe(42);
+  });
+});
+
+describe('ObsidianService directory guard on note reads', () => {
+  /**
+   * Local REST API answers a note-read URL that names a folder with `200` and a
+   * JSON listing, for every `Accept` type — so these fixtures reply exactly the
+   * way the upstream does (bare `application/json`, no `Content-Disposition`)
+   * and assert the service refuses to hand the listing back as a note.
+   */
+  const listing = { files: ['a.md', 'b.md', 'nested/'] };
+  const listingHeaders = { 'content-type': 'application/json; charset=utf-8' };
+
+  it('getNoteContent rejects a folder listing instead of returning it as the body', async () => {
+    pool.intercept({ path: '/vault/Inbox', method: 'GET' }).reply(200, listing, {
+      headers: listingHeaders,
+    });
+
+    await expect(
+      service.getNoteContent(ctx, { type: 'path', path: 'Inbox' }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_is_directory', path: 'Inbox' },
+    });
+  });
+
+  it('getNoteJson rejects a folder listing', async () => {
+    pool
+      .intercept({ path: '/vault/Inbox', method: 'GET' })
+      .reply(200, listing, { headers: listingHeaders });
+
+    await expect(service.getNoteJson(ctx, { type: 'path', path: 'Inbox' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_is_directory' },
+    });
+  });
+
+  it('getDocumentMap rejects a folder listing', async () => {
+    pool
+      .intercept({ path: '/vault/Inbox', method: 'GET' })
+      .reply(200, listing, { headers: listingHeaders });
+
+    await expect(
+      service.getDocumentMap(ctx, { type: 'path', path: 'Inbox' }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_is_directory' },
+    });
+  });
+
+  /**
+   * Built over a bare fetch rather than the harness: a `HEAD` reply has no body
+   * for the harness to recognize as a listing, and this case is precisely about
+   * the response headers.
+   */
+  it('tryGetSize rejects a folder instead of reporting the listing byte count as a note size', async () => {
+    const svc = new ObsidianService(
+      makeTestConfig(),
+      async () =>
+        new Response('', {
+          status: 200,
+          headers: { ...listingHeaders, 'content-length': '226' },
+        }),
+    );
+
+    await expect(svc.tryGetSize(ctx, { type: 'path', path: 'Inbox' })).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_is_directory' },
+    });
+  });
+
+  it('tryGetSize accepts a file HEAD carrying the filename header', async () => {
+    const svc = new ObsidianService(
+      makeTestConfig(),
+      async () =>
+        new Response('', {
+          status: 200,
+          headers: {
+            'content-type': 'application/json; charset=utf-8',
+            'content-disposition': 'attachment; filename="data.json"',
+            'content-length': '19',
+          },
+        }),
+    );
+
+    expect(await svc.tryGetSize(ctx, { type: 'path', path: 'data.json' })).toBe(19);
+  });
+
+  it('carries the contract recovery hint when the caller declares path_is_directory', async () => {
+    pool
+      .intercept({ path: '/vault/Inbox', method: 'GET' })
+      .reply(200, listing, { headers: listingHeaders });
+    const contractCtx = createMockContext({
+      errors: [
+        {
+          reason: 'path_is_directory',
+          code: JsonRpcErrorCode.ValidationError,
+          when: 'folder',
+          recovery: 'Call obsidian_list_notes with this path to list the folder.',
+        },
+      ],
+    });
+
+    await expect(
+      service.getNoteContent(contractCtx, { type: 'path', path: 'Inbox' }),
+    ).rejects.toMatchObject({
+      data: {
+        recovery: { hint: 'Call obsidian_list_notes with this path to list the folder.' },
+      },
+    });
+  });
+
+  it('serves a vault .json file — application/json with a filename — as a normal note', async () => {
+    pool.intercept({ path: '/vault/data.json', method: 'GET' }).reply(200, '{"files":["decoy"]}', {
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'content-disposition': 'attachment; filename="data.json"',
+      },
+    });
+
+    await expect(service.getNoteContent(ctx, { type: 'path', path: 'data.json' })).resolves.toBe(
+      '{"files":["decoy"]}',
+    );
+  });
+
+  /**
+   * The guard's negative side: an absent `Content-Disposition` only means
+   * folder when the reply is also the bare `application/json` the listing uses.
+   * The note projections declare their own `+json` media types and have to read
+   * as notes on their own. Built over a bare fetch because the harness attaches
+   * a `Content-Disposition` to every `/vault/` file reply, so no fixture can
+   * express the upstream omitting it.
+   */
+  it('reads a note+json reply carrying no Content-Disposition as a note, not a folder', async () => {
+    const svc = new ObsidianService(
+      makeTestConfig(),
+      async () =>
+        new Response(
+          JSON.stringify({
+            path: 'a.md',
+            content: 'body',
+            frontmatter: {},
+            tags: [],
+            stat: { ctime: 1, mtime: 2, size: 4 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/vnd.olrapi.note+json' } },
+        ),
+    );
+
+    await expect(svc.getNoteJson(ctx, { type: 'path', path: 'a.md' })).resolves.toMatchObject({
+      path: 'a.md',
+    });
+  });
+
+  it('leaves listFiles alone — the folder-listing route is not a note read', async () => {
+    pool
+      .intercept({ path: '/vault/Inbox/', method: 'GET' })
+      .reply(200, listing, { headers: listingHeaders });
+
+    await expect(service.listFiles(ctx, 'Inbox')).resolves.toMatchObject({ files: listing.files });
+  });
+
+  it('leaves the /active/ route alone — it always resolves to one file', async () => {
+    pool.intercept({ path: '/active/', method: 'GET' }).reply(
+      200,
+      {
+        path: 'today.md',
+        content: 'body',
+        frontmatter: {},
+        tags: [],
+        stat: { ctime: 1, mtime: 2, size: 4 },
+      },
+      { headers: listingHeaders },
+    );
+
+    await expect(service.getNoteJson(ctx, { type: 'active' })).resolves.toMatchObject({
+      path: 'today.md',
+    });
   });
 });
 

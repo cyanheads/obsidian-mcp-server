@@ -49,7 +49,7 @@ function buildInstructions(): string {
   ];
   if (config.readOnly) {
     sections.push(
-      'Read-only mode is active (OBSIDIAN_READ_ONLY=true): every write tool rejects every path with `path_forbidden` / `read_only_mode`.',
+      'Read-only mode is active (OBSIDIAN_READ_ONLY=true): every write tool rejects every path with `path_forbidden` / `read_only_mode`. `obsidian_open_in_ui` still opens notes that exist, but rejects an open against a missing path — Obsidian would create the file.',
     );
   } else if (!policy.isUnrestricted) {
     const { readPaths, writePaths } = policy.describe();

@@ -57,6 +57,66 @@ describe('obsidian_get_note / format: content', () => {
   });
 });
 
+describe('obsidian_get_note / path names a folder', () => {
+  /**
+   * The Local REST API answers a note-read URL that names a folder with `200`
+   * and a JSON listing, whatever the `Accept` — so every projection reads the
+   * same reply here, and none of them may hand it back as note data.
+   */
+  const listing = { files: ['a.md', 'b.md', 'nested/'] };
+  const asFolder = { headers: { 'content-type': 'application/json; charset=utf-8' } };
+
+  const inputs = [
+    ['content', { format: 'content', target: { type: 'path', path: 'Inbox' } }],
+    ['full', { format: 'full', target: { type: 'path', path: 'Inbox' } }],
+    ['document-map', { format: 'document-map', target: { type: 'path', path: 'Inbox' } }],
+    [
+      'section',
+      {
+        format: 'section',
+        target: { type: 'path', path: 'Inbox' },
+        section: { type: 'heading', target: 'Intro' },
+      },
+    ],
+  ] as const;
+
+  it.each(inputs)('format %s rejects with path_is_directory', async (_label, args) => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Inbox', method: 'GET' })
+      .reply(200, listing, asFolder);
+
+    await expect(
+      obsidianGetNote.handler(
+        obsidianGetNote.input.parse(args),
+        createMockContext({ errors: obsidianGetNote.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'path_is_directory',
+        path: 'Inbox',
+        recovery: { hint: expect.stringContaining('obsidian_list_notes') },
+      },
+    });
+  });
+
+  it('rejects a dot-segment path with path_traversal', async () => {
+    await expect(
+      obsidianGetNote.handler(
+        obsidianGetNote.input.parse({
+          format: 'content',
+          target: { type: 'path', path: 'Projects/../../etc/passwd' },
+        }),
+        createMockContext({ errors: obsidianGetNote.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_traversal' },
+    });
+  });
+});
+
 describe('obsidian_get_note / format: full', () => {
   it('returns the parsed NoteJson', async () => {
     harness

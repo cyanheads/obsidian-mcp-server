@@ -27,10 +27,17 @@ import { obsidianWriteNote } from './obsidian-write-note.tool.js';
 export { buildSearchNotesTool } from './obsidian-search-notes.tool.js';
 
 /**
- * Read-only tools that don't depend on runtime probes — always registered,
- * even with `OBSIDIAN_READ_ONLY=true`. `obsidian_search_notes` is constructed
- * separately in the entry point via `buildSearchNotesTool` so its mode enum
- * can reflect Omnisearch reachability.
+ * Tools that don't depend on runtime probes — always registered, even with
+ * `OBSIDIAN_READ_ONLY=true`. `obsidian_search_notes` is constructed separately
+ * in the entry point via `buildSearchNotesTool` so its mode enum can reflect
+ * Omnisearch reachability.
+ *
+ * `obsidian_open_in_ui` stays here rather than in the write bucket so that
+ * opening a note that already exists keeps working on a read-only vault, which
+ * is both useful and side-effect-free. Its one create-capable branch — an open
+ * against a missing path with `failIfMissing: false`, which Obsidian would
+ * materialize — is gated as a write inside `ObsidianService.openInUi`, so
+ * read-only mode and `OBSIDIAN_WRITE_PATHS` still bind it.
  */
 export const readToolDefinitions = [
   obsidianGetNote,

@@ -71,6 +71,20 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
       recovery:
         "Pass an explicit path target — the requested period is disabled in the operator's Periodic Notes plugin.",
     },
+    {
+      reason: 'path_is_directory',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The supplied path names a folder rather than a note file. Deleting a folder is not offered — the upstream removes it and everything inside it in one unrecoverable step.',
+      recovery:
+        'Call obsidian_list_notes with this path to list the folder, then delete files one at a time by their full paths.',
+    },
+    {
+      reason: 'path_traversal',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The path contains a `.` or `..` segment, which is rejected to prevent vault escape.',
+      recovery:
+        'Supply a vault-relative path with no `.` or `..` segments, e.g. "Projects/Note.md". Use obsidian_list_notes to browse the vault.',
+    },
   ],
 
   async handler(input, ctx) {
