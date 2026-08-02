@@ -6,7 +6,7 @@
  * YAML frontmatter declaring:
  *   • summary (required)  — ≤350-char headline, no markdown, one line
  *   • breaking (optional) — `true` flags releases with breaking changes
- *   • security (optional) — `true` flags releases with security fixes
+ *   • security (optional) — `true` flags a source-code security fix (NOT a dependency CVE bump)
  *
  * The rollup is a thin **index**, not a copy of bodies — each entry is just a
  * clickable header + one-line summary. Full content stays in the per-version files.

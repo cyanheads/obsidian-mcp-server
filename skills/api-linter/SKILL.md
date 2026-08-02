@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -42,6 +42,7 @@ Grouped by family. Jump to any rule ID via its anchor.
 
 | Family | Rules | Section |
 |:-------|:------|:--------|
+| Definition | `definition-invalid` | [Definition rules](#definition-rules) |
 | Format parity | `format-parity`, `format-parity-threw`, `format-parity-walk-failed` | [Format parity](#format-parity) |
 | Schema | `schema-is-object`, `describe-on-fields`, `schema-serializable` | [Schema rules](#schema-rules) |
 | Portability | `schema-format-portability`, `schema-anyof-needs-type`, `schema-no-discriminator-keyword`, `schema-no-defs`, `schema-dialect-tag` | [Portability rules](#portability-rules) |
@@ -55,6 +56,18 @@ Grouped by family. Jump to any rule ID via its anchor.
 | Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail` | [Error contract rules](#error-contract-rules) |
 | Enrichment | `enrichment-type`, `enrichment-empty`, `enrichment-field-type`, `enrichment-output-collision`, `enrichment-prefer-block`, `enrichment-trailer-render`, `enrichment-trailer-orphan`, `enrichment-trailer-unknown-field`, `capped-list-no-truncation` | [Enrichment rules](#enrichment-rules) |
 | server.json | ~40 rules prefixed `server-json-*` | [server.json rules](#server-json-rules) |
+
+---
+
+## Definition rules
+
+### definition-invalid
+
+**Severity:** error
+
+Fires when a `tools`, `resources`, or `prompts` array passed to `validateDefinitions()` contains a `null`/`undefined` entry (or any non-object value) instead of a definition object — e.g. a stray import or a conditional that yields `undefined`/`false`. The bad entry is reported as this diagnostic and skipped, rather than crashing the whole lint run.
+
+**Fix:** remove the empty slot, or ensure every element of the array is a real definition object (e.g. `[makeFooTool(), enabled ? makeBarTool() : null].filter(Boolean)`).
 
 ---
 

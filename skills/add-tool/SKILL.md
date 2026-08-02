@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.15"
+  version: "2.16"
   audience: external
   type: reference
 ---
@@ -626,7 +626,7 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 - **Large objects**: Return key fields by default; accept a `fields` or `verbose` parameter for full data
 - **Binary/blob content**: Return metadata and a reference, not the raw content
 - **Analytical working sets**: When upstream returns more *analytical* rows (data an agent would SQL — aggregate, group, join) than fit in context, `DataCanvas` (`ctx.core.canvas?`, Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) lets you register the rows and return the `canvas_id` plus a preview so the agent can run SQL to slice down without a re-fetch. The `spillover()` helper (`@cyanheads/mcp-ts-core/canvas`) automates the overflow case: drain rows up to a character budget for the inline preview, auto-register the full source on overflow, return both as a discriminated union. **Two gates:** it must be analytical, not a discovery/search surface of categorical metadata (those don't earn a canvas regardless of row count — use MCP-side list filtering or pagination); and a tool emitting a `canvas_id` MUST be paired with a registered `dataframe_query` tool, or the handle is unreachable. Compute distributions or refinement hints across the full result — not the preview — so the agent gets honest aggregate signal on the rows it didn't read. See `api-canvas` for the register / query / export pattern and the spillover flow.
-- **One large document**: When a single call returns one document-shaped record (not a row set) that can overflow context, return a section *outline* — top-level keys + per-section byte size — and let the agent re-call with `sections: [...]` for only what it needs, instead of truncating one surface. `outlineOnOverflow()` with `OUTLINE_VARIANT` / `selectSections()` / `formatOutline()` (`@cyanheads/mcp-ts-core/utils`) measures the payload and returns a `full | outline` discriminated-union `output`; declare `OUTLINE_VARIANT` as a branch so `format()`-parity holds per arm. Pure measure + key-slice — Workers-portable, unlike canvas `spillover()`. Use for one fat record; use `spillover()` for a row collection. See the `techniques` skill's `outline-on-overflow` reference.
+- **One large document**: When a single call returns one document-shaped record (not a row set) that can overflow context, return a section *outline* — top-level keys + per-section byte size — and let the agent re-call with `sections: [...]` for only what it needs, instead of truncating one surface. `outlineOnOverflow()` with `OUTLINE_VARIANT` / `selectSections()` / `formatOutline()` (`@cyanheads/mcp-ts-core/utils`) measures the payload and returns a `full | outline` result. Declare the tool's `output` as a flat `z.object` with a `kind` discriminator and presence-based optional arms (fold in `OUTLINE_VARIANT.shape.sections` / `.notice`) — `tool()` rejects a `z.discriminatedUnion` output — and render each arm on field presence in `format()` so parity holds. Pure measure + key-slice — Workers-portable, unlike canvas `spillover()`. Use for one fat record; use `spillover()` for a row collection. See the `techniques` skill's `outline-on-overflow` reference.
 
 ## MCP-side list filtering
 

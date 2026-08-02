@@ -23,7 +23,7 @@ All parsers are **Tier 3** — lazy-load their peer dependency on first call. Al
 |:-------|:----------|
 | `parse` | `<T = unknown>(yamlString, context?) -> Promise<T>` |
 
-Uses `js-yaml` `DEFAULT_SCHEMA`. Throws `ConfigurationError` if dep missing, `ValidationError` on empty/malformed input.
+Uses `js-yaml` (v5) `YAML11_SCHEMA` (YAML 1.1 load semantics). Throws `ConfigurationError` if dep missing, `ValidationError` on empty/malformed input.
 
 ```ts
 const config = await yamlParser.parse<ServerConfig>(yamlString);

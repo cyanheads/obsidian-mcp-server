@@ -21,7 +21,6 @@ Framework badge                         ← solo spotlight row — `Built on @cy
 ## Running the server                   ← dev, production, Workers/Docker
 ## Project structure                    ← directory/purpose table
 ## Development guide                    ← link to CLAUDE.md/AGENTS.md, key rules
-## Contributing                         ← brief
 ## License                              ← one line
 ```
 
@@ -41,7 +40,7 @@ Centered HTML. The `<h1>` is the server name — use the scoped package name if 
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/my-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/my-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/my-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/my-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/my-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/my-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -334,7 +333,7 @@ A public instance is available at `https://my-server.example.com/mcp` — no ins
 ```markdown
 ### Prerequisites
 
-- [Bun v1.3.2](https://bun.sh/) or higher (or Node.js v22+).
+- [Bun v1.3.0](https://bun.sh/) or higher (or Node.js v24+).
 - An Acme API key — see [`docs/api-key.md`](./docs/api-key.md) for how to generate one.
 ```
 
@@ -482,19 +481,6 @@ See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and archit
 - Use `ctx.log` for request-scoped logging, `ctx.state` for tenant-scoped storage
 - Register new tools and resources via the barrels in `src/mcp-server/*/definitions/index.ts`
 - Wrap external API calls: validate raw → normalize to domain type → return output schema; never fabricate missing fields
-```
-
-### Contributing
-
-```markdown
-## Contributing
-
-Issues and pull requests are welcome. Run checks and tests before submitting:
-
-\`\`\`sh
-bun run devcheck
-bun run test
-\`\`\`
 ```
 
 ### License

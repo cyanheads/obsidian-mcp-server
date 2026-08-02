@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: audit
 ---
@@ -122,7 +122,7 @@ grep -rn "ctx.elicit" src/mcp-server/tools/definitions/
 **Check:**
 
 - Each destructive handler calls `ctx.elicit` before the side effect?
-- Fallback when client doesn't support elicit — refuses, not silently proceeds?
+- Fallback when elicit is unavailable — **proceeds on the tool annotations, and says so in the tool description?** Do NOT require a refusal here: `ctx.elicit` is `undefined` on *every* Streamable HTTP request (the transport builds a fresh `McpServer` per request, so the SDK never records the client's capabilities — mcp-ts-core#312), so a refusing fallback makes the gated tools permanently unusable on the hosted transport. That is an outage, not a hardening. What IS in scope: a **declined or unparseable** elicit response must never proceed, and any doc claiming the gate protects "clients that support elicitation" must name the HTTP limitation or it overstates the control.
 - Elicit **response** validated against a Zod schema before use? The returned payload is LLM-mediated, not user-direct — "user confirmed" does not mean "user authored these exact fields."
 - Consent is scoped to the specific target (e.g., record ID rendered in the prompt), not a generic "proceed?"
 

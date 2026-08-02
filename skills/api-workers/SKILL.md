@@ -4,7 +4,7 @@ description: >
   Cloudflare Workers deployment using `createWorkerHandler` from `@cyanheads/mcp-ts-core/worker`. Covers the full handler signature, binding types, CloudflareBindings extensibility, runtime compatibility guards, and wrangler.toml requirements.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: reference
 ---
@@ -159,6 +159,19 @@ database_id = "..."
 `nodejs_compat` is required for Node.js API shims (e.g., `process.env`, `Buffer`, `crypto`). The minimum `compatibility_date` activates the required shim set.
 
 **Binding names for core storage are hardcoded** — the storage factory looks for `KV_NAMESPACE`, `R2_BUCKET`, and `DB` on `globalThis`. Using different binding names will cause a `ConfigurationError`. For custom (non-storage) bindings, use `extraObjectBindings` to map arbitrary binding names to `globalThis` keys.
+
+**Bundling requires a `@duckdb/node-api` alias.** Wrangler's esbuild step follows the framework's lazy `import('@duckdb/node-api')` (the DataCanvas DuckDB provider) even though that path never executes on Workers, and fails on DuckDB's native platform bindings (`Could not resolve "@duckdb/node-bindings-*/duckdb.node"`). Alias the module to a local stub:
+
+```toml
+[alias]
+"@duckdb/node-api" = "./duckdb-stub.ts"
+```
+
+```ts
+// duckdb-stub.ts — rejects the lazy import if a misconfigured Worker ever reaches it
+throw new Error('@duckdb/node-api is not available in Cloudflare Workers.');
+export {};
+```
 
 ---
 

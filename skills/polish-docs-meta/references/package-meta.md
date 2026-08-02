@@ -13,7 +13,7 @@ Fields that may still be empty or generic from scaffolding. Check each one and f
 | `repository` | _(often missing)_ | `{ "type": "git", "url": "git+https://github.com/org/repo.git" }` |
 | `homepage` | _(often missing)_ | Repository URL or docs URL. |
 | `bugs` | _(often missing)_ | `{ "url": "https://github.com/org/repo/issues" }` |
-| `author` | _(often missing)_ | `"Name <email> (https://github.com/org/repo#readme)"` |
+| `author` | _(often missing)_ | `"Name <email> (https://author-site.example)"`. The URL is the **author's** site, not the repo — `repository`/`homepage` already carry that. Name should match the LICENSE copyright holder. |
 | `keywords` | `["mcp", "mcp-server", "model-context-protocol"]` | Add domain-specific keywords. Keep the MCP ones. |
 | `license` | `Apache-2.0` | Change if using a different license. Must match the LICENSE file. |
 
@@ -27,8 +27,8 @@ These are set by `init` and generally don't need changes. Verify they're present
 | `main` | `"dist/index.js"` | Entry point after build |
 | `types` | `"dist/index.d.ts"` | TypeScript declarations |
 | `files` | `["dist/"]` | What npm publishes |
-| `engines` | `{ "node": ">=24.0.0" }` | Add `"bun": ">=1.3.0"` alongside Node |
-| `packageManager` | _(often missing)_ | `"bun@1.3.2"` (or current Bun version). Signals the intended package manager. |
+| `engines` | `{ "node": ">=24.0.0", "bun": ">=1.3.0" }` | Node runs the built `dist/`; Bun is the dev floor |
+| `packageManager` | `"bun@1.3.14"` | Pins the dev package manager; keep current with the framework's Bun version |
 | `scripts` | _(various)_ | Build, dev, test scripts |
 | `dependencies` | `@cyanheads/mcp-ts-core` | Core framework |
 

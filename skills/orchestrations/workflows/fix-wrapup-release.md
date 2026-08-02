@@ -123,7 +123,7 @@ Each sub-agent reads BOTH `skills/git-wrapup/SKILL.md` AND `skills/release-and-p
 4. Release commit on top: `chore(release): v<version>` — version bump + changelog + regenerated artifacts
 5. Tag the release commit
 
-The tag annotation and changelog cover ALL fixes — the commit split is about git history, not release notes.
+The changelog carries the depth; the tag annotation covers every change at headline granularity — notable ones named, minor ones in one grouped bullet (per git-wrapup step 8). The commit split is about git history, not release notes.
 
 **Version bump.** Default **patch** for bug-fix releases. **Minor** when enhancements are included.
 
@@ -134,7 +134,7 @@ The tag annotation and changelog cover ALL fixes — the commit split is about g
 | Private / in-development | Version bump → changelog → commit → tag → mcpb bundle → push → `gh release create`. Skip `bun publish`, Docker, MCP Registry. |
 | Public / launched | Full `release-and-publish`: push + `bun publish` + `publish-mcp` + bundle + GH release + Docker (if Dockerfile). |
 
-**Tag annotations** are for end users — internal dev cleanup (lockfile refreshes, linter fixes, build config) belongs in commit bodies, not the tag annotation.
+**Tag annotations** are for end users — every changelog-worthy change stays visible in the tag, with minor/internal items (build config, repo hygiene, metadata) grouped into ONE compact bullet; only non-changelog churn (lockfile refreshes, lint fixes) stays in commit bodies alone.
 
 ### Phase 4: Issue cleanup
 Close issues that shipped — only those. Skipped issues stay open.

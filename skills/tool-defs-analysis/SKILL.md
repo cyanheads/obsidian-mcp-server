@@ -1,10 +1,10 @@
 ---
 name: tool-defs-analysis
 description: >
-  Read-only audit of MCP definition language across an existing surface — tools, resources, prompts. Walks every definition file and checks 12 categories the LLM reads to decide whether and how to call: voice & tense, internal leaks, audience leaks, defaults, recovery hints, output descriptions, cross-references, sparsity, examples, structure, mutator observability, unit-bearing numeric names. Produces grouped findings with file:line citations and a numbered options list. Use during polish, after a refactor, or before a release. Complements `field-test` (behavior testing) and `security-pass` (security audit).
+  Read-only audit of MCP definition language across an existing surface — tools, resources, prompts, server instructions. Walks every definition file and checks 15 categories the LLM reads to decide whether and how to call: voice & tense, internal leaks, audience leaks, defaults, recovery hints, field descriptions, cross-references, sparsity, examples, structure, mutator observability, unit-bearing numeric names, validator-enforced constraints, annotations truthfulness, single-line strings — then a cross-surface pass: naming taxonomy, parameter vocabulary, tool overlap, instructions drift, length outliers. Produces grouped findings with file:line citations and a numbered options list. Use during polish, after a refactor, or before a release. Complements `field-test` (behavior testing) and `security-pass` (security audit).
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.4"
   audience: external
   type: audit
 ---
@@ -22,7 +22,7 @@ This skill is the **review-time pass** for that drift. Read each definition the 
 | `security-pass` | Injection, scopes, input sinks |
 | `tool-defs-analysis` (this) | LLM-facing language across the existing surface |
 
-`field-test` already audits descriptions for implementation leaks, meta-coaching, and consumer-aware phrasing during its catalog step — that's a fast shallow pass alongside live tool calls. This skill is the deeper review: 12 categories, every field, every recovery hint, every default value, with file:line citations.
+`field-test` already audits descriptions for implementation leaks, meta-coaching, and consumer-aware phrasing during its catalog step — that's a fast shallow pass alongside live tool calls. This skill is the deeper review: 15 categories, every field, every recovery hint, every default value, with file:line citations — plus a cross-surface pass for the drift no single file shows.
 
 **Read-only.** This skill produces a report; the maintainer applies fixes. While running it, do not run git, do not stage or commit, do not update the changelog, do not run `devcheck`, do not invoke wrapup or release workflows. Fixes flow through the normal authoring path (edit the definition, then re-run this skill if you want to verify).
 
@@ -53,11 +53,11 @@ find src/mcp-server/resources/definitions -type f -name "*resource.ts" 2>/dev/nu
 find src/mcp-server/prompts/definitions   -type f -name "*.prompt.ts"  2>/dev/null | sort
 ```
 
-The `*tool.ts` / `*resource.ts` patterns also catch `*.app-tool.ts` / `*.app-resource.ts`. If the server's definitions live elsewhere (`examples/`, a packages workspace, …), audit those paths too.
+The `*tool.ts` / `*resource.ts` patterns also catch `*.app-tool.ts` / `*.app-resource.ts`. If the server's definitions live elsewhere (`examples/`, a packages workspace, …), audit those paths too. Also locate the server-level `instructions` string if the server sets one (the `createApp` option — `grep -rn "instructions" src/ --include="*.ts"`); it's audited in the cross-surface pass.
 
 Use `TaskCreate` — one task per file. Mark each complete after its findings are captured.
 
-### 2. Walk the 12 categories per file
+### 2. Walk the 15 categories per file
 
 Read each definition file in full. Apply every category — most files trip more than one. Capture each hit with `file:line`, the offending excerpt, and a one-line fix.
 
@@ -79,8 +79,6 @@ Read each definition file in full. Apply every category — most files trip more
 
 **Smell:** "/api/v2/by-state", "Adds a second API call", "API requires `two_year_period`", "(deprecated; use bar_v2)", "TODO: support batch mode", "Used internally by FooService".
 
-Prior art: #25.
-
 #### 3. Audience leaks
 
 **Look in:** every `description` and `.describe()`.
@@ -89,7 +87,7 @@ Prior art: #25.
 
 **Smell:** "suitable for LLM consumption", "Treat the returned ID as the canonical Y", "Agents should…", "Callers should…", "When you call this tool…", any reference to "LLM", "agent", "Claude", "the model".
 
-Prior art: #74. Field-test catches this in its leak audit; this skill is the more thorough pass.
+Field-test catches this in its leak audit; this skill is the more thorough pass.
 
 #### 4. Defaults
 
@@ -107,19 +105,21 @@ Prior art: #74. Field-test catches this in its leak audit; this skill is the mor
 
 **Smell:** "Check the logs", "See documentation", "Contact admin", "Try again later" (with no condition), generic non-actionable text, hints that name internal classes or files.
 
-#### 6. Output descriptions
+#### 6. Field descriptions
 
-**Look in:** every field `.describe()` inside `output: z.object({ ... })`.
+**Look in:** every field in `input` and `output` schemas; resource URI template variables.
 
-**Check:** the description tells the agent what the *value* is — not just the field name restated, not silent on dynamic shapes.
+**Check:** every field carries a `.describe()`, and it tells the agent what the *value* is — not just the field name restated, not silent on dynamic shapes. Enum variants — especially operation discriminators — are explained.
 
 **Smell:**
 
+- An input field with no `.describe()` at all
 - `name: z.string().describe('Name')` — tautology
-- `description: z.string().describe('Description.')` — tautology
+- `operation: z.enum([...])` whose variants are never explained
 - `metadata: z.record(z.string(), z.unknown()).describe('Metadata')` — opaque dynamic shape with no hint about keys/values
 - Optional fields with no note on when they're absent
-- Enum fields with no `.describe()` on the variants
+- Paging fields (`total`, `hasMore`, `nextCursor`) with semantics unstated — or a `limit` param that doesn't say whether it caps the page or the whole result
+- A URI template variable (`{cid}`) never described anywhere
 
 #### 7. Cross-references
 
@@ -157,8 +157,6 @@ Prior art: #74. Field-test catches this in its leak audit; this skill is the mor
 
 **Smell:** blank lines (`\n\n`) inside a description string, `- bullet` lines, `## Header` lines, "Operations:\n- foo: …" duplicating an enum's `.describe()` text.
 
-Prior art: #33.
-
 #### 11. Mutator observability
 
 **Look in:** mutator tools — any tool that writes, updates, deletes, appends, or patches (i.e., definitions without `annotations.readOnlyHint: true`).
@@ -171,11 +169,51 @@ Prior art: #33.
 
 **Look in:** every `z.number()` field in `output` schemas.
 
-**Check:** the field name carries a unit when not pinned by context — `sizeInBytes`, `durationInMs`, `priceInCents`, `latencyInMs`. The `.describe()` drops in summarization or gets truncated; the field name persists into the JSON the agent reads.
+**Check:** the field name carries a unit when not pinned by context — `sizeInBytes`, `durationInMs`, `priceInCents`, `latencyInMs`. The `.describe()` drops in summarization or gets truncated; the field name persists into the JSON the agent reads. Scores, ratios, and percentages carry their range the same way — in the name or as the first thing in the describe (`0–1`).
 
-**Smell:** `size`, `duration`, `price`, `latency` — bare names that force the agent to guess units or rely on description text. Exempt: `index`, `position`, `totalCount`, `itemCount` (dimensionless).
+**Smell:** `size`, `duration`, `price`, `latency` — bare names that force the agent to guess units; `score`/`confidence` with no stated range (0.87 and 87 both pass the schema). Exempt: `index`, `position`, `page`, `offset`, `limit`, `totalCount`, `itemCount` (dimensionless).
 
-### 3. Report
+#### 13. Constraints in validators
+
+**Look in:** input schemas — every field whose `.describe()` states a format, range, length, or pattern.
+
+**Check:** stated constraints are machine-enforced in the schema (`.regex()`, `.min()`/`.max()`, `.int()`, `.length()`, an enum) so they emit into the JSON Schema the client renders — a constraint living only in prose reaches a weaker model unreliably and burns retries on malformed input. Opaque-ID params also say how to *obtain* the value (which sibling tool returns it), not just its shape.
+
+**Smell:** `.describe('Date in YYYY-MM-DD format')` on a bare `z.string()`; "max 100" in prose with no `.max(100)`; an ID param whose describe gives the format but never the tool that produces it.
+
+#### 14. Annotations truthfulness
+
+**Look in:** the `annotations` block on every tool.
+
+**Check:** hints match what the handler actually does — clients gate confirmation prompts and retry policy on them. A purely-read tool carries `readOnlyHint: true`; deletes and overwrites aren't marked `destructiveHint: false`; retry-safe mutators carry `idempotentHint: true`; tools calling external services carry `openWorldHint: true`. If `annotations.title` is set, it still matches the tool's current name and behavior.
+
+**Smell:** `readOnlyHint: true` on anything that writes; a read-only tool with no `readOnlyHint` (clients assume it can mutate); `destructiveHint: false` on a delete; a stale `title` surviving a rename.
+
+#### 15. Single-line strings
+
+**Look in:** every `description`, `.describe()`, and error `recovery` / `when` string in a definition file.
+
+**Check:** each is a single-line string literal. NEVER split one across lines with `+` concatenation (`'part one ' + 'part two'`), and never line-wrap a description into a `\n`-bearing template literal. The formatter does not break string literals, so a long single-line string passes formatting untouched — the line-width limit is not a reason to concatenate.
+
+**Why it's not cosmetic:** `+`-concatenation forces every fragment to hand-carry its boundary whitespace, and a dropped trailing space silently fuses two words in the rendered schema the model reads (`'…table_name. ' + 'Columns…'` renders as `table_name.Columns`). Correct output is byte-identical to the single-line form, so the concatenation buys nothing and adds a class of silent contract corruption.
+
+**Smell:** a string literal ending in `' +` or `" +` at end of line; a `description:` value spanning multiple quoted fragments; a multi-line template literal inside a description (also a Structure finding, #10).
+
+**Fix:** collapse to one single-line string literal.
+
+### 3. Cross-surface pass
+
+The per-file walk misses drift that only shows between files. After it, sweep the whole surface:
+
+- **Naming taxonomy** — verb prefixes mean one thing each across the surface (`search_` / `find_` / `get_` / `list_` / `lookup_`); the same verb carrying different semantics on different tools is a finding.
+- **Parameter vocabulary** — one name per concept everywhere: `query` vs `q`, `limit` vs `maxResults`, `nctId` vs `nct_id` on sibling tools is a finding.
+- **Tool overlap** — for any pair with adjacent scope, the two descriptions alone must answer "when X vs Y." If an agent can't pick, that's material.
+- **Instructions drift** — if the server sets `instructions`: every tool it names exists, workflow guidance reflects the current surface (new tools that belong in it, renamed or removed ones purged), and nothing contradicts a per-tool description.
+- **Length outliers** — a description several times longer than its siblings (attention drag), or a one-liner that underspecifies (selection risk).
+
+Cross-surface findings use the same finding format, cited at the file:line you'd change (the `instructions` string is a citable location).
+
+### 4. Report
 
 Three sections.
 
@@ -193,6 +231,8 @@ Excerpt: `<the offending text>`
 Issue: <one line: what's wrong>
 Fix: <one line: what to change to>
 ```
+
+Excerpts are verbatim copy-paste from the file as read, line numbers from that read — re-verify any finding written from memory before it enters the report.
 
 Two-level severity:
 
@@ -219,10 +259,11 @@ End with:
 
 - [ ] Scope confirmed (whole server / module / specific files)
 - [ ] Severity floor applied — nits suppressed if user requested
-- [ ] Inventory built — every `*.tool.ts`, `*.app-tool.ts`, `*.resource.ts`, `*.app-resource.ts`, `*.prompt.ts` listed
-- [ ] Each file walked through all 12 categories (per-file, not 12 separate passes)
+- [ ] Inventory built — every `*.tool.ts`, `*.app-tool.ts`, `*.resource.ts`, `*.app-resource.ts`, `*.prompt.ts` listed; server `instructions` located if set
+- [ ] Each file walked through all 15 categories (per-file, not 15 separate passes)
+- [ ] Cross-surface pass run — naming taxonomy, parameter vocabulary, tool overlap, instructions drift, length outliers
 - [ ] **Read-only:** no git, no commits, no changelog edits, no `devcheck`, no wrapup invoked during the audit
-- [ ] Findings carry file:line citation, excerpt, issue, fix
+- [ ] Findings carry file:line citation, excerpt, issue, fix — excerpts verbatim, line numbers verified
 - [ ] Report: summary → grouped-by-category findings → numbered options
-- [ ] Options section produced — numbered, one-per-file, severity tagged, cherry-pickable
+- [ ] Options section produced — numbered, each single-file-scoped, severity tagged, cherry-pickable
 - [ ] If no findings: summary states "no findings"; Findings and Options sections omitted

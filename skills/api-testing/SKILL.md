@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: reference
 ---
@@ -13,7 +13,7 @@ metadata:
 
 Tests target handler behavior directly — call `handler(input, ctx)`, assert on the return value or thrown error. The framework's handler factory (try/catch, formatting, telemetry) is not involved. Use `createMockContext` from `@cyanheads/mcp-ts-core/testing` to construct the `ctx` argument.
 
-**Additional exports from `/testing`:** `createMockLogger()` returns a standalone `MockContextLogger` for unit-testing code that accepts a `ContextLogger` directly (services, utilities). `createInMemoryStorage(options?)` provides a real `StorageService` backed by `InMemoryProvider` for testing services that take a `StorageService` dependency.
+**Additional exports from `/testing`:** `createMockSession()` binds a mock handler context to an HTTP session; `createFetchMock()` provides a strict upstream HTTP fake; `runToolContract()` executes a definition through schema, handler, formatting, enrichment/content, and production-shaped error-envelope checks. `createMockLogger()` returns a standalone `MockContextLogger`, and `createInMemoryStorage(options?)` provides a real `StorageService` backed by `InMemoryProvider`.
 
 **Philosophy:** Test behavior, not implementation. Refactors should not break tests. Match the repo's existing test layout: fresh scaffolds use `tests/`, while colocated `src/**/*.test.ts` files are also supported. Integration tests at I/O boundaries over unit tests of internals.
 
@@ -21,7 +21,7 @@ Tests target handler behavior directly — call `handler(input, ctx)`, assert on
 
 ## `mcpTest` — fixture-based Vitest test
 
-`mcpTest` is a `test.extend`-based Vitest test that provides `ctx` and `storage` as **per-test fixtures** — fresh instances for every test, eliminating the `createMockContext()` boilerplate and enforcing the fresh-context-per-test convention automatically.
+`mcpTest` is a `test.extend`-based Vitest test that provides `ctx`, `session`, `fetchMock`, and `storage` as **per-test fixtures** — fresh instances for every test, eliminating boilerplate and enforcing isolation automatically. `fetchMock` is installed as `globalThis.fetch` only when requested by a test and restored afterward.
 
 ```ts
 import { mcpTest } from '@cyanheads/mcp-ts-core/testing/vitest';
@@ -36,6 +36,14 @@ mcpTest('uses storage fixture', async ({ ctx, storage }) => {
   const result = await svc.doWork(ctx);
   expect(result).toBeDefined();
 });
+
+mcpTest('stubs an upstream HTTP boundary', async ({ fetchMock }) => {
+  fetchMock.route({
+    match: 'https://api.example.test/items/42',
+    respond: Response.json({ id: '42' }),
+  });
+  await expect(loadItem('42')).resolves.toMatchObject({ id: '42' });
+});
 ```
 
 ### Fixtures
@@ -43,6 +51,8 @@ mcpTest('uses storage fixture', async ({ ctx, storage }) => {
 | Fixture | Type | Per-test? | Notes |
 |:--------|:-----|:----------|:------|
 | `ctx` | `Context` | Yes | Fresh `createMockContext()` each test |
+| `session` | `MockSession` | Yes | Fresh `{ sessionId, tenantId?, ctx }` from `createMockSession()` |
+| `fetchMock` | `FetchMockHarness` | Yes | Strict fetch fake installed/restored around the requesting test |
 | `storage` | `StorageService` | Yes | Fresh `createInMemoryStorage()` each test |
 
 ### Extending with the function form
@@ -61,7 +71,58 @@ const tenantTest = mcpTest.extend({
 // const tenantTest = mcpTest.extend({ ctx: createMockContext({ tenantId: 'test-tenant' }) });
 ```
 
-`createMockContext` and `createInMemoryStorage` are re-exported from `@cyanheads/mcp-ts-core/testing/vitest` so overrides don't need a second import.
+The portable `/testing` helpers are re-exported from `@cyanheads/mcp-ts-core/testing/vitest` so fixture overrides don't need a second import.
+
+---
+
+## Upstream HTTP testing with `createFetchMock`
+
+Use the fetch harness at real outbound I/O boundaries. Stub the external service, not server-owned services or handlers.
+
+```ts
+import { createFetchMock } from '@cyanheads/mcp-ts-core/testing';
+
+const http = createFetchMock([
+  {
+    method: 'GET',
+    match: 'https://api.example.test/items/42',
+    respond: Response.json({ id: '42', name: 'Example' }),
+  },
+]);
+
+http.install();
+try {
+  await expect(loadItem('42')).resolves.toEqual({ id: '42', name: 'Example' });
+  expect(http.calls[0]?.request.url).toBe('https://api.example.test/items/42');
+} finally {
+  http.restore();
+}
+```
+
+Routes match in registration order. `match` accepts an exact URL, `RegExp`, or request predicate; `respond` accepts a clonable `Response` or response factory. Set `once: true` for one-shot behavior. Unmatched requests throw unless `onUnhandled` is provided.
+
+---
+
+## Tool conformance with `toolContractSuite`
+
+Point the reusable suite at a definition plus representative success and failure inputs. It checks input/output schemas, invokes the real handler, applies formatting/enrichment/content, and validates both public error surfaces.
+
+```ts
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { toolContractSuite } from '@cyanheads/mcp-ts-core/testing/vitest';
+
+toolContractSuite(searchTool, {
+  success: [{ name: 'returns matches', input: { query: 'mcp' } }],
+  errors: [{
+    name: 'reports an empty query',
+    input: { query: '' },
+    code: JsonRpcErrorCode.InvalidParams,
+    reason: 'empty_query',
+  }],
+});
+```
+
+Use `runToolContract(definition, input, { context })` from `/testing` when a custom test runner or an imperative assertion is a better fit. It intentionally skips transport auth and telemetry; those belong in transport/integration tests.
 
 ---
 

@@ -191,8 +191,7 @@ async function generateTree(
 
   // Sequential traversal — prevents unbounded concurrent readdir calls
   let result = '';
-  for (let i = 0; i < filteredEntries.length; i++) {
-    const entry = filteredEntries[i];
+  for (const [i, entry] of filteredEntries.entries()) {
     const isLast = i === filteredEntries.length - 1;
     const connector = isLast ? '\u2514\u2500\u2500 ' : '\u251C\u2500\u2500 ';
     const newPrefix = prefix + (isLast ? '    ' : '\u2502   ');

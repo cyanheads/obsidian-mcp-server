@@ -12,11 +12,16 @@
  * Section-specific rules — `peer`/`optional` may legitimately float to "any
  * host version", so `*` and dist-tags are allowed there; `latest` never is:
  *
- *   | specifier                 | dependencies / devDependencies | peer / optional |
- *   |---------------------------|:------------------------------:|:---------------:|
- *   | latest                    | fail                           | fail            |
- *   | *                         | fail                           | allow           |
- *   | next / beta / canary / rc | fail                           | allow           |
+ *   | specifier                 | dependencies / devDependencies / overrides | peer / optional |
+ *   |---------------------------|:------------------------------------------:|:---------------:|
+ *   | latest                    | fail                                        | fail            |
+ *   | *                         | fail                                        | allow           |
+ *   | next / beta / canary / rc | fail                                        | allow           |
+ *
+ * `overrides` is held to the strict rule for a sharper reason than the rest: an
+ * override exists to force a transitive off a known-vulnerable version, so a
+ * floating specifier there re-resolves the very pin the entry was added to
+ * hold — the advisory silently returns while the block still looks present.
  *
  * Only the `workspaces` section of `bun.lock` is inspected — the `packages`
  * section records third-party packages' own nested declarations, which can
@@ -41,6 +46,7 @@ const DEP_SECTIONS = [
   'devDependencies',
   'peerDependencies',
   'optionalDependencies',
+  'overrides',
 ] as const;
 type DepSection = (typeof DEP_SECTIONS)[number];
 
@@ -67,7 +73,7 @@ function isFloating(specifier: string, section: DepSection): boolean {
   return spec === '*' || FLOATING_DIST_TAGS.has(spec);
 }
 
-/** Scan the four dependency sections of one manifest object. */
+/** Scan every dependency-declaring section of one manifest object. */
 function scanManifest(manifest: SectionedManifest, label: string): Offender[] {
   const offenders: Offender[] = [];
   for (const section of DEP_SECTIONS) {
@@ -138,7 +144,7 @@ function parseJsonc<T>(text: string): T {
 
 const offenders: Offender[] = [];
 
-// ── package.json (all four dependency sections) ──
+// ── package.json (every dependency-declaring section) ──
 const pkgPath = resolve(ROOT, 'package.json');
 if (existsSync(pkgPath)) {
   try {

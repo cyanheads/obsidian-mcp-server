@@ -15,9 +15,11 @@ summary: ""
 # usage. Flagged as `Breaking` in the rollup.
 breaking: false
 
-# Set `true` if this release contains any security fix. Pairs with the
-# `## Security` section below. Flagged as `Security` in the rollup so
-# users can triage upgrade urgency at a glance.
+# Set `true` ONLY for a security fix in THIS project's own source code — a
+# vulnerability or hardening in code you ship. A dependency or transitive CVE
+# bump is routine maintenance, NOT a security release: record it under
+# `## Dependencies` (with the advisory ID) and leave this `false`. When true,
+# pairs with the `## Security` section below and flags `Security` in the rollup.
 security: false
 
 # Optional free-form notes for maintenance agents processing this release.

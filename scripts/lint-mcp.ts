@@ -164,7 +164,7 @@ async function main(): Promise<void> {
     resources,
     prompts,
     serverJson,
-    packageJson,
+    ...(packageJson ? { packageJson } : {}),
   });
 
   for (const w of report.warnings) {

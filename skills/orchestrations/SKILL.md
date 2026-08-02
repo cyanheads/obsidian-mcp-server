@@ -4,7 +4,7 @@ description: >
   Pick and run a multi-phase workflow that chains foundational task skills (`git-wrapup`, `release-and-publish`, `maintenance`, `field-test`, `setup`, etc.) end-to-end. Routes user intent to a workflow file under `workflows/` — greenfield builds, maintenance + release, field-test + fix, or known-work + release. Single source for the universal rules (no commits without authorization, no destructive git, no marketing language), the orchestrator posture (own the goal, ground sub-agents in primary sources, verify against the goal), and the sub-agent strategy (orient block, parallel fanout, isolation, normalization) that apply across every workflow. Sub-agents are an optional capability — workflows run linearly when fanout isn't available.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.7"
   audience: external
   type: workflow
 ---
@@ -58,7 +58,7 @@ These apply to every workflow. Workflow files don't restate them; the orchestrat
 5. **No marketing adjectives** in commits, tags, READMEs, or changelog entries — no "comprehensive", "robust", "enhanced", "seamless", "improved". State the change, not its quality.
 6. **One workflow per orchestration run.** Don't interleave two workflows in the same session. If a target needs both (e.g., maintenance surfaces a bug fix that needs field-testing first), sequence them as two workflow runs with a clean handoff in between.
 7. **`gh release create --notes-from-tag` is incompatible with `--repo`.** Always `cd` into the target repo directory for `gh release` commands.
-8. **Annotated tags only** (`git tag -a`), never lightweight. Tag annotation subject omits the version number — GitHub prepends `v<VERSION>:` to release titles when using `--notes-from-tag`, so including the version in the subject creates stutter.
+8. **Annotated tags only** (`git tag -a`), never lightweight, created with `--cleanup=whitespace` — the default (`strip`) deletes `#`-leading lines as comments; `--cleanup=verbatim` glues the SSH signature into the message (unparseable-as-signed tag, signature block leaks into the release body). Tag annotation subject omits the version number — GitHub prepends `v<VERSION>:` to release titles when using `--notes-from-tag`, so including the version in the subject creates stutter. The tag body's final line is a Markdown link to this version's changelog file — `[CHANGELOG v<VERSION>](https://github.com/<OWNER>/<REPO>/blob/main/changelog/<major.minor>.x/<VERSION>.md)`, separated from the gates line by a blank line — giving the release a one-click jump to the full entry.
 9. **Conventional Commits subjects** (`feat|fix|refactor|chore|docs|test|build(scope): message`). One logical concern per commit. The release commit (version bump + changelog + regenerated artifacts) lands on top of a stack of feature/fix commits, never collapsed alongside them.
 10. **Email on any artifact is the user's domain email**, never a personal address that might appear in git config.
 
@@ -189,7 +189,7 @@ Sub-agent self-reports describe intent, not always reality. After every phase th
 - **GitHub** — `gh repo view --json visibility`, `gh release view v<VERSION>`, `gh issue list`, `gh issue view <N> --comments` to confirm the fix comment landed
 - **npm / registries** — `npm view <pkg>@<version>`, registry-specific checks
 - **Build state** — re-run `bun run devcheck` if the previous phase was supposed to land green
-- **Quality** — tag annotation reads as structured markdown (not flat string), subject omits the version number, no marketing adjectives, dep arrows present where applicable, issue backlinks where applicable
+- **Quality** — tag annotation is a headline digest covering every change (flat bullets — notable ones named, minor ones in one grouped bullet; no changelog section headers, deps ≤1 line, no gates line), subject omits the version number, no marketing adjectives, issue backlinks where applicable, changelog link as final line
 
 If verification disagrees with the sub-agent's report, that's the signal to re-spawn with the actual state and the unmet goal in the prompt — not to trust the report. The goal hasn't changed; only the path needs to.
 

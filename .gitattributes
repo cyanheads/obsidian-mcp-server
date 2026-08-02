@@ -1,0 +1,17 @@
+# Normalize line endings to LF across platforms
+* text=auto eol=lf
+
+# Binary assets - prevent corruption
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.mcpb binary
+*.sqlite binary
+
+# Machine-generated files - collapse in PR diffs, exclude from language stats
+bun.lock linguist-generated
+CHANGELOG.md linguist-generated
+docs/tree.md linguist-generated

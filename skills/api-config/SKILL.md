@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: reference
 ---
@@ -125,6 +125,7 @@ Activated when `OAUTH_PROXY_AUTHORIZATION_URL` or `OAUTH_PROXY_TOKEN_URL` is set
 | `CANVAS_PROVIDER_TYPE` | `canvas.providerType` | `none` | `none` \| `duckdb`. Set to `duckdb` to enable `core.canvas`. Fails closed on Cloudflare Workers (DuckDB has no V8-isolate build). |
 | `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` | Per-canvas DuckDB `memory_limit` PRAGMA value, in MB. |
 | `CANVAS_EXPORT_PATH` | `canvas.exportRootPath` | `./.canvas-exports` | Sandbox root for path-targeted exports. Absolute paths and `..` traversal are rejected. |
+| `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `<os.tmpdir()>/mcp-canvas` | Scratch root: DuckDB's `temp_directory` for queries that spill past `memory_limit`, plus the transient files behind stream exports and the spillover round-trip. Never resolves to the process cwd — DuckDB's own cwd-relative `.tmp` default fails on a non-root or read-only container rootfs. |
 | `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `100` | Active canvas cap per tenant; throws `RateLimited` when exceeded. |
 | `CANVAS_TTL_MS` | `canvas.ttlMs` | `86400000` | Sliding TTL (24 h). Every operation extends the expiry. |
 | `CANVAS_ABSOLUTE_CAP_MS` | `canvas.absoluteCapMs` | `604800000` | Absolute cap from creation (7 d). Sliding window clamps to this. |

@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit, annotated tag) is already complete — this skill is the post-wrapup publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.9"
+  version: "2.11"
   audience: external
   type: workflow
 ---
@@ -129,6 +129,8 @@ Halt on any publisher error other than "cannot publish duplicate version".
 
 ### 6. Create GitHub Release
 
+Pre-flight: `--notes-from-tag` publishes the tag message as-is. With tag signing enabled, confirm the tag's signature parses — `git tag -l v<version> --format='%(contents:signature)'` must be non-empty. Empty on a signing-enabled repo (e.g. a tag created with `--cleanup=verbatim`) means git is treating the signature as message text, and the `-----BEGIN SSH SIGNATURE-----` block will land in the public release body — recreate the tag per git-wrapup step 8 first.
+
 For all projects (including those without `manifest.json`):
 
 ```bash
@@ -200,7 +202,7 @@ Confirm each published artifact is actually live — don't rely on a successful 
 - **npm**: `npm view <package.json#name>@<version> version` — must return the version string
 - **MCP Registry**: `curl -s "https://registry.modelcontextprotocol.io/v0.1/servers/<mcpName>/versions/<version>"` — must return HTTP 200 with `server.version` matching `<version>` (`mcpName` is the `name` field from `server.json`; URL-encode `/` as `%2F`). The search endpoint (`/v0.1/servers?search=`) paginates and may not include the latest version for packages with many releases — always use the direct version lookup.
 - **GitHub Release**: `gh release view v<VERSION> -R <OWNER>/<REPO> --json assets --jq '.assets[].name'` — must list the `.mcpb` file
-- **GHCR**: fetch an anonymous bearer token, then `curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $TOKEN" "https://ghcr.io/v2/<OWNER>/<REPO>/manifests/<VERSION>"` — must return HTTP 200
+- **GHCR**: `docker manifest inspect ghcr.io/<OWNER>/<REPO>:<VERSION>` — must exit 0 (resolves multi-arch OCI indexes directly with the correct media types; exits non-zero when the tag is genuinely absent)
 
 If any check fails, halt and report which destination is unreachable. A successful `docker push` or `bun publish` exit code does not guarantee the artifact is queryable — registry propagation delays, auth scoping, and partial failures all exist.
 

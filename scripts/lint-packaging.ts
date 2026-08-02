@@ -111,6 +111,13 @@ export const CRITICAL_RUNTIME_PATHS = [
 export const AGENT_DOC_ENTRY =
   /^node_modules\/.*(?:\/skills\/|\/\.claude\/|\/\.agents\/|\/SKILL\.md$)/;
 
+/**
+ * Platform-specific native binding packages that must not ship in a bundle.
+ * KEEP IN SYNC with `NATIVE_BINDING_ENTRY` in `scripts/clean-mcpb.ts` (the
+ * strip step this check verifies) — a unit test asserts the two are identical.
+ */
+export const NATIVE_BINDING_ENTRY = /^node_modules\/@duckdb\/node-bindings-[^/]+\//;
+
 /** The canonical in-code identity pair — both must equal the unscoped package name. */
 const IDENTITY_PAIR = ['name', 'title'] as const;
 
@@ -225,21 +232,37 @@ export async function checkBundleContent(raw: string): Promise<string[]> {
 
 /**
  * Check 8: a built bundle must contain zero `node_modules/**` agent-doc
- * entries. `scripts/clean-mcpb.ts` (wired into the `bundle` script) strips
- * them after `mcpb pack`.
+ * entries and zero platform-specific native bindings. `scripts/clean-mcpb.ts`
+ * (wired into the `bundle` script) strips both after `mcpb pack`.
  */
 export function checkBundleEntries(entries: string[], bundleLabel: string): string[] {
-  const offending = entries.filter((entry) => AGENT_DOC_ENTRY.test(entry));
-  if (offending.length === 0) return [];
-  const sample = offending
-    .slice(0, 5)
-    .map((entry) => `\n      ${entry}`)
-    .join('');
-  return [
-    `${bundleLabel} contains ${offending.length} node_modules agent-doc entries ` +
-      `(dependency-shipped skills/, .claude/, .agents/, SKILL.md) — re-run the \`bundle\` ` +
-      `script (scripts/clean-mcpb.ts strips them):${sample}`,
-  ];
+  const sampleOf = (offending: string[]) =>
+    offending
+      .slice(0, 5)
+      .map((entry) => `\n      ${entry}`)
+      .join('');
+
+  const errors: string[] = [];
+
+  const agentDocs = entries.filter((entry) => AGENT_DOC_ENTRY.test(entry));
+  if (agentDocs.length > 0) {
+    errors.push(
+      `${bundleLabel} contains ${agentDocs.length} node_modules agent-doc entries ` +
+        `(dependency-shipped skills/, .claude/, .agents/, SKILL.md) — re-run the \`bundle\` ` +
+        `script (scripts/clean-mcpb.ts strips them):${sampleOf(agentDocs)}`,
+    );
+  }
+
+  const natives = entries.filter((entry) => NATIVE_BINDING_ENTRY.test(entry));
+  if (natives.length > 0) {
+    errors.push(
+      `${bundleLabel} contains ${natives.length} platform-specific native binding entries — ` +
+        `the bundle would run only on the platform it was packed on. Re-run the \`bundle\` ` +
+        `script (scripts/clean-mcpb.ts strips them):${sampleOf(natives)}`,
+    );
+  }
+
+  return errors;
 }
 
 /**

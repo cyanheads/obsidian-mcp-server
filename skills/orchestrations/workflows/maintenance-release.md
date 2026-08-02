@@ -119,7 +119,7 @@ If a target's diff suggests minor-or-above, **pause that target and surface to t
 ### Phase 4: Wrap-up + release
 Each sub-agent reads BOTH `skills/git-wrapup/SKILL.md` AND `skills/release-and-publish/SKILL.md`. Runs wrap-up (version bump, changelog authoring, commit, annotated tag), then release (push, npm publish, MCP Registry, GH release, Docker).
 
-**Framework changelog reading.** When `mcp-ts-core` was updated, the sub-agent must read the framework's changelog files for the version delta (e.g. `node_modules/@cyanheads/mcp-ts-core/changelog/0.9.x/0.9.2.md` through `0.9.6.md`) and distill user-facing changes relevant to this server into the changelog entry and tag annotation. "Picks up upstream fixes" is not acceptable — name what changed.
+**Framework changelog reading.** When `mcp-ts-core` was updated, the sub-agent must read the framework's changelog files for the version delta (e.g. `node_modules/@cyanheads/mcp-ts-core/changelog/0.9.x/0.9.2.md` through `0.9.6.md`) and distill user-facing changes relevant to this server into the changelog entry; the tag annotation carries at most a one-line framework mention with the version arrow. "Picks up upstream fixes" is not acceptable in the changelog — name what changed.
 
 **Wrap-up scope.** Determined by repo visibility (`gh repo view --json visibility`):
 
@@ -135,7 +135,7 @@ Each sub-agent reads BOTH `skills/git-wrapup/SKILL.md` AND `skills/release-and-p
 
 **Commit structure.** Group the work by concern, then land the release artifacts (version bumps + changelog + regenerated `docs/tree.md`/`server.json`/`manifest.json`) as a `chore(release): <version> — <theme>` commit on top — same model as `git-wrapup` Step 7. A single-concern pass (just dep updates, or one framework adoption) is one work commit plus the release commit; a pass spanning multiple distinct concerns splits into per-concern work commits with the release commit last. Regenerated meta-drift is release-artifact-shaped — it rides in the release commit, never carved out as its own.
 
-**Tag annotations are for end users.** Internal dev cleanup (lockfile refreshes, linter fixes, build config) belongs in the commit body, not the tag annotation.
+**Tag annotations are for end users.** Every changelog-worthy change stays visible in the tag, with minor/internal items (build config, repo hygiene, metadata) grouped into ONE compact bullet; only non-changelog churn (lockfile refreshes, lint fixes) stays in commit bodies alone.
 
 **Tag-moving protocol.** If post-version doc changes land after the version commit, move the tag to HEAD: delete remote release, delete remote + local tag, recreate tag at new HEAD with same annotation, re-push, recreate release with `.mcpb`. Authorized within the workflow — same-day forward move.
 

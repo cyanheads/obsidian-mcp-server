@@ -4,7 +4,7 @@ description: >
   Catalog of reusable response- and data-shaping techniques for MCP servers built on `@cyanheads/mcp-ts-core` — overflow handling, payload shaping, retrieval patterns. Use when a tool's payload is too large, awkwardly shaped, or expensive to retrieve and you want a proven pattern instead of inventing one. Each technique has a self-contained reference under `references/`.
 metadata:
   author: cyanheads
-  version: "0.1"
+  version: "0.2"
   audience: external
   type: reference
 ---
@@ -13,7 +13,7 @@ metadata:
 
 A directory of cross-cutting techniques for shaping what a handler returns and how a client retrieves it — patterns that don't belong to a single API surface. Each entry is a self-contained reference under `references/`: the problem it solves, when to reach for it (and when not to), and how to apply it with current framework primitives.
 
-These are **patterns, not new primitives** — they compose `tool()`, discriminated-union `output`, `ctx.state`, and the existing helpers. Where a technique has (or will have) a dedicated helper, its reference says so and links the tracking issue.
+These are **patterns, not new primitives** — they compose `tool()`, `output`/`format()` shaping, `ctx.state`, and the existing helpers. Where a technique has (or will have) a dedicated helper, its reference says so and links the tracking issue.
 
 ## Techniques
 

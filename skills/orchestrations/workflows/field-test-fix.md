@@ -137,7 +137,7 @@ Each sub-agent reads both `skills/git-wrapup/SKILL.md` and `skills/release-and-p
 4. Release commit on top — version bump + changelog + regenerated artifacts as `chore(release): v<version>`
 5. Tag the release commit
 
-The tag annotation and changelog cover ALL fixes — the commit split is about git history, not release notes.
+The changelog carries the depth; the tag annotation covers every change at headline granularity — notable ones named, minor ones in one grouped bullet (per git-wrapup step 8). The commit split is about git history, not release notes.
 
 **Version bump.** Default **patch** for field-test fix releases. **Minor** when enhancements are bundled in.
 

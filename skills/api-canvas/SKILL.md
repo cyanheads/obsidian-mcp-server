@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "2.0"
   audience: external
   type: reference
 ---
@@ -78,7 +78,7 @@ A canvas is identified by an opaque 10-character URL-safe `canvasId` (~10¹⁸ k
 | **Omitted** | Framework mints a fresh canvasId, returns it in the tool output. Caller surfaces it to the user / next tool call / another agent. |
 | **Existing id (own tenant)** | Resolves to that canvas, slides TTL forward, returns `isNew: false`. |
 | **Existing id (other tenant)** | Throws `NotFound` — uniform with unknown to avoid leaking existence across tenants. |
-| **Unknown id** | Throws `NotFound` with a hint to omit the parameter on retry. |
+| **Unknown id** | Throws `NotFound` (`data.reason: 'canvas_not_found'`) with a recovery hint to re-run the producing tool or re-check the id. |
 
 When auth is enabled, the effective scope is the composite `(tenantId, canvasId)`. In `MCP_AUTH_MODE=none`, `tenantId` collapses to `'default'` and the canvasId is the only differentiator — entropy + TTL + the framework's rate limiter make brute-force discovery operationally infeasible. **Designed for public-data servers (BrAPI, OpenFEC, etc.). Don't put PII on a no-auth canvas.**
 
@@ -148,7 +148,7 @@ await instance.registerTable('recent_fetch', rows, { ttlMs: 30 * 60 * 1000 });
 
 Run SQL across registered tables. Returns at most `rowLimit` rows (default 10 000). When the result exceeds `rowLimit`, the response carries `truncated: true` and `rowCount` reflects the number of materialized rows (not the full result set). For full result sets and exact counts, pass `registerAs` — the result is materialized as a new canvas table; the response carries a `preview` slice and the exact `rowCount`.
 
-Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`) with a recovery hint to re-stage the table or call `describe()`. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape.
+Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`) with a recovery hint to re-stage the table or call `describe()`. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape. An unknown or expired `canvas_id` fails the same way (`data.reason: 'canvas_not_found'`, with its own recovery hint) — thrown by `acquire()` and every canvas operation.
 
 A `SELECT` that parses but fails to prepare for any other reason — a mistyped column, an unknown function, an invalid expression — throws `ValidationError` (`data.reason: 'invalid_sql'`) and preserves the DuckDB binder detail in `data.binderMessage` (e.g. `Referenced column "x" not found...`, often with a candidate suggestion). This is distinct from `non_select_statement`, reserved for statements that genuinely aren't `SELECT`s — here the shape is fine, so the agent should fix the named column or function.
 
@@ -205,14 +205,14 @@ const result = await instance.query("SELECT total FROM sales_by_region WHERE reg
 
 ### `instance.importFrom(sourceCanvasId, sourceTableName, options?)`
 
-Copy a table from another canvas the caller controls into this one. The lifecycle wrapper validates tenancy on both ids before the provider sees either. Round-trips through a sandbox-rooted Parquet temp file so `TIMESTAMP`/`DATE`/`BLOB` columns survive losslessly.
+Copy a table from another canvas the caller controls into this one. The lifecycle wrapper validates tenancy on both ids before the provider sees either. Round-trips through a Parquet file under the scratch root (`CANVAS_TEMP_PATH`) so `TIMESTAMP`/`DATE`/`BLOB` columns survive losslessly.
 
 ```ts
 const imported = await target.importFrom(source.canvasId, 'orders', { asName: 'orders_copy' });
 // { tableName: 'orders_copy', rowCount: 2, columns: [...] }
 ```
 
-Idempotent on re-import (drop + create on the target). `asName` defaults to `sourceTableName`. Throws `validationError({ reason: 'import_same_canvas' })` if source and target are the same canvas — use `query({ registerAs })` to materialize within a single canvas. Throws `notFound` if the source table is missing; `validationError({ reason: 'import_view_clash' })` if the target name collides with an existing view.
+Idempotent on re-import (drop + create on the target). `asName` defaults to `sourceTableName`. Throws `validationError({ reason: 'import_same_canvas' })` if source and target are the same canvas — use `query({ registerAs })` to materialize within a single canvas. Throws `notFound({ reason: 'missing_table' })` if the source table is missing; `validationError({ reason: 'import_view_clash' })` if the target name collides with an existing view.
 
 ### `instance.export(tableName, target, options?)`
 
@@ -222,7 +222,7 @@ Export a canvas table. Path-based exports are sandboxed to `CANVAS_EXPORT_PATH` 
 // Path target — written inside the sandbox.
 await instance.export('g_with_obs', { format: 'parquet', path: 'observations.parquet' });
 
-// Stream target — copied to a temp file in the sandbox, piped to the stream, unlinked.
+// Stream target — copied to a file under the scratch root, piped to the stream, unlinked.
 await instance.export('g_with_obs', { format: 'csv', stream: writableStream });
 ```
 
@@ -274,6 +274,7 @@ If your tool surfaces row data via `structuredContent`, the JSON-safe shape flow
 | `CANVAS_PROVIDER_TYPE` | `canvas.providerType` | `none` (also: `duckdb`) |
 | `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` |
 | `CANVAS_EXPORT_PATH` | `canvas.exportRootPath` | `./.canvas-exports` |
+| `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `<os.tmpdir()>/mcp-canvas` |
 | `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `100` |
 | `CANVAS_TTL_MS` | `canvas.ttlMs` | `86_400_000` (24 h) |
 | `CANVAS_ABSOLUTE_CAP_MS` | `canvas.absoluteCapMs` | `604_800_000` (7 d) |

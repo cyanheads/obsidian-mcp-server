@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.9"
+  version: "2.11"
   audience: external
   type: workflow
 ---
@@ -205,6 +205,7 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 - `manifest.json` version matches `package.json` version
 - Env var names in `manifest.json` (`mcp_config.env` + `user_config`) match `server.json` `environmentVariables` — `lint:packaging` enforces this, but verify the set is complete
 - `manifest.json` `name` matches `package.json` name **without the npm scope prefix** (e.g. `bls-mcp-server`, not `@cyanheads/bls-mcp-server`); `description` matches `package.json`
+- `manifest.json` `author` is the full person object — `{ "name", "email", "url" }` — carrying the same identity as `package.json` `author` (name matches the LICENSE copyright holder, url is the author's site)
 - `manifest.json` `user_config` entries must include `title` and `type` fields — `mcpb pack` validates these
 - For each `user_config` entry referenced as `${user_config.X}` in `mcp_config.env`: if it's not `required: true`, set `"default": ""`. MCPB hosts (Claude Desktop included) pass the literal placeholder string through to the process when an optional field is left blank without a default — strict consumer validators (`z.email()`, `z.url()`, `.regex()`) then crash at lazy config load, exiting silently after `initialize`. Server-side: pair every optional env-backed strict-validator field with a `z.preprocess` that strips `${...}` placeholders to `undefined`.
 - `server.json` env var `isRequired` must match the upstream API's actual requirement — if the API works without the value (rate-limited, DEMO_KEY fallback, polite pool), mark `isRequired: false` and describe the tradeoff in the description

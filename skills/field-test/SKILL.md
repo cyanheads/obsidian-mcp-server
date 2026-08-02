@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.6"
+  version: "2.8"
   audience: external
   type: debug
 ---
@@ -29,7 +29,7 @@ This skill drives an HTTP server because curl + JSON-RPC is the most reliable ha
 
 Generate a 10-character alphanumeric ID (e.g. `9DJ73-K103L`) and write the helper to `/tmp/<project-name>-field-test-<ID>.sh`. Use that exact path in every subsequent Bash call. **Two agents in the same project tree must pick different IDs** — that's what keeps their helper files, server logs, and call scratch from colliding.
 
-The helper itself is **stateless** — every function takes the IDs it needs (server `pid`, server `url`, MCP `sid`, server log path) as positional args. `mcp_start` prints them; the agent threads them through every later call. No env vars, no shared state files.
+The helper itself is **stateless** — every function takes the IDs it needs (server `pid`, `url`, `port`, MCP `sid`, server log path) as positional args. `mcp_start` prints them; the agent threads them through every later call. No env vars, no shared state files.
 
 ```bash
 # Pick your ID — example below uses 9DJ73-K103L. Substitute your own.
@@ -38,7 +38,7 @@ cat > /tmp/<project-name>-field-test-9DJ73-K103L.sh <<'HELPER_EOF'
 #!/bin/bash
 # Field-test helper: stateless wrappers around an MCP HTTP server + JSON-RPC
 # session. Every function takes the IDs it needs as positional args — the agent
-# threads pid/url/sid/log through each call rather than relying on a state
+# threads pid/url/port/sid/log through each call rather than relying on a state
 # file or env vars (the Bash tool wipes shell state between calls, and a
 # pointer file would race the same way two agents race on shared state).
 # See https://github.com/cyanheads/mcp-ts-core/issues/90, #144.
@@ -47,12 +47,14 @@ cat > /tmp/<project-name>-field-test-9DJ73-K103L.sh <<'HELPER_EOF'
 # so the helper auto-tails logs and prints HTTP status/body on errors instead
 # of swallowing them.
 
-# Usage: mcp_start /path/to/server
+# Usage: mcp_start /path/to/server [startup-timeout-seconds]   (default: 30)
 # Builds, starts the HTTP server in the background, waits for the listen line,
 # and prints: ready pid=<n> url=<u> port=<n> log=<path>
-# Capture these — every later helper takes them as args.
+# Capture these — every later helper takes them as args. Raise the timeout for
+# servers that build a local index at boot.
 mcp_start() {
   local dir="${1:-$PWD}"
+  local timeout="${2:-30}"
   local build_log; build_log=$(mktemp /tmp/mcp-field-test-build.XXXXXX)
   echo "building $dir ..." >&2
   if ! (cd "$dir" && bun run rebuild) >"$build_log" 2>&1; then
@@ -66,13 +68,21 @@ mcp_start() {
   (cd "$dir" && bun run start:http) >"$server_log" 2>&1 &
   local pid=$!
   local line=""
-  for _ in $(seq 1 40); do
+  local waited=0
+  while [ "$waited" -lt "$((timeout * 4))" ]; do
     line=$(grep -Eo 'listening at http://[^" ]+/mcp' "$server_log" | head -1)
     [ -n "$line" ] && break
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "server exited during startup — last 30 lines of $server_log:" >&2
+      tail -30 "$server_log" >&2
+      rm -f "$server_log"
+      return 1
+    fi
     sleep 0.25
+    waited=$((waited + 1))
   done
   if [ -z "$line" ]; then
-    echo "server failed to start within 10s — last 30 lines of $server_log:" >&2
+    echo "server failed to start within ${timeout}s — last 30 lines of $server_log:" >&2
     tail -30 "$server_log" >&2
     kill "$pid" 2>/dev/null
     rm -f "$server_log"
@@ -84,17 +94,22 @@ mcp_start() {
 }
 
 # Usage: mcp_init <url>
-# Runs `initialize`, sends `notifications/initialized`, prints: ready sid=<id>
+# Runs `initialize`, sends `notifications/initialized`, prints:
+#   ready sid=<id> protocol=<negotiated-version>
+# A negotiated version older than the requested one means the server capped it
+# — note that in the report; you are then testing an older protocol than a
+# current client would use.
 mcp_init() {
   local url="$1"
   [ -z "$url" ] && { echo "usage: mcp_init <url>" >&2; return 1; }
+  local want="${MCP_FIELD_TEST_PROTOCOL:-2025-11-25}"
   local hdr; hdr=$(mktemp)
   local body_file; body_file=$(mktemp)
   local code
   code=$(curl -sS -D "$hdr" -o "$body_file" -w '%{http_code}' -X POST "$url" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"field-test","version":"2.5"}}}')
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"$want\",\"capabilities\":{},\"clientInfo\":{\"name\":\"field-test\",\"version\":\"1.0.0\"}}}")
   local sid; sid=$(grep -i '^mcp-session-id:' "$hdr" | awk '{print $2}' | tr -d '\r\n')
   if [ -z "$sid" ]; then
     echo "init failed — HTTP $code, no Mcp-Session-Id header returned" >&2
@@ -105,19 +120,23 @@ mcp_init() {
     rm -f "$hdr" "$body_file"
     return 1
   fi
+  local got; got=$(sed -n 's/^data: //p' "$body_file" | grep -o '"protocolVersion":"[^"]*"' | head -1 | cut -d'"' -f4)
+  [ -z "$got" ] && got=$(grep -o '"protocolVersion":"[^"]*"' "$body_file" | head -1 | cut -d'"' -f4)
   curl -sS -X POST "$url" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
     -H "Mcp-Session-Id: $sid" \
     -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
   rm -f "$hdr" "$body_file"
-  echo "ready sid=$sid (HTTP $code)"
+  echo "ready sid=$sid protocol=${got:-unknown} requested=$want (HTTP $code)"
 }
 
 # Usage: mcp_call <url> <sid> <method> [JSON_PARAMS]
-# Prints the JSON-RPC response. SSE framing is stripped when present; on
-# non-SSE responses the raw body is printed instead so plain-JSON error
-# replies (HTTP 4xx/5xx) still surface. Pipe to `jq`.
+# Prints the JSON-RPC response. SSE framing is stripped when present, and only
+# the reply is emitted (a single POST can also carry progress notifications, so
+# emitting every event would break `| jq .result`). A transport failure or an
+# HTTP >= 400 prints the details and returns non-zero — it never returns 0 with
+# empty output. Pipe to `jq`.
 mcp_call() {
   local url="$1"; local sid="$2"; local method="$3"; local params="${4:-}"
   [ -z "$url" ] || [ -z "$sid" ] || [ -z "$method" ] && { echo "usage: mcp_call <url> <sid> <method> [params]" >&2; return 1; }
@@ -128,12 +147,19 @@ mcp_call() {
     body=$(printf '{"jsonrpc":"2.0","id":%d,"method":"%s","params":%s}' "$RANDOM" "$method" "$params")
   fi
   local resp_file; resp_file=$(mktemp)
-  local code
+  local code curl_rc
   code=$(curl -sS -o "$resp_file" -w '%{http_code}' -X POST "$url" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
     -H "Mcp-Session-Id: $sid" \
     -d "$body")
+  curl_rc=$?
+  if [ "$curl_rc" -ne 0 ] || [ -z "$code" ] || [ "$code" = "000" ]; then
+    echo "TRANSPORT FAILURE calling $method — curl exit $curl_rc, http_code '${code:-none}'." >&2
+    echo "Server not reachable at $url (check it is still running: mcp_log <log>)." >&2
+    rm -f "$resp_file"
+    return 1
+  fi
   if [ "$code" -ge 400 ]; then
     echo "HTTP $code from $method — response:" >&2
     cat "$resp_file" >&2
@@ -142,7 +168,8 @@ mcp_call() {
   fi
   local sse; sse=$(sed -n 's/^data: //p' "$resp_file")
   if [ -n "$sse" ]; then
-    printf '%s\n' "$sse"
+    local reply; reply=$(printf '%s\n' "$sse" | grep -E '"(result|error)"')
+    printf '%s\n' "${reply:-$sse}"
   else
     cat "$resp_file"
   fi
@@ -159,27 +186,37 @@ mcp_log() {
   tail -n "$n" "$log"
 }
 
-# Usage: mcp_stop <pid> [server-log-path]
-# Kills the background server. Removes the server log if a path is given.
+# Usage: mcp_stop <pid> [server-log-path] [port]
+# Kills the background server and the `bun run` child that actually holds the
+# port (SIGKILL is not forwarded, so the child must be signalled directly or it
+# survives as an orphaned listener). Pass the port from mcp_start to have the
+# stop confirmed against the socket rather than against the wrapper PID.
+# Removes the server log if a path is given.
 mcp_stop() {
-  local pid="$1"; local log="${2:-}"
-  [ -z "$pid" ] && { echo "usage: mcp_stop <pid> [log-path]" >&2; return 1; }
-  kill "$pid" 2>/dev/null
+  local pid="$1"; local log="${2:-}"; local port="${3:-}"
+  [ -z "$pid" ] && { echo "usage: mcp_stop <pid> [log-path] [port]" >&2; return 1; }
+  local kids; kids=$(pgrep -P "$pid" 2>/dev/null)
+  kill "$pid" $kids 2>/dev/null
   for _ in $(seq 1 12); do
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.25
   done
   if kill -0 "$pid" 2>/dev/null; then
     echo "PID $pid didn't exit on SIGTERM — sending SIGKILL"
-    kill -9 "$pid" 2>/dev/null
+    kill -9 "$pid" $kids 2>/dev/null
     sleep 0.5
   fi
-  if kill -0 "$pid" 2>/dev/null; then
+  local held=""
+  [ -n "$port" ] && held=$(lsof -ti tcp:"$port" 2>/dev/null | tr '\n' ' ')
+  if [ -n "$held" ]; then
+    echo "WARNING: port $port still held by PID(s) $held after stopping $pid — kill those before re-running"
+  elif kill -0 "$pid" 2>/dev/null; then
     echo "WARNING: PID $pid still alive after SIGKILL"
   else
-    echo "stopped pid=$pid"
+    echo "stopped pid=$pid${port:+ (port $port free)}"
   fi
   [ -n "$log" ] && rm -f "$log"
+  return 0
 }
 HELPER_EOF
 
@@ -193,6 +230,8 @@ Capture `pid`, `url`, `port`, `log` from the `mcp_start` output — every later 
 
 - `MCP_HTTP_PORT` is a *starting* port — the server auto-increments if taken. Helper parses the real URL from the log (`HTTP transport listening at ...`).
 - If `bun run rebuild` fails, stop. Don't field-test broken code — fix the build first.
+- Startup wait defaults to 30s. A server that builds or loads a local index at boot can need more — pass a second arg (`mcp_start /path 90`) rather than reading the timeout as a real startup failure.
+- `pid` is the `bun run` wrapper; the process that actually holds the port is its child. `mcp_stop` signals both — that's why it takes the port.
 - If a server is already listening on the project's port (`lsof -i :<port>`), confirm with the user before killing it; it may be their own session. If the user isn't available to confirm, abort the field test and surface the port conflict in your response.
 
 ### 2. Initialize the session
@@ -202,7 +241,9 @@ Capture `pid`, `url`, `port`, `log` from the `mcp_start` output — every later 
 mcp_init <url-from-mcp_start>
 ```
 
-Runs `initialize`, sends `notifications/initialized`, prints `sid=<id>` to capture for `mcp_call`.
+Runs `initialize`, sends `notifications/initialized`, prints `sid=<id>` to capture for `mcp_call`, plus the protocol version the server negotiated.
+
+The helper requests the SDK's current protocol version. **If `protocol=` comes back older than `requested=`, the server capped it** — every call after that exercises an older protocol than a current client would negotiate. Note it as a `bug` finding and check the pinned `@modelcontextprotocol/sdk` version; don't quietly test the downgraded surface. To deliberately test an older version, set `MCP_FIELD_TEST_PROTOCOL`.
 
 ### 3. Surface the catalog
 
@@ -232,7 +273,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 | Category | What to verify |
 |:---------|:---------------|
 | Happy path | One realistic input. Output shape matches schema. `content[]` text reads clearly to a human. |
-| `structuredContent` ↔ `content[]` parity | Every field in `structuredContent` is surfaced in the text. Parity gap = client-specific blindness. |
+| `structuredContent` ↔ `content[]` parity | Dump the whole array (`jq '.result.content'`) and check every `structuredContent` field is surfaced *somewhere* in it — enrichment lands in its own trailing block, not in `content[0]`. Parity gap = client-specific blindness. |
 | Input error | One invalid input (wrong type or missing required). Error text says *what*, *why*, *how to fix*. |
 
 **Situational — add only when triggered**
@@ -247,6 +288,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 | Hits external API / live upstream | One call that exercises upstream; note rate-limit / timeout / transient-failure behavior |
 | Chained with other tools (search → detail → act) | Run one representative chain end-to-end; does each step return the IDs/cursors the next needs? |
 | `cursor` / `offset` / `limit` params | Pagination: second page, end-of-list |
+| Output can be truncated, capped, or spilled (`maxLength`-style caps, outline-on-overflow, canvas/dataframe spill, "showing N of M") | Truncation retrievability: force a response that truncates, then confirm the response both *discloses* the truncation and hands back the means to reach the rest — a cursor, an offset, a document/section selector, a canvas handle. Truncated data with no retrieval path is a `bug`, not a `nit`. |
 | Tool declared an `errors: [...]` contract | Error contract (tool): trigger ≥1 declared failure mode. Verify `result.structuredContent.error.code` matches the contract entry, `result.structuredContent.error.data.reason` is the declared reason (only present when the handler threw an `McpError` — `ctx.fail` always does, plain `throw new Error(...)` does not), and `content[0].text` is actionable. Reasons declared but unreachable from any input are dead contract entries. |
 | Resource declared an `errors: [...]` contract | Error contract (resource): trigger ≥1 declared failure mode by reading a URI that exercises it. Resources re-throw errors at the JSON-RPC level — verify `error.code` matches the contract entry and `error.data.reason` is the declared reason. (Resources don't use the `result.isError` envelope — they fail the request itself.) |
 | Mutator (write/update/delete/append/patch verbs, or `destructiveHint: true`) | Mutator response observability: run an intentionally-ambiguous input (typo path, wrong ID, already-deleted target). Confirm the response carries enough state (pre/post values, state-change discriminator) for the agent to detect intent-effect divergence without re-fetching. |
@@ -271,6 +313,7 @@ When a call surprises you — slow, hangs, returns terse output, surfaces an unh
 
 **Interpreting responses**
 
+- **`content[]` is an array of blocks — read all of them, never just `content[0]`.** A success result is assembled as `[...ctx.content media blocks, ...the format()/JSON domain render, ...the enrichment trailer]`. Everything the handler put on `ctx.enrich` — empty-result notices, totals, query echoes, truncation disclosure — renders in that trailer, a **separate trailing block**, not inside the `format()` block. Quoting `content[0].text` and reporting those fields as absent from `content[]` is a false parity gap; the suggested fix (render them in `format()` too) would double-render them. Dump `.result.content` in full before claiming drift.
 - Tool domain errors return `{result: {content: [...], isError: true}}` — they live in `result`, not `error`. Check `isError`, not the JSON-RPC error field.
 - **Tool error code/reason** rides on `result.structuredContent.error.{code, message, data?.reason}` — inspect that, not just the text. `data` is only spread when the handler threw an `McpError` (or `ZodError`); plain `throw new Error(...)` won't populate `data.reason`. Use `ctx.fail`-thrown errors when the contract reason matters. The text in `result.content[0].text` mirrors the message and includes `Recovery: <hint>` when `data.recovery.hint` is present.
 - **Resource errors** are JSON-RPC-level — they appear in the top-level `error.{code, data.reason}` field, not inside `result`. Resource handlers re-throw rather than producing an `isError` envelope.
@@ -281,11 +324,11 @@ When a call surprises you — slow, hangs, returns terse output, surfaces an unh
 
 ```bash
 . /tmp/<project-name>-field-test-<ID>.sh
-mcp_stop <pid> <log>
+mcp_stop <pid> <log> <port>
 rm -f /tmp/<project-name>-field-test-<ID>.sh
 ```
 
-Kills the background server, removes the server log, then removes the helper script itself. Do this *before* writing the report so nothing leaks into the next session. If `mcp_stop` warns the PID is still alive after SIGKILL, note it in the report and proceed — don't block on a zombie process.
+Kills the background server and its port-holding child, removes the server log, then removes the helper script itself. Do this *before* writing the report so nothing leaks into the next session. Pass the `port` — it's what turns "the wrapper PID is gone" into "the socket is actually free." If `mcp_stop` warns the port is still held or the PID survived SIGKILL, note it in the report and proceed — don't block on a zombie process, but do say which PID to kill.
 
 ### 7. Report
 
@@ -297,7 +340,7 @@ One paragraph. How many definitions exercised, how many passed clean, how many h
 
 #### Findings
 
-Only include definitions with issues. Group by severity. Each finding is 2–4 lines unless it genuinely needs more.
+Only include definitions with issues. Group by severity. Each finding is 2–4 lines unless it genuinely needs more. A parity finding cites the full `content[]` dump as its evidence — a quote from one index doesn't establish drift.
 
 | Severity | Meaning |
 |:---------|:--------|
@@ -334,13 +377,14 @@ End with:
 
 - [ ] Stdio boot check completed — `bun run rebuild && bun run start:stdio` shows clean startup (banner, expected counts, no errors)
 - [ ] HTTP server built and started; real port parsed from log
-- [ ] Session initialized; `notifications/initialized` sent
+- [ ] Session initialized; `notifications/initialized` sent; negotiated protocol version matches the requested one (a downgrade is a finding)
 - [ ] Catalog surfaced and presented; descriptions audited for leaks (implementation details, meta-coaching, consumer-aware phrasing)
-- [ ] Universal battery run on every definition (happy path, parity, input error)
+- [ ] Universal battery run on every definition (happy path, parity against the full `content[]` array, input error)
 - [ ] Situational categories applied only when triggered
 - [ ] **If >15 tools:** sampled 30–40% for situational testing; skipped definitions listed in report
 - [ ] **If a tool declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; `result.structuredContent.error.code` and `data.reason` verified against the contract entry
 - [ ] **If a resource declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; top-level JSON-RPC `error.code` and `error.data.reason` verified against the contract entry
+- [ ] **If any tool truncates, caps, or spills its output:** truncation forced; disclosure + a retrieval path (cursor, offset, selector, canvas handle) verified
 - [ ] External-state / auth-gated tools handled explicitly (run, skip, or confirm)
-- [ ] Server stopped; server log and helper script removed
+- [ ] Server stopped (port confirmed free); server log and helper script removed
 - [ ] Report: summary paragraph → grouped findings → numbered options

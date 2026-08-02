@@ -694,10 +694,30 @@ const ALL_CHECKS: Check[] = [
         return true;
       });
 
-      // Check if every outdated package is in the allowlist
+      // A row is a real finding only if it's neither allowlisted, a peer range,
+      // nor a version held back by bunfig's `minimumReleaseAge` supply-chain guard.
       const unexpected = packageLines.filter((line) => {
-        const pkgName = stripWorkspaceMarker(line.split('|')[1]?.trim() ?? '');
-        return !OUTDATED_ALLOWLIST.has(pkgName);
+        const cells = line.split('|').map((cell) => cell.trim());
+        const rawName = cells[1] ?? '';
+        const pkgName = stripWorkspaceMarker(rawName);
+        if (OUTDATED_ALLOWLIST.has(pkgName)) return false;
+
+        // A peerDependency range declares the *lowest* version supported, not
+        // the version to track — widening it as upstream publishes only narrows
+        // what consumers may install. Currency for the versions actually
+        // exercised is enforced through the matching devDependency row.
+        if (rawName.endsWith('(peer)')) return false;
+
+        // `Update` is the newest version installable under the declared range;
+        // `Latest` ignores the range. Update === Current means there is nothing
+        // to adopt — either `minimumReleaseAge` is holding a fresh publish, or
+        // the range deliberately caps below latest (an exact pin, `^12` against
+        // 13.0.1). Crossing that cap is a deliberate range change, i.e.
+        // maintenance work rather than a gate failure. The gate fails on what
+        // `bun update` would actually change: being behind within the range.
+        const current = cells[2] ?? '';
+        const update = (cells[3] ?? '').replace(/\*/g, '').trim();
+        return !(current !== '' && update === current);
       });
 
       return unexpected.length === 0;

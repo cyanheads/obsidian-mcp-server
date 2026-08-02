@@ -20,9 +20,9 @@ This is distinct from the other two overflow shapes:
 
 **Never truncate to fit a budget.** When a payload is too big, return a complete, honest outline of what's available plus how to retrieve it — identically on `content[]` and `structuredContent`.
 
-## The shape — a discriminated-union `output`
+## The shape — a flat `output` with a `kind` discriminator
 
-The outline is the payload the agent acts on, so it lands in the **main body** (`structuredContent` + `content[]`), as a variant of the tool's own `output`. Not the enrichment block — enrichment is *additive* (`output.extend(...)` merged after `output.parse(result)`), so it can add fields to the fat document but never replace it. Not a post-hoc framework swap either — that would emit a `structuredContent` shape the advertised `outputSchema` (`tools/list`) doesn't describe. A discriminated-union variant is the only placement that replaces the payload, is advertised honestly, and gets `format()`-parity for free.
+The outline is the payload the agent acts on, so it lands in the **main body** (`structuredContent` + `content[]`), as a variant of the tool's own `output`. Not the enrichment block — enrichment is *additive* (`output.extend(...)` merged after `output.parse(result)`), so it can add fields to the fat document but never replace it. Not a post-hoc framework swap either — that would emit a `structuredContent` shape the advertised `outputSchema` (`tools/list`) doesn't describe. A single `output` object carrying both modes — a `kind` discriminator plus presence-based optional arms — is the placement that replaces the payload, is advertised honestly, and holds `format()`-parity. (`tool()` requires `output` to be a `ZodObject`: the `schema-is-object` lint rule and the enrichment `.extend()` are both object-only, so a `z.discriminatedUnion` output is rejected — model the two modes as optional arms of one object, not union branches.)
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
@@ -44,11 +44,17 @@ export const getLabel = tool('get_label', {
       .optional()
       .describe('Sections to return. Omit for the full label (or an outline if it overflows).'),
   }),
-  output: z.discriminatedUnion('kind', [
-    FullLabel.extend({ kind: z.literal('full') }),
-    OUTLINE_VARIANT,
-  ]),
-  format: (r) => (r.kind === 'outline' ? formatOutline(r) : renderLabel(r)),
+  output: z.object({
+    kind: z.enum(['full', 'outline']),
+    ...FullLabel.partial().shape,                         // full arm — every field optional
+    sections: OUTLINE_VARIANT.shape.sections.optional(),  // outline arm
+    notice: OUTLINE_VARIANT.shape.notice.optional(),
+  }),
+  // Render each arm on field presence, independently — never branch on `kind` (see below).
+  format: (r) => [
+    ...(r.id ? renderLabel(r) : []),  // full arm — key on a full-only field
+    ...(r.sections ? formatOutline({ kind: 'outline', sections: r.sections, notice: r.notice ?? '' }) : []),
+  ],
   async handler(input) {
     const doc = await fetchLabel(input.query); // deterministic from query
     if (input.sections?.length) {
@@ -60,7 +66,7 @@ export const getLabel = tool('get_label', {
 });
 ```
 
-`format()`-parity is enforced **per branch** — the linter walks each discriminated-union arm separately, so both `full` and `outline` must render. `formatOutline` is the shipped renderer for the `outline` arm; you supply the `full` renderer. That keeps the two client surfaces in lockstep with no extra work.
+`format()`-parity holds because every terminal field in `output` must appear in the rendered text. With a flat object the linter builds **one** synthetic sample with every optional field populated at once, so render each arm on field presence, independently — a mutually-exclusive `if (kind === 'outline') … else …` renders only one arm against that all-fields sample and fails parity for the other. `formatOutline` is the shipped renderer for the `outline` arm; you supply the `full` renderer. That keeps the two client surfaces in lockstep.
 
 ## The helper
 
@@ -69,7 +75,7 @@ export const getLabel = tool('get_label', {
 | Export | Purpose |
 |:--|:--|
 | `outlineOnOverflow(doc, options?)` | Returns `{ kind: 'full', ...doc }` under budget (or with `< 2` sections), else `{ kind: 'outline', sections, notice }`. |
-| `OUTLINE_VARIANT` | The reusable `outline`-arm Zod schema for your discriminated-union `output`. |
+| `OUTLINE_VARIANT` | The reusable `outline`-arm Zod schema; fold `.shape.sections` / `.shape.notice` into your flat `output` object as optional arms. |
 | `selectSections(doc, want, { alwaysKeep })` | Projects the document to requested keys plus always-kept metadata. The selection-path counterpart. |
 | `formatOutline(outline)` | Renders the outline to `content[]` for `format()`. |
 | `DEFAULT_OUTLINE_BUDGET_BYTES` | The default budget (`24_000`) when `options.budget` is omitted. |
