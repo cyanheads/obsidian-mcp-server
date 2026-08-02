@@ -98,6 +98,9 @@ describe('obsidian_append_to_note (section)', () => {
   it('PATCHes with operation=append and reports both sizes', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(200));
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, { headings: ['Daily'], blocks: [], frontmatterFields: [] });
 
     let seenHeaders: Record<string, string> = {};
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
@@ -123,10 +126,46 @@ describe('obsidian_append_to_note (section)', () => {
     expect(out).toEqual({
       path: 'Note.md',
       sectionTargeted: true,
+      sectionTarget: 'Daily',
       created: false,
       previousSizeInBytes: 200,
       currentSizeInBytes: 218,
     });
+  });
+
+  /**
+   * Regression for the read/write locator asymmetry: a bare leaf that reads
+   * fine through `format: "section"` must reach the same heading on a write,
+   * and the response must say which locator the append actually landed on.
+   */
+  it('expands a bare heading leaf to its full path and reports the resolved target', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(200));
+    pool.intercept({ path: '/vault/Note.md', method: 'GET' }).reply(200, {
+      headings: ['Sandbox', 'Sandbox::Section A'],
+      blocks: [],
+      frontmatterFields: [],
+    });
+
+    let seenTarget = '';
+    pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
+      const headers = (opts.headers as Record<string, string>) ?? {};
+      seenTarget = decodeURIComponent(headers.target ?? headers.Target ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(212));
+
+    const out = await obsidianAppendToNote.handler(
+      obsidianAppendToNote.input.parse({
+        target: { type: 'path', path: 'Note.md' },
+        section: { type: 'heading', target: 'Section A' },
+        content: '- new task',
+      }),
+      createMockContext(),
+    );
+
+    expect(seenTarget).toBe('Sandbox::Section A');
+    expect(out.sectionTarget).toBe('Sandbox::Section A');
   });
 
   it('throws note_missing when the pre-write HEAD shows the file does not exist', async () => {
@@ -179,6 +218,20 @@ describe('obsidian_append_to_note / format()', () => {
     expect(text).not.toContain('did not exist before');
     expect(text).toMatch(/Size:\*?\s*100 → 151 bytes/);
     expect(text).toMatch(/Created:\*?\s*false/);
+  });
+
+  it('renders the resolved section target alongside sectionTargeted', () => {
+    const blocks = obsidianAppendToNote.format!({
+      path: 'Daily.md',
+      sectionTargeted: true,
+      sectionTarget: 'Sandbox::Section A',
+      created: false,
+      previousSizeInBytes: 200,
+      currentSizeInBytes: 218,
+    });
+    expect((blocks[0] as { text: string }).text).toContain(
+      'Section targeted:* true → Sandbox::Section A',
+    );
   });
 
   it('renders the section branch with sectionTargeted:true and real sizes', () => {

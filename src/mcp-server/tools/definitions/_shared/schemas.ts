@@ -47,7 +47,7 @@ export const SectionSchema = z.object({
     .string()
     .min(1)
     .describe(
-      'Heading name (use "::" for nested headings), block reference without leading caret (e.g. "2d9b4a", not "^2d9b4a"), or frontmatter field name.',
+      'Heading name — either the full path (`"Parent::Child"`) or a bare leaf name that matches exactly one heading — a block reference without the leading caret (e.g. "2d9b4a", not "^2d9b4a"), or a frontmatter field name.',
     ),
 });
 

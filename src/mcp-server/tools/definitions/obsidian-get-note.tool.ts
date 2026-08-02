@@ -163,7 +163,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       code: JsonRpcErrorCode.NotFound,
       when: '`format` was `"section"` and the named heading, block reference, or frontmatter field does not exist in the resolved note.',
       recovery:
-        'Call obsidian_get_note with format "document-map" to list available headings, blocks, and frontmatter fields. Nested headings need Parent::Child syntax.',
+        'Call obsidian_get_note with format "document-map" to list available headings, blocks, and frontmatter fields, then retry with one of those locators.',
     },
   ],
 

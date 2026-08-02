@@ -11,7 +11,7 @@ import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schema
 
 export const obsidianWriteNote = tool('obsidian_write_note', {
   description:
-    'Create or overwrite a note. With `section`, replaces just that heading/block/frontmatter section in place; nested headings need `Parent::Child` syntax — use `obsidian_get_note` with `format: "document-map"` to discover available targets. Whole-file writes fail with `file_exists` against an existing note unless `overwrite: true` — for in-place edits, prefer `obsidian_patch_note` (sections), `obsidian_append_to_note` (append), or `obsidian_replace_in_note` (find-and-replace). For heading sections, `content` is the new body; the heading line is preserved automatically.',
+    'Create or overwrite a note. With `section`, replaces just that heading/block/frontmatter section in place — use `obsidian_get_note` with `format: "document-map"` to discover available targets. A nested heading may be named either by its full `Parent::Child` path or by a bare leaf name that matches exactly one heading; a leaf shared by several headings is rejected with `ambiguous_section`. Whole-file writes fail with `file_exists` against an existing note unless `overwrite: true` — for in-place edits, prefer `obsidian_patch_note` (sections), `obsidian_append_to_note` (append), or `obsidian_replace_in_note` (find-and-replace). For heading sections, `content` is the new body; the heading line is preserved automatically.',
   annotations: { idempotentHint: true, destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -36,6 +36,12 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
     sectionTargeted: z
       .boolean()
       .describe('True when only a section was replaced; false for full-file writes.'),
+    sectionTarget: z
+      .string()
+      .optional()
+      .describe(
+        'Section locator the replacement was applied to. Present when `section` was supplied. For headings this is the resolved locator — a bare leaf name is reported back as its full `Parent::Child` path.',
+      ),
     created: z
       .boolean()
       .describe(
@@ -100,6 +106,13 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       when: '`section` was provided but the named heading/block/frontmatter field does not exist in the note.',
       recovery: 'Call obsidian_get_note with format document-map to discover available targets.',
     },
+    {
+      reason: 'ambiguous_section',
+      code: JsonRpcErrorCode.Conflict,
+      when: 'A bare heading leaf name matches more than one heading in the note, so the replacement target is undetermined.',
+      recovery:
+        'Retry with one of the full Parent::Child heading paths listed in `candidates` on the error data.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -119,7 +132,7 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
         input.section.type === 'heading'
           ? stripLeadingHeading(input.content, input.section.target)
           : input.content;
-      await svc.patchNote(ctx, pathTarget, body, {
+      const sectionTarget = await svc.patchNote(ctx, pathTarget, body, {
         operation: 'replace',
         targetType: input.section.type,
         target: input.section.target,
@@ -131,6 +144,7 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       return {
         path,
         sectionTargeted: true,
+        sectionTarget,
         created: false,
         previousSizeInBytes,
         currentSizeInBytes,
@@ -164,7 +178,7 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       text: [
         `**${result.created ? 'Created' : 'Wrote'} ${result.path}**`,
         `*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`,
-        `*Section targeted:* ${result.sectionTargeted}`,
+        `*Section targeted:* ${result.sectionTargeted}${result.sectionTarget ? ` → ${result.sectionTarget}` : ''}`,
         `*Created:* ${result.created}`,
       ].join('\n'),
     },

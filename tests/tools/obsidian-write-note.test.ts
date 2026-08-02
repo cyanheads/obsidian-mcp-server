@@ -140,6 +140,7 @@ describe('obsidian_write_note (section)', () => {
     expect(out).toEqual({
       path: 'Note.md',
       sectionTargeted: true,
+      sectionTarget: 'Top::Sub',
       created: false,
       previousSizeInBytes: 300,
       currentSizeInBytes: 312,

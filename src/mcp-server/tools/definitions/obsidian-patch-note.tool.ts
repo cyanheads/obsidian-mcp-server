@@ -17,7 +17,7 @@ import {
 
 export const obsidianPatchNote = tool('obsidian_patch_note', {
   description:
-    'Edit a heading, block reference, or frontmatter field in place — append to, prepend to, or replace the target\'s body. Use `obsidian_get_note` with `format: "document-map"` to discover available targets first; nested headings need `Parent::Child` syntax.',
+    'Edit a heading, block reference, or frontmatter field in place — append to, prepend to, or replace the target\'s body. Use `obsidian_get_note` with `format: "document-map"` to discover available targets first. A nested heading may be named either by its full `Parent::Child` path or by a bare leaf name that matches exactly one heading; a leaf shared by several headings is rejected with `ambiguous_section`.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -37,7 +37,9 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
   }),
   output: z.object({
     path: z.string().describe('Resolved vault-relative path of the note.'),
-    section: SectionSchema.describe('Echoed section locator.'),
+    section: SectionSchema.describe(
+      'Section locator the patch was applied to. For headings this is the resolved locator — a bare leaf name is reported back as its full `Parent::Child` path.',
+    ),
     operation: z
       .enum(['append', 'prepend', 'replace'])
       .describe('Echoed operation that was applied.'),
@@ -92,6 +94,13 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
         'Call obsidian_get_note with format document-map to discover the available targets.',
     },
     {
+      reason: 'ambiguous_section',
+      code: JsonRpcErrorCode.Conflict,
+      when: 'A bare heading leaf name matches more than one heading in the note, so the write target is undetermined.',
+      recovery:
+        'Retry with one of the full Parent::Child heading paths listed in `candidates` on the error data.',
+    },
+    {
       reason: 'content_preexists',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied content already appears at the target — the patch was rejected to keep retries idempotent (the default).',
@@ -111,7 +120,7 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
     const pathTarget = { type: 'path' as const, path };
 
     const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
-    await svc.patchNote(ctx, pathTarget, input.content, {
+    const resolvedTarget = await svc.patchNote(ctx, pathTarget, input.content, {
       operation: input.operation,
       targetType: input.section.type,
       target: input.section.target,
@@ -125,7 +134,7 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
 
     return {
       path,
-      section: input.section,
+      section: { ...input.section, target: resolvedTarget },
       operation: input.operation,
       previousSizeInBytes,
       currentSizeInBytes,

@@ -7,6 +7,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import {
+  conflict,
   forbidden,
   notFound,
   serviceUnavailable,
@@ -98,6 +99,27 @@ const OMNISEARCH_DEFAULT_PORT = '51361';
 const NOTE_JSON_ACCEPT = 'application/vnd.olrapi.note+json';
 const DOCUMENT_MAP_ACCEPT = 'application/vnd.olrapi.document-map+json';
 const JSONLOGIC_CT = 'application/vnd.olrapi.jsonlogic+json';
+
+/**
+ * The markdown-patch wire format this client speaks, pinned explicitly on every
+ * request whose shape depends on it: header-driven PATCH targeting and the
+ * document map.
+ *
+ * Local REST API v5.0.0 made format 2.0 the default, rejects header-driven
+ * PATCH targeting outright unless a version is pinned, and returns the document
+ * map's `headings` as a nested tree instead of `::`-joined paths. Plugin v4.x
+ * predates the header and only ever reads named headers it knows, so the pin is
+ * inert there — one unconditional value covers the whole supported plugin
+ * range, and no future default flip can move the format underneath this client.
+ *
+ * Format 1.x carries `Deprecation: true; sunset-version="6.0"` upstream; the
+ * migration to 2.0 is tracked in #102.
+ */
+const MARKDOWN_PATCH_VERSION_HEADER = 'Markdown-Patch-Version';
+const MARKDOWN_PATCH_VERSION = '1';
+
+/** Delimiter joining ancestor headings into a single PATCH heading target. */
+const HEADING_DELIMITER = '::';
 
 /**
  * Methods safe to retry on transient errors. POST/PATCH are excluded — a
@@ -282,19 +304,28 @@ export class ObsidianService {
     });
   }
 
+  /**
+   * Apply a header-targeted PATCH. Returns the section locator the edit was
+   * actually applied to — identical to `headers.target` unless a bare heading
+   * leaf was expanded to its full `Parent::Child` path (see
+   * `#resolveHeadingTarget`), which callers echo back so an agent can see where
+   * the write landed.
+   */
   async patchNote(
     ctx: Context,
     target: NoteTarget,
     content: string,
     headers: PatchHeaders,
-  ): Promise<void> {
+  ): Promise<string> {
     const safe = await this.#gateAsWrite(ctx, target);
+    const resolvedTarget = await this.#resolveHeadingTarget(ctx, safe, headers);
     const url = this.#targetToPath(safe);
     await this.#request(ctx, url, {
       method: 'PATCH',
-      headers: this.#buildPatchHeaders(headers),
+      headers: this.#buildPatchHeaders({ ...headers, target: resolvedTarget }),
       body: content,
     });
+    return resolvedTarget;
   }
 
   async deleteNote(ctx: Context, target: NoteTarget): Promise<void> {
@@ -535,9 +566,57 @@ export class ObsidianService {
     const url = this.#targetToPath(target);
     const res = await this.#request(ctx, url, {
       method: 'GET',
-      headers: { Accept: DOCUMENT_MAP_ACCEPT },
+      headers: {
+        Accept: DOCUMENT_MAP_ACCEPT,
+        [MARKDOWN_PATCH_VERSION_HEADER]: MARKDOWN_PATCH_VERSION,
+      },
     });
     return (await res.json()) as DocumentMap;
+  }
+
+  /**
+   * Resolve a heading PATCH target against the note's document map so a bare
+   * leaf name reaches the same section on writes that it already reaches on
+   * reads. `extractSection` matches a heading at any depth, so an agent that
+   * read `## Sibling` by its bare name carries that name to a write, where
+   * upstream targeting wants the whole `Parent::Child` chain.
+   *
+   * Resolution order: an exact map entry wins (preserving upstream's own
+   * interpretation), then a unique leaf match is expanded, then several leaf
+   * matches are rejected as ambiguous rather than silently writing to the first.
+   * A leaf absent from the map passes through untouched so
+   * `Create-Target-If-Missing` still creates it and the upstream's own
+   * target-miss error still surfaces. Non-heading targets and locators that
+   * already carry the delimiter skip the lookup entirely.
+   */
+  async #resolveHeadingTarget(
+    ctx: Context,
+    target: NoteTarget,
+    headers: PatchHeaders,
+  ): Promise<string> {
+    if (headers.targetType !== 'heading' || headers.target.includes(HEADING_DELIMITER)) {
+      return headers.target;
+    }
+    const map = await this.#rawGetDocumentMap(ctx, target);
+    if (map.headings.includes(headers.target)) return headers.target;
+
+    const matches = map.headings.filter((h) => h.split(HEADING_DELIMITER).pop() === headers.target);
+    const [first] = matches;
+    if (first === undefined) return headers.target;
+    if (matches.length === 1) return first;
+
+    const display = displayPath(this.#targetToPath(target));
+    throw conflict(
+      `Heading '${headers.target}' is ambiguous in ${display} — ${matches.length} headings share that name: ${matches.join(', ')}.`,
+      {
+        path: display,
+        reason: 'ambiguous_section',
+        candidates: matches,
+        recovery: {
+          hint: `Re-issue the call with one of the full heading paths in \`candidates\` as \`section.target\` (e.g. "${first}"). obsidian_get_note with format "document-map" lists every heading path in this note.`,
+        },
+      },
+    );
   }
 
   #targetToPath(target: NoteTarget): string {
@@ -562,6 +641,7 @@ export class ObsidianService {
 
   #buildPatchHeaders(p: PatchHeaders): Record<string, string> {
     const headers: Record<string, string> = {
+      [MARKDOWN_PATCH_VERSION_HEADER]: MARKDOWN_PATCH_VERSION,
       Operation: p.operation,
       'Target-Type': p.targetType,
       Target: encodeURIComponent(p.target),
@@ -703,7 +783,7 @@ export class ObsidianService {
         const isTargetMiss = /\bcould not be applied\b|\binvalid-target\b/i.test(upstreamMsg);
         if (isTargetMiss) {
           throw validationError(
-            `Section target not found in ${display}. Use \`obsidian_get_note\` with \`format: "document-map"\` to list available headings, blocks, and frontmatter fields. Nested headings need \`Parent::Child\` syntax.`,
+            `Section target not found in ${display}. Use \`obsidian_get_note\` with \`format: "document-map"\` to list available headings, blocks, and frontmatter fields, then retry with one of those locators.`,
             data('section_target_missing'),
           );
         }

@@ -14,7 +14,7 @@ import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schema
 
 export const obsidianAppendToNote = tool('obsidian_append_to_note', {
   description:
-    'Append content to a note. **Without `section`: appends to the end of the file, or creates the file if it does not exist (your content becomes the full file).** With `section`: appends to the end of that heading/block/frontmatter; nested headings need `Parent::Child` syntax — use `obsidian_get_note` with `format: "document-map"` to discover available targets. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
+    'Append content to a note. **Without `section`: appends to the end of the file, or creates the file if it does not exist (your content becomes the full file).** With `section`: appends to the end of that heading/block/frontmatter — use `obsidian_get_note` with `format: "document-map"` to discover available targets. A nested heading may be named either by its full `Parent::Child` path or by a bare leaf name that matches exactly one heading; a leaf shared by several headings is rejected with `ambiguous_section`. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -36,6 +36,12 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
       .boolean()
       .describe(
         'True when the append went to a heading/block/frontmatter section (PATCH); false for whole-file appends (POST).',
+      ),
+    sectionTarget: z
+      .string()
+      .optional()
+      .describe(
+        'Section locator the append was applied to. Present when `section` was supplied. For headings this is the resolved locator — a bare leaf name is reported back as its full `Parent::Child` path.',
       ),
     created: z
       .boolean()
@@ -95,6 +101,13 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
         'Call obsidian_get_note with format document-map to discover available targets, or pass createTargetIfMissing: true to bring it into existence.',
     },
     {
+      reason: 'ambiguous_section',
+      code: JsonRpcErrorCode.Conflict,
+      when: 'A bare heading leaf name matches more than one heading in the note, so the append target is undetermined.',
+      recovery:
+        'Retry with one of the full Parent::Child heading paths listed in `candidates` on the error data.',
+    },
+    {
       reason: 'content_preexists',
       code: JsonRpcErrorCode.ValidationError,
       when: 'Section append where the supplied content already appears at the target — rejected to keep retries idempotent (the default for the section path).',
@@ -116,7 +129,7 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
 
     if (input.section) {
       const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
-      await svc.patchNote(ctx, pathTarget, input.content, {
+      const sectionTarget = await svc.patchNote(ctx, pathTarget, input.content, {
         operation: 'append',
         targetType: input.section.type,
         target: input.section.target,
@@ -128,6 +141,7 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
       return {
         path,
         sectionTargeted: true,
+        sectionTarget,
         created: false,
         previousSizeInBytes,
         currentSizeInBytes,
@@ -156,7 +170,9 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
     }
     lines.push(`*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`);
     lines.push(`*Created:* ${result.created}`);
-    lines.push(`*Section targeted:* ${result.sectionTargeted}`);
+    lines.push(
+      `*Section targeted:* ${result.sectionTargeted}${result.sectionTarget ? ` → ${result.sectionTarget}` : ''}`,
+    );
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
