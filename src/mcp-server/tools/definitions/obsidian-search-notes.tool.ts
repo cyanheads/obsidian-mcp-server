@@ -135,7 +135,9 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       .int()
       .positive()
       .default(100)
-      .describe('Characters of context on each side of the match (text mode only).'),
+      .describe(
+        'Characters of context on each side of the match (text mode only). Sizes the rendered text as well as the structured payload, so a wide window multiplies the response across every match on the page.',
+      ),
     pathPrefix: z
       .string()
       .optional()
@@ -380,7 +382,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
             : '';
           lines.push(`### ${h.filename}${trunc}`);
           for (const m of h.matches) {
-            lines.push(`- match[${m.match.start}–${m.match.end}]: ${truncate(m.context, 240)}`);
+            lines.push(`- match[${m.match.start}–${m.match.end}]: ${m.context}`);
           }
         }
       } else if (result.mode === 'omnisearch') {
@@ -455,11 +457,6 @@ function clipMatches<T extends { matches: unknown[] }>(
     truncated: true,
     totalMatches: hit.matches.length,
   };
-}
-
-function truncate(s: string, n: number): string {
-  if (s.length <= n) return s;
-  return `${s.slice(0, n)}…`;
 }
 
 function safeJsonStringify(v: unknown): string {

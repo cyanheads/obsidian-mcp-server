@@ -17,7 +17,7 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { makeTestConfig, setupHarness } from '../helpers.js';
+import { makeTestConfig, type ReplyFn, setupHarness, TEST_BASE_URL } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -587,6 +587,58 @@ describe('obsidian_search_notes / format()', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('50-hit cap');
     expect(text).toContain('Narrow');
+  });
+});
+
+describe('obsidian_search_notes / contextLength drives the rendered text', () => {
+  /**
+   * Echoes a context window sized the way the Local REST API sizes one —
+   * `contextLength` characters each side of the match — so the rendered text
+   * can be checked against the window the caller actually asked for.
+   */
+  const echoContextWindow: ReplyFn = (opts) => {
+    const requested = Number(
+      new URL(opts.path, TEST_BASE_URL).searchParams.get('contextLength') ?? '0',
+    );
+    const side = 'x'.repeat(requested);
+    return {
+      statusCode: 200,
+      data: [
+        {
+          filename: 'long.md',
+          matches: [
+            { context: `${side}TERM${side}`, match: { start: requested, end: requested + 4 } },
+          ],
+        },
+      ],
+      responseOptions: { headers: { 'content-type': 'application/json' } },
+    };
+  };
+
+  it.each([
+    { label: 'the default window', contextLength: undefined },
+    { label: 'a 400-character window', contextLength: 400 },
+    { label: 'an 800-character window', contextLength: 800 },
+  ])('renders $label in full, matching structuredContent', async ({ contextLength }) => {
+    harness
+      .current()
+      .pool.intercept({
+        path: (p) => (p as string).startsWith('/search/simple/'),
+        method: 'POST',
+      })
+      .reply(echoContextWindow);
+
+    const input = obsidianSearchNotes.input.parse({ mode: 'text', query: 'TERM', contextLength });
+    const out = await obsidianSearchNotes.handler(input, createMockContext());
+    if (out.result.mode !== 'text') throw new Error('expected text branch');
+
+    const structured = out.result.hits[0]?.matches[0]?.context ?? '';
+    // The upstream honored the caller's window; the rendered text must too.
+    expect(structured).toHaveLength(input.contextLength * 2 + 'TERM'.length);
+
+    const text = (obsidianSearchNotes.format!(out)[0] as { text: string }).text;
+    expect(text).toContain(structured);
+    expect(text).not.toContain('…');
   });
 });
 
