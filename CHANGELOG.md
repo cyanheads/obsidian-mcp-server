@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.2.12](changelog/3.2.x/3.2.12.md) — 2026-08-02
+
+Frontmatter rewrites keep the note body byte-for-byte, and obsidian_search_notes renders match context in full instead of clipping content[] to 240 characters
+
 ## [3.2.11](changelog/3.2.x/3.2.11.md) — 2026-08-02 · 🛡️ Security
 
 obsidian_open_in_ui can no longer create a file under OBSIDIAN_READ_ONLY or outside OBSIDIAN_WRITE_PATHS, and a path naming a folder is rejected as path_is_directory instead of being read back as note content or recursively deleted
