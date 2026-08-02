@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.2.11](changelog/3.2.x/3.2.11.md) — 2026-08-02 · 🛡️ Security
+
+obsidian_open_in_ui can no longer create a file under OBSIDIAN_READ_ONLY or outside OBSIDIAN_WRITE_PATHS, and a path naming a folder is rejected as path_is_directory instead of being read back as note content or recursively deleted
+
 ## [3.2.10](changelog/3.2.x/3.2.10.md) — 2026-08-02 · 🛡️ Security
 
 Markdown-Patch-Version: 1 pinned on every PATCH and document-map fetch, restoring section-targeted writes against Local REST API v5.x (#94); bare heading leaves resolve to a unique full path or reject as ambiguous_section (#75); bunfig.toml gains a 3-day release-age guard and Socket scanner; mcp-ts-core ^0.11.1

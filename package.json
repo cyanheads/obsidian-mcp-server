@@ -1,6 +1,6 @@
 {
   "name": "obsidian-mcp-server",
-  "version": "3.2.10",
+  "version": "3.2.11",
   "mcpName": "io.github.cyanheads/obsidian-mcp-server",
   "description": "Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP. STDIO or Streamable HTTP.",
   "type": "module",
