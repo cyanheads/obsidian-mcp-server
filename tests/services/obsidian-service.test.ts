@@ -9,8 +9,19 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { encodeVaultPath, type ObsidianService } from '@/services/obsidian/obsidian-service.js';
-import { type PathMatcher, type ReplyFn, setupHarness, type TestHarness } from '../helpers.js';
+import {
+  buildObsidianAgentOptions,
+  encodeVaultPath,
+  OBSIDIAN_AGENT_KEEP_ALIVE_TIMEOUT_MS,
+  type ObsidianService,
+} from '@/services/obsidian/obsidian-service.js';
+import {
+  makeTestConfig,
+  type PathMatcher,
+  type ReplyFn,
+  setupHarness,
+  type TestHarness,
+} from '../helpers.js';
 
 const harness = setupHarness();
 let pool: TestHarness['pool'];
@@ -21,6 +32,17 @@ beforeEach(() => {
   pool = harness.current().pool;
   service = harness.current().service;
   ctx = createMockContext();
+});
+
+describe('ObsidianService agent options', () => {
+  it('sets explicit keep-alive timeouts below the upstream server timeout', () => {
+    const options = buildObsidianAgentOptions(makeTestConfig({ requestTimeoutMs: 30_000 }));
+
+    expect(options?.keepAliveTimeout).toBe(OBSIDIAN_AGENT_KEEP_ALIVE_TIMEOUT_MS);
+    expect(options?.keepAliveMaxTimeout).toBe(OBSIDIAN_AGENT_KEEP_ALIVE_TIMEOUT_MS);
+    expect(options?.headersTimeout).toBe(30_000);
+    expect(options?.bodyTimeout).toBe(30_000);
+  });
 });
 
 describe('ObsidianService.getStatus', () => {
