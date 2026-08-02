@@ -13,12 +13,20 @@ import {
 } from '@/services/obsidian/frontmatter-ops.js';
 
 const FM_BLOCK_RE = /^---\n([\s\S]*?)\n---\n?/;
+/** Mirrors `FM_RE` in the module under test — consumes the block and its fence terminator, nothing more. */
+const FM_SPLICE_RE = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/;
 
 function readFrontmatter(content: string): Record<string, unknown> {
   const m = FM_BLOCK_RE.exec(content);
   if (!m) return {};
   const parsed = yamlLoad(m[1] ?? '');
   return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+}
+
+/** Everything after the frontmatter block — the bytes a frontmatter edit must leave alone. */
+function bodyOf(content: string): string {
+  const m = FM_SPLICE_RE.exec(content);
+  return m ? content.slice(m[0].length) : content;
 }
 
 describe('deleteFrontmatterKey', () => {
@@ -173,6 +181,64 @@ describe('frontmatter round-trip fidelity (surgical edits)', () => {
     expect(out).toContain('date: 2026-06-29');
     expect(out).not.toContain('2026-06-29T00:00:00');
     expect(out).toContain('"My Note"');
+  });
+});
+
+describe('body byte-fidelity across a frontmatter rewrite', () => {
+  it('keeps the blank line separating the block from the body', () => {
+    const input = '---\ntitle: a\nkeep: b\n---\n\nBody line one.\n';
+    const out = deleteFrontmatterKey(input, 'title');
+    expect(out).toBe('---\nkeep: b\n---\n\nBody line one.\n');
+    expect(bodyOf(out)).toBe(bodyOf(input));
+  });
+
+  it('does not invent a separator when the body starts on the line after the fence', () => {
+    const input = '---\ntitle: a\nkeep: b\n---\nBody line one.\n';
+    const out = deleteFrontmatterKey(input, 'title');
+    expect(out).toBe('---\nkeep: b\n---\nBody line one.\n');
+    expect(bodyOf(out)).toBe(bodyOf(input));
+  });
+
+  it('preserves every blank line when the body is separated by several', () => {
+    const input = '---\ntitle: a\nkeep: b\n---\n\n\n\nBody line one.\n';
+    const out = deleteFrontmatterKey(input, 'title');
+    expect(bodyOf(out)).toBe('\n\n\nBody line one.\n');
+    expect(bodyOf(out)).toBe(bodyOf(input));
+  });
+
+  it('preserves a CRLF body verbatim', () => {
+    const input = '---\r\ntitle: a\r\nkeep: b\r\n---\r\n\r\nBody line one.\r\n';
+    const out = deleteFrontmatterKey(input, 'title');
+    expect(bodyOf(out)).toBe('\r\nBody line one.\r\n');
+    expect(bodyOf(out)).toBe(bodyOf(input));
+  });
+
+  it('leaves an empty body empty', () => {
+    const input = '---\ntitle: a\nkeep: b\n---\n';
+    const out = deleteFrontmatterKey(input, 'title');
+    expect(out).toBe('---\nkeep: b\n---\n');
+    expect(bodyOf(out)).toBe('');
+  });
+
+  it('keeps the separator when a tag is added at the frontmatter location', () => {
+    const input = '---\ntags:\n  - a\n---\n\nBody line one.\n';
+    const r = reconcileTags(input, ['b'], 'add', 'frontmatter');
+    expect(readFrontmatter(r.content).tags).toEqual(['a', 'b']);
+    expect(bodyOf(r.content)).toBe(bodyOf(input));
+  });
+
+  it('keeps the separator when a tag is removed at the frontmatter location', () => {
+    const input = '---\ntags:\n  - a\n  - b\n---\n\nBody line one.\n';
+    const r = reconcileTags(input, ['b'], 'remove', 'frontmatter');
+    expect(readFrontmatter(r.content).tags).toEqual(['a']);
+    expect(bodyOf(r.content)).toBe(bodyOf(input));
+  });
+
+  it('preserves a leading blank line when frontmatter is created on a note that had none', () => {
+    const input = '\n# Heading\n\nBody line one.\n';
+    const r = reconcileTags(input, ['x'], 'add', 'frontmatter');
+    expect(readFrontmatter(r.content).tags).toEqual(['x']);
+    expect(bodyOf(r.content)).toBe(input);
   });
 });
 

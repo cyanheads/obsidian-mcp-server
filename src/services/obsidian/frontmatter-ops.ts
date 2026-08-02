@@ -34,6 +34,11 @@ function splice(content: string): Splice {
  * comments and rewrites untouched scalars, e.g. `date: 2026-06-29` → an ISO
  * timestamp). When no keys remain, the whole block is dropped and the body's
  * leading whitespace trimmed.
+ *
+ * The body is re-attached verbatim. `FM_RE` consumes the newline that closes
+ * the fence line and nothing more, so the template's trailing `\n` replaces
+ * exactly what was eaten — the blank separator line before the body (or its
+ * absence, or several of them) survives the rewrite byte for byte.
  */
 function serializeFrontmatter(doc: Document, body: string): string {
   const node = doc.contents;
@@ -41,7 +46,7 @@ function serializeFrontmatter(doc: Document, body: string): string {
     return body.replace(/^\s+/, '');
   }
   const yamlText = doc.toString({ lineWidth: 0 }).trimEnd();
-  return `---\n${yamlText}\n---\n${body.startsWith('\n') ? body.slice(1) : body}`;
+  return `---\n${yamlText}\n---\n${body}`;
 }
 
 /**
