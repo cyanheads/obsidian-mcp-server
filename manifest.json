@@ -29,6 +29,7 @@
         "OBSIDIAN_ENABLE_COMMANDS": "${OBSIDIAN_ENABLE_COMMANDS}",
         "OBSIDIAN_READ_PATHS": "${OBSIDIAN_READ_PATHS}",
         "OBSIDIAN_WRITE_PATHS": "${OBSIDIAN_WRITE_PATHS}",
+        "OBSIDIAN_DENY_PATHS": "${OBSIDIAN_DENY_PATHS}",
         "OBSIDIAN_READ_ONLY": "${OBSIDIAN_READ_ONLY}",
         "OBSIDIAN_OMNISEARCH_URL": "${OBSIDIAN_OMNISEARCH_URL}",
         "MCP_LOG_LEVEL": "${MCP_LOG_LEVEL}"
@@ -90,6 +91,12 @@
       "type": "string",
       "required": false,
       "default": ""
+    },
+    "OBSIDIAN_DENY_PATHS": {
+      "title": "Path Denylist",
+      "description": "Comma-separated vault-relative folder denylist for reads and writes. Applied after allowlists, so denied subfolders override allowed parents. Example: 'projects/private/'.",
+      "type": "string",
+      "required": false
     },
     "OBSIDIAN_READ_ONLY": {
       "title": "Read-Only Mode",

@@ -148,7 +148,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
     {
       reason: 'path_forbidden',
       code: JsonRpcErrorCode.Forbidden,
-      when: 'The supplied `path` is outside OBSIDIAN_READ_PATHS (root listings always pass; specific subdirectories must be readable).',
+      when: 'The supplied `path` is outside OBSIDIAN_READ_PATHS or inside OBSIDIAN_DENY_PATHS (root listings always pass; specific subdirectories must be readable and not denied).',
       recovery:
         'List a directory inside the configured read scope, or omit `path` to list from the vault root. The error data echoes the active scope.',
     },

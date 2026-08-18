@@ -37,6 +37,7 @@ mcp-ts-core ^0.9.21 → ^0.10.5 (strict env-boolean parsing, server identity fie
 ## [3.2.4](changelog/3.2.x/3.2.4.md) — 2026-06-02
 
 mcp-ts-core ^0.9.16 → ^0.9.21 (per-request log context, retryable auto-population, query-string redaction, devcheck gates); plugin marketplace support (.claude-plugin, .codex-plugin); MCP config key renamed to obsidian-mcp-server
+`OBSIDIAN_DENY_PATHS` adds denylist path policy support for reads, writes, and search filtering.
 
 ## [3.2.3](changelog/3.2.x/3.2.3.md) — 2026-05-29
 

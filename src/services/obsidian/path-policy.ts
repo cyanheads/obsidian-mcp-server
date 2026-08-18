@@ -1,8 +1,9 @@
 /**
  * @fileoverview Path-policy enforcement for the Obsidian Local REST API service.
- * Single chokepoint for OBSIDIAN_READ_PATHS / OBSIDIAN_WRITE_PATHS / OBSIDIAN_READ_ONLY —
- * tools and resources call into the service, the service consults this policy
- * before every upstream HTTP call. See issue #40 for the spec.
+ * Single chokepoint for OBSIDIAN_READ_PATHS / OBSIDIAN_WRITE_PATHS /
+ * OBSIDIAN_DENY_PATHS / OBSIDIAN_READ_ONLY — tools and resources call into
+ * the service, the service consults this policy before every upstream HTTP
+ * call. See issue #40 for the spec.
  *
  * The policy carries the active scope so error data echoes back which paths
  * are allowed; the LLM (or operator) can self-correct without poking at logs.
@@ -16,6 +17,7 @@ import type { ServerConfig } from '@/config/server-config.js';
 export type PathOp = 'read' | 'write';
 
 export type PathForbiddenSubreason =
+  | 'denied_path'
   | 'outside_read_paths'
   | 'outside_write_paths'
   | 'read_only_mode';
@@ -39,26 +41,35 @@ export interface PathForbiddenData {
 export class PathPolicy {
   readonly #readPaths: readonly string[] | undefined;
   readonly #writePaths: readonly string[] | undefined;
+  readonly #denyPaths: readonly string[] | undefined;
   readonly #readOnly: boolean;
 
   constructor(config: ServerConfig) {
     this.#readPaths = config.readPaths;
     this.#writePaths = config.writePaths;
+    this.#denyPaths = config.denyPaths;
     this.#readOnly = config.readOnly;
   }
 
   /** True when no path policy is active — every op falls through to the upstream. */
   get isUnrestricted(): boolean {
-    return !this.#readOnly && this.#readPaths === undefined && this.#writePaths === undefined;
+    return (
+      !this.#readOnly &&
+      this.#readPaths === undefined &&
+      this.#writePaths === undefined &&
+      this.#denyPaths === undefined
+    );
   }
 
   /** Snapshot for startup-banner logging. */
   describe(): {
+    denyPaths: readonly string[] | 'none';
     readPaths: readonly string[] | 'full vault';
     writePaths: readonly string[] | 'full vault' | 'denied (read-only)';
     readOnly: boolean;
   } {
     return {
+      denyPaths: this.#denyPaths ?? 'none',
       readPaths: this.#readPaths ?? 'full vault',
       writePaths: this.#readOnly ? 'denied (read-only)' : (this.#writePaths ?? 'full vault'),
       readOnly: this.#readOnly,
@@ -72,50 +83,52 @@ export class PathPolicy {
 
   isReadable(path: string): boolean {
     const candidate = normalize(path);
-    if (this.#readPaths === undefined) return true;
-    if (matchesAny(candidate, this.#readPaths)) return true;
-    /** Write paths are implicitly readable — you can't sanely edit what you can't see. */
-    if (
-      !this.#readOnly &&
-      this.#writePaths !== undefined &&
-      matchesAny(candidate, this.#writePaths)
-    ) {
-      return true;
-    }
-    return false;
+    if (this.#isDenied(candidate)) return false;
+    const allowed = this.#isReadAllowed(candidate);
+    return allowed;
   }
 
   isWritable(path: string): boolean {
-    if (this.#readOnly) return false;
     const candidate = normalize(path);
-    if (this.#writePaths === undefined) return true;
-    return matchesAny(candidate, this.#writePaths);
+    if (this.#isDenied(candidate)) return false;
+    if (this.#readOnly) return false;
+    const allowed = this.#isWriteAllowed(candidate);
+    return allowed;
   }
 
   /** Throws `path_forbidden` if the path is not readable. */
   assertReadable(path: string): void {
-    if (this.isReadable(path)) return;
-    throw this.#deny(path, 'read', 'outside_read_paths');
+    const candidate = normalize(path);
+    if (this.#isDenied(candidate)) {
+      throw this.#deny(path, 'read', 'denied_path');
+    }
+    if (!this.#isReadAllowed(candidate)) {
+      throw this.#deny(path, 'read', 'outside_read_paths');
+    }
   }
 
   /** Throws `path_forbidden` if the path is not writable (write tools also implicitly need read access). */
   assertWritable(path: string): void {
+    const candidate = normalize(path);
+    if (this.#isDenied(candidate)) {
+      throw this.#deny(path, 'write', 'denied_path');
+    }
     if (this.#readOnly) {
       throw this.#deny(path, 'write', 'read_only_mode');
     }
-    if (this.isWritable(path)) return;
-    throw this.#deny(path, 'write', 'outside_write_paths');
+    if (!this.#isWriteAllowed(candidate)) {
+      throw this.#deny(path, 'write', 'outside_write_paths');
+    }
   }
 
   /** Drop reads outside scope. Used by `obsidian_search_notes` to silently filter. */
   filterReadable<T extends { filename: string }>(hits: readonly T[]): T[] {
-    /** Reads unrestricted when readPaths is unset — `isReadable` short-circuits to true. */
-    if (this.#readPaths === undefined) return [...hits];
+    if (this.isUnrestricted) return [...hits];
     return hits.filter((h) => this.isReadable(h.filename));
   }
 
   #deny(path: string, op: PathOp, subreason: PathForbiddenSubreason): Error {
-    const activeScope = this.#scopeFor(op);
+    const activeScope = this.#scopeFor(op, subreason);
     const { message, recovery } = renderDenial(path, op, subreason, activeScope);
     const data: PathForbiddenData = {
       reason: 'path_forbidden',
@@ -128,7 +141,8 @@ export class PathPolicy {
     return forbidden(message, { ...data });
   }
 
-  #scopeFor(op: PathOp): string[] {
+  #scopeFor(op: PathOp, subreason: PathForbiddenSubreason): string[] {
+    if (subreason === 'denied_path') return [...(this.#denyPaths ?? [])];
     if (op === 'write') {
       if (this.#readOnly) return [];
       return [...(this.#writePaths ?? [])];
@@ -137,6 +151,23 @@ export class PathPolicy {
     if (this.#readPaths) for (const p of this.#readPaths) set.add(p);
     if (!this.#readOnly && this.#writePaths) for (const p of this.#writePaths) set.add(p);
     return [...set];
+  }
+
+  #isReadAllowed(candidate: string): boolean {
+    if (this.#readPaths === undefined) return true;
+    if (matchesAny(candidate, this.#readPaths)) return true;
+    /** Write paths are implicitly readable — you can't sanely edit what you can't see. */
+    return (
+      !this.#readOnly && this.#writePaths !== undefined && matchesAny(candidate, this.#writePaths)
+    );
+  }
+
+  #isWriteAllowed(candidate: string): boolean {
+    return this.#writePaths === undefined || matchesAny(candidate, this.#writePaths);
+  }
+
+  #isDenied(candidate: string): boolean {
+    return this.#denyPaths !== undefined && matchesAny(candidate, this.#denyPaths);
   }
 }
 
@@ -177,6 +208,16 @@ function renderDenial(
     return {
       message: `Path '${path}' is not writable: server is in read-only mode (OBSIDIAN_READ_ONLY=true).`,
       recovery: 'Unset OBSIDIAN_READ_ONLY (or set it to false) to enable writes.',
+    };
+  }
+  if (subreason === 'denied_path') {
+    const scopeRender =
+      activeScope.length > 0
+        ? activeScope.map((p) => `'${p}'`).join(', ')
+        : 'full vault except denied prefixes';
+    return {
+      message: `Path '${path}' is not ${op === 'write' ? 'writable' : 'readable'}: matched OBSIDIAN_DENY_PATHS.`,
+      recovery: `Denied prefixes: [${scopeRender}]. Use a path outside the denylist, or update OBSIDIAN_DENY_PATHS to remove this path.`,
     };
   }
   const envVar =

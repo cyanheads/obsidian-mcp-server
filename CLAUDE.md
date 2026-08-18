@@ -38,7 +38,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **All Obsidian access goes through `getObsidianService()`.** No direct `fetch()` calls to the Local REST API in tools/resources — the service centralizes auth, TLS, timeouts, and `ctx.signal` propagation.
 - **Secrets in env vars only.** `OBSIDIAN_API_KEY` is required; never hardcoded.
 - **Command-palette tools are opt-in.** `obsidian_list_commands` and `obsidian_execute_command` are callable only when `OBSIDIAN_ENABLE_COMMANDS=true` — Obsidian commands are opaque and can be destructive. When the flag is unset, the entry point wraps both with `disabledTool()` so they're absent from `tools/list` (LLM can't invoke) but visible in the operator-facing manifest with a hint to enable them.
-- **Path-policy gating goes through `PathPolicy`.** Every path-taking method on `ObsidianService` calls `policy.assertReadable` / `assertWritable` before the upstream HTTP call; `obsidian_search_notes` post-filters hits via `svc.policy.filterReadable`. Don't bypass this — `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_READ_ONLY` are the single chokepoint, and `path_forbidden` is declared on every path-taking tool's `errors[]` contract.
+- **Path-policy gating goes through `PathPolicy`.** Every path-taking method on `ObsidianService` calls `policy.assertReadable` / `assertWritable` before the upstream HTTP call; `obsidian_search_notes` post-filters hits via `svc.policy.filterReadable`. Don't bypass this — `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_DENY_PATHS` / `OBSIDIAN_READ_ONLY` are the single chokepoint, and `path_forbidden` is declared on every path-taking tool's `errors[]` contract. Denylist hits use `denied_path` and echo the denylist in `data.activeScope`. Folder listings are navigational: allowed listings can reveal denied/out-of-scope directories as immediate children, but those directories are marked truncated and not walked; direct listing, reads, and writes inside them still throw.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
 ---
@@ -146,6 +146,7 @@ const ServerConfigSchema = z.object({
   /** Path-policy allowlists — comma-separated, prefix-based, case-insensitive. Unset = full vault. */
   readPaths: envPathList,
   writePaths: envPathList,
+  denyPaths: envPathList,
   readOnly: envBoolean.default(false),
 });
 
@@ -159,6 +160,7 @@ export function getServerConfig() {
     enableCommands: 'OBSIDIAN_ENABLE_COMMANDS',
     readPaths: 'OBSIDIAN_READ_PATHS',
     writePaths: 'OBSIDIAN_WRITE_PATHS',
+    denyPaths: 'OBSIDIAN_DENY_PATHS',
     readOnly: 'OBSIDIAN_READ_ONLY',
   });
   return _config;

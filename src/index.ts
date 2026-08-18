@@ -52,11 +52,11 @@ function buildInstructions(): string {
       'Read-only mode is active (OBSIDIAN_READ_ONLY=true): every write tool rejects every path with `path_forbidden` / `read_only_mode`. `obsidian_open_in_ui` still opens notes that exist, but rejects an open against a missing path — Obsidian would create the file.',
     );
   } else if (!policy.isUnrestricted) {
-    const { readPaths, writePaths } = policy.describe();
+    const { denyPaths, readPaths, writePaths } = policy.describe();
     const render = (scope: readonly string[] | string): string =>
       typeof scope === 'string' ? scope : scope.map((p) => `'${p}'`).join(', ');
     sections.push(
-      `Vault path policy is enforced. Readable: ${render(readPaths)}. Writable: ${render(writePaths)}. Paths outside scope reject with \`path_forbidden\` — error data carries the active scope so you can self-correct.`,
+      `Vault path policy is enforced. Readable: ${render(readPaths)}. Writable: ${render(writePaths)}. Denied: ${render(denyPaths)}. Paths outside scope or inside the denylist reject with \`path_forbidden\` — error data carries the active scope so you can self-correct.`,
     );
   }
   if (config.enableCommands && !config.readOnly) {

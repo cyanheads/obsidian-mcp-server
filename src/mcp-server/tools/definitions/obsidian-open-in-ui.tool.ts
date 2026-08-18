@@ -46,7 +46,7 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
     {
       reason: 'path_forbidden',
       code: JsonRpcErrorCode.Forbidden,
-      when: 'The path is outside OBSIDIAN_READ_PATHS, or — when the file does not exist and `failIfMissing: false` would have Obsidian create it — outside OBSIDIAN_WRITE_PATHS or blocked by OBSIDIAN_READ_ONLY=true.',
+      when: 'The target path is outside OBSIDIAN_READ_PATHS, inside OBSIDIAN_DENY_PATHS, or — when the file does not exist and `failIfMissing: false` would have Obsidian create it — outside OBSIDIAN_WRITE_PATHS or blocked by OBSIDIAN_READ_ONLY=true.',
       recovery:
         'Open a path inside the configured scope. The error data echoes the active scope and whether read or write access was the one denied.',
     },

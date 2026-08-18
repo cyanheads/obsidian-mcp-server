@@ -148,22 +148,27 @@ Dispatch an Obsidian command-palette command by ID (discoverable via `obsidian_l
 
 ## Path policy (folder-scoped permissions)
 
-Three optional env vars gate which vault paths each tool can target. **Default unset = full vault** for both reads and writes — backwards compatible.
+Four optional env vars gate which vault paths each tool can target. **Default unset = full vault** for both reads and writes, with no denylist — backwards compatible.
 
 | Goal | Config |
 |:---|:---|
 | Default (current behavior) | all unset |
 | Read everywhere, write only in `projects/` and `scratch/` | `OBSIDIAN_WRITE_PATHS=projects/,scratch/` |
 | Read only `public/`, write only `public/inbox/` | `OBSIDIAN_READ_PATHS=public/`, `OBSIDIAN_WRITE_PATHS=public/inbox/` |
+| Read `public/` except `public/private/` | `OBSIDIAN_READ_PATHS=public/`, `OBSIDIAN_DENY_PATHS=public/private/` |
 | Read-only deployment — no writes anywhere | `OBSIDIAN_READ_ONLY=true` |
 
 **Matching is prefix-based with implicit recursion**, case-insensitive, with trailing slashes normalized. `projects/` matches `projects/a.md`, `projects/sub/b.md`, etc.
 
 **Write paths are implicitly readable** — you can't sanely edit what you can't see. So a read passes when the target matches `READ_PATHS` *or* `WRITE_PATHS`.
 
+**Deny paths win over allow paths** — a path matching `OBSIDIAN_DENY_PATHS` is denied even when it also matches `OBSIDIAN_READ_PATHS` or `OBSIDIAN_WRITE_PATHS`. This lets you allow a folder while denying a subfolder inside it; `path_forbidden` errors for denylist hits echo the denylist in `data.activeScope`.
+
+**Folder listings are navigational, not a secrecy boundary for names.** Root listings always pass, and `obsidian_list_notes` may show denied or otherwise out-of-scope directories as immediate children of a directory that was allowed to list. Those directories are marked `truncated` and not walked, so deeper descendants are not listed; direct listing, reading, or writing inside them still throws `path_forbidden`.
+
 **`OBSIDIAN_READ_ONLY=true` short-circuits before the path checks** — every write tool and the command-palette pair are wrapped with `disabledTool()` at startup (absent from `tools/list`), and any write that still reaches the service is denied at runtime regardless of `WRITE_PATHS`.
 
-Denies are typed `path_forbidden` (JSON-RPC code `Forbidden`) with the active scope echoed back in `data.recovery.hint` and `data.activeScope`, so the LLM can self-correct without inspecting server logs. Search results from `obsidian_search_notes` are filtered against `READ_PATHS` silently — surfacing a "we hid N hits" indicator would defeat the gate.
+Denies are typed `path_forbidden` (JSON-RPC code `Forbidden`) with the active scope echoed back in `data.recovery.hint` and `data.activeScope`, so the LLM can self-correct without inspecting server logs. Search results from `obsidian_search_notes` are filtered against `READ_PATHS` / `OBSIDIAN_DENY_PATHS` silently — surfacing a "we hid N hits" indicator would defeat the gate.
 
 **Tag listing is vault-wide.** `obsidian_list_tags` and the `obsidian://tags` resource aggregate tag names across the whole vault and are *not* narrowed by `OBSIDIAN_READ_PATHS` — they take no path to gate, so tag names (never note contents) from outside the read scope can surface.
 
@@ -201,7 +206,7 @@ Obsidian-specific:
 - Tag reconciliation across both representations: frontmatter `tags:` array and inline `#tag` syntax (skipping fenced code blocks)
 - Search across up to three modes: text, JSONLogic, and (when the plugin is reachable) BM25-ranked Omnisearch — cursor-paginated per the MCP 2025-11-25 spec, with per-file match clipping in text mode
 - Optional human-in-the-loop confirmation for destructive deletes via `ctx.elicit`
-- Folder-scoped read/write permissions via `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` and a global `OBSIDIAN_READ_ONLY` kill switch — denies are typed `path_forbidden` with the active scope echoed back in the error data
+- Folder-scoped read/write permissions via `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_DENY_PATHS` and a global `OBSIDIAN_READ_ONLY` kill switch — denies are typed `path_forbidden` with the active scope echoed back in the error data
 - Opt-in command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`) — registered only when `OBSIDIAN_ENABLE_COMMANDS=true`
 - Forgiving path resolution on `obsidian_get_note` and `obsidian_open_in_ui` — silently retries case-mismatched paths against the canonical filename, throws `Conflict` on ambiguous case matches, and enriches `NotFound` with `Did you mean: …?` suggestions when only near-matches exist. `obsidian_delete_note` is deliberately excluded — a destructive op shouldn't silently rewrite the target path.
 
@@ -297,6 +302,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | `OBSIDIAN_ENABLE_COMMANDS` | Opt-in flag for the command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`). Off by default — Obsidian commands are opaque and can be destructive. | `false` |
 | `OBSIDIAN_READ_PATHS` | Comma-separated vault-relative folder allowlist for read operations. Prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault. Write paths are implicitly readable. | unset |
 | `OBSIDIAN_WRITE_PATHS` | Comma-separated vault-relative folder allowlist for write operations. Same syntax as `OBSIDIAN_READ_PATHS`. Unset = full vault. | unset |
+| `OBSIDIAN_DENY_PATHS` | Comma-separated vault-relative folder denylist for read and write operations. Same syntax as `OBSIDIAN_READ_PATHS`; applied after allowlists so denied subfolders override allowed parents. | unset |
 | `OBSIDIAN_READ_ONLY` | Global kill switch. When `true`, denies every write regardless of `OBSIDIAN_WRITE_PATHS`, and suppresses the `OBSIDIAN_ENABLE_COMMANDS` pair (commands can mutate). | `false` |
 | `OBSIDIAN_OMNISEARCH_URL` | Override URL for the [Omnisearch](https://github.com/scambier/obsidian-omnisearch) plugin's HTTP server. When unset, derives from `OBSIDIAN_BASE_URL` host with port `51361` (falling back to `http://localhost:51361`). Probed once at startup — if reachable, the `omnisearch` mode is added to `obsidian_search_notes`; otherwise it's omitted from the tool schema. Restart the server to re-probe. | derived |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
@@ -306,7 +312,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | `MCP_PUBLIC_URL` | Public origin override for TLS-terminating reverse-proxy deployments (landing page, Server Card, RFC 9728 metadata). | unset |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_AUTH_SECRET_KEY` | **Required when `MCP_AUTH_MODE=jwt`.** ≥32-char shared secret used to verify incoming JWTs. | — |
-| `MCP_AUTH_DISABLE_SCOPE_CHECKS` | When `true`, bypasses per-tool scope enforcement after the auth-context presence check. Token signature, audience, issuer, and expiry validation remain intact. Use only when a custom claim can't be injected and combine with `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_READ_ONLY` for access control. A `WARNING` is logged at startup whenever the bypass is active. | `false` |
+| `MCP_AUTH_DISABLE_SCOPE_CHECKS` | When `true`, bypasses per-tool scope enforcement after the auth-context presence check. Token signature, audience, issuer, and expiry validation remain intact. Use only when a custom claim can't be injected and combine with `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_DENY_PATHS` / `OBSIDIAN_READ_ONLY` for access control. A `WARNING` is logged at startup whenever the bypass is active. | `false` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry) (spans, metrics, completion logs). | `false` |

@@ -84,6 +84,17 @@ describe('write tools — assertWritable before upstream', () => {
     expect(caughtSubreason).toBe('read_only_mode');
     expect(upstreamHits).toBe(0);
   });
+
+  it('blocks writeNote on a denied path without making an HTTP call', async () => {
+    const svc = buildService({ denyPaths: ['private'] });
+    await expect(
+      svc.writeNote(ctx, { type: 'path', path: 'private/foo.md' }, 'x'),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+      data: { reason: 'path_forbidden', subreason: 'denied_path' },
+    });
+    expect(upstreamHits).toBe(0);
+  });
 });
 
 describe('read tools — assertReadable before upstream', () => {
@@ -106,6 +117,17 @@ describe('read tools — assertReadable before upstream', () => {
     expect(upstreamHits).toBe(0);
   });
 
+  it('blocks getNoteContent on a denied path without making an HTTP call', async () => {
+    const svc = buildService({ denyPaths: ['private'] });
+    await expect(
+      svc.getNoteContent(ctx, { type: 'path', path: 'private/foo.md' }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+      data: { reason: 'path_forbidden', subreason: 'denied_path' },
+    });
+    expect(upstreamHits).toBe(0);
+  });
+
   it('listFiles allows the vault root regardless of readPaths', async () => {
     const replies = new Map<string, () => Response>([
       [
@@ -122,6 +144,24 @@ describe('read tools — assertReadable before upstream', () => {
     expect(out.files).toContain('projects/');
     /** Children aren't filtered at the service level — caller-side reads are gated separately. */
     expect(out.files).toContain('secret/');
+  });
+
+  it('listFiles allows the vault root and surfaces denied children', async () => {
+    const replies = new Map<string, () => Response>([
+      [
+        '/vault/',
+        () =>
+          new Response(JSON.stringify({ files: ['projects/', 'secret/', 'note.md'] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      ],
+    ]);
+    const svc = buildService({ denyPaths: ['secret'] }, replies);
+    const out = await svc.listFiles(ctx);
+    expect(out.files).toContain('projects/');
+    expect(out.files).toContain('secret/');
+    expect(upstreamHits).toBe(1);
   });
 
   it('listFiles blocks a non-root dir outside readPaths', async () => {
