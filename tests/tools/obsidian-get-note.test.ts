@@ -22,7 +22,10 @@ describe('obsidian_get_note / format: content', () => {
       format: 'content',
       target: { type: 'path', path: 'Note.md' },
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     expect(out.result).toEqual({
       format: 'content',
       path: 'Note.md',
@@ -50,7 +53,10 @@ describe('obsidian_get_note / format: content', () => {
       format: 'content',
       target: { type: 'active' },
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'content') throw new Error('expected content branch');
     expect(out.result.path).toBe('today.md');
     expect(out.result.content).toBe('daily body');
@@ -138,7 +144,10 @@ describe('obsidian_get_note / format: full', () => {
       format: 'full',
       target: { type: 'path', path: 'Note.md' },
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'full') throw new Error('expected full branch');
     expect(out.result.frontmatter).toEqual({ title: 'T' });
     expect(out.result.tags).toEqual(['t1']);
@@ -165,7 +174,10 @@ describe('obsidian_get_note / format: document-map', () => {
       format: 'document-map',
       target: { type: 'path', path: 'Note.md' },
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'document-map') throw new Error('expected document-map branch');
     expect(out.result.headings).toEqual(['Top', 'Sub']);
     expect(out.result.blocks).toEqual(['abc']);
@@ -196,7 +208,10 @@ describe('obsidian_get_note / format: section', () => {
       target: { type: 'path', path: 'Note.md' },
       section: { type: 'heading', target: 'Top::Sub' },
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'section') throw new Error('expected section branch');
     expect(out.result.valueText).toBe(['## Sub', 'sub body'].join('\n'));
     expect(out.result.valueJson).toBeUndefined();
@@ -223,7 +238,10 @@ describe('obsidian_get_note / format: section', () => {
       target: { type: 'path', path: 'Note.md' },
       section: { type: 'frontmatter', target: 'priority' },
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'section') throw new Error('expected section branch');
     expect(out.result.valueJson).toBe(7);
     expect(out.result.valueText).toBeUndefined();
@@ -263,7 +281,10 @@ describe('obsidian_get_note / case-insensitive fallback', () => {
       format: 'content',
       target: { type: 'path', path: 'Notes/MyNote.md' },
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'content') throw new Error('expected content branch');
     expect(out.result.path).toBe('Notes/mynote.md');
     expect(out.result.content).toBe('# canonical body');
@@ -285,7 +306,9 @@ describe('obsidian_get_note / not-found suggestions', () => {
       format: 'content',
       target: { type: 'path', path: 'Notes/Missing.md' },
     });
-    await expect(obsidianGetNote.handler(input, createMockContext())).rejects.toMatchObject({
+    await expect(
+      obsidianGetNote.handler(input, createMockContext({ errors: obsidianGetNote.errors })),
+    ).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       message: expect.stringContaining('Did you mean: "Notes/Missing"?'),
       data: { suggestions: ['Notes/Missing'] },
@@ -317,7 +340,10 @@ describe('obsidian_get_note / includeLinks', () => {
       format: 'full',
       target: { type: 'path', path: 'Note.md' },
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'full') throw new Error('expected full branch');
     expect(out.result.outgoingLinks).toBeUndefined();
   });
@@ -339,7 +365,10 @@ describe('obsidian_get_note / includeLinks', () => {
       target: { type: 'path', path: 'Note.md' },
       includeLinks: true,
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'full') throw new Error('expected full branch');
     expect(out.result.outgoingLinks).toEqual([
       { target: 'Project Plan', type: 'wikilink' },
@@ -366,7 +395,10 @@ describe('obsidian_get_note / includeLinks', () => {
       target: { type: 'path', path: 'Note.md' },
       includeLinks: true,
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'full') throw new Error('expected full branch');
     expect(out.result.outgoingLinks).toEqual([
       { target: 'Notes/plain.md', type: 'markdown' },
@@ -389,7 +421,10 @@ describe('obsidian_get_note / includeLinks', () => {
       target: { type: 'path', path: 'Note.md' },
       includeLinks: true,
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'full') throw new Error('expected full branch');
     expect(out.result.outgoingLinks).toEqual([
       { target: 'Notes/with spaces.md', type: 'markdown' },
@@ -405,7 +440,10 @@ describe('obsidian_get_note / includeLinks', () => {
       target: { type: 'path', path: 'Note.md' },
       includeLinks: true,
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'full') throw new Error('expected full branch');
     expect(out.result.outgoingLinks).toEqual([]);
   });
@@ -421,7 +459,10 @@ describe('obsidian_get_note / includeLinks', () => {
       target: { type: 'path', path: 'Note.md' },
       includeLinks: true,
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     expect(out.result).toEqual({
       format: 'content',
       path: 'Note.md',
@@ -448,7 +489,10 @@ describe('obsidian_get_note / includeLinks', () => {
       target: { type: 'path', path: 'Note.md' },
       includeLinks: true,
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'full') throw new Error('expected full branch');
     expect(out.result.outgoingLinks).toEqual([
       { target: 'Real-Wiki', type: 'wikilink' },
@@ -466,7 +510,10 @@ describe('obsidian_get_note / includeLinks', () => {
       target: { type: 'path', path: 'Note.md' },
       includeLinks: true,
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'full') throw new Error('expected full branch');
     expect(out.result.outgoingLinks).toEqual([
       { target: 'Real', type: 'wikilink' },
@@ -486,7 +533,10 @@ describe('obsidian_get_note / includeLinks', () => {
       target: { type: 'path', path: 'Note.md' },
       includeLinks: true,
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'full') throw new Error('expected full branch');
     expect(out.result.outgoingLinks).toEqual([
       { target: 'Real', type: 'wikilink' },
@@ -503,7 +553,10 @@ describe('obsidian_get_note / includeLinks', () => {
       target: { type: 'path', path: 'Note.md' },
       includeLinks: true,
     });
-    const out = await obsidianGetNote.handler(input, createMockContext());
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
     if (out.result.format !== 'full') throw new Error('expected full branch');
     expect(out.result.outgoingLinks).toEqual([{ target: 'Real', type: 'wikilink' }]);
   });

@@ -29,7 +29,7 @@ describe('obsidian_list_tags', () => {
 
     const out = await obsidianListTags.handler(
       obsidianListTags.input.parse({}),
-      createMockContext(),
+      createMockContext({ errors: obsidianListTags.errors }),
     );
     expect(out.tags).toEqual([
       { name: 'work', count: 5 },
@@ -44,7 +44,7 @@ describe('obsidian_list_tags', () => {
       .pool.intercept({ path: '/tags/', method: 'GET' })
       .reply(200, { tags: [] }, { headers: { 'content-type': 'application/json' } });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: obsidianListTags.errors });
     const out = await obsidianListTags.handler(obsidianListTags.input.parse({}), ctx);
     expect(out.tags).toEqual([]);
     const enrichment = getEnrichment(ctx);
@@ -69,7 +69,7 @@ describe('obsidian_list_tags', () => {
 
     const out = await obsidianListTags.handler(
       obsidianListTags.input.parse({ nameRegex: '^work' }),
-      createMockContext(),
+      createMockContext({ errors: obsidianListTags.errors }),
     );
     expect(out.tags).toEqual([
       { name: 'work', count: 5 },
@@ -88,7 +88,7 @@ describe('obsidian_list_tags', () => {
         { headers: { 'content-type': 'application/json' } },
       );
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: obsidianListTags.errors });
     const out = await obsidianListTags.handler(
       obsidianListTags.input.parse({ nameRegex: '^nothing-matches$' }),
       ctx,

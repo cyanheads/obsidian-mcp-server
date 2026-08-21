@@ -6,8 +6,9 @@
  *
  * @module vitest.config
  */
-import { defineConfig, mergeConfig } from 'vitest/config';
+
 import coreConfig from '@cyanheads/mcp-ts-core/vitest.config';
+import { defineConfig, mergeConfig } from 'vitest/config';
 
 const alias = { '@/': new URL('./src/', import.meta.url).pathname };
 

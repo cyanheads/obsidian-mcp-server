@@ -1,18 +1,23 @@
 /**
- * @fileoverview obsidian_delete_note — permanently delete a note. Calls
- * `ctx.elicit` to confirm with the user when the client supports it; falls
- * back to the destructive-hint annotation otherwise.
+ * @fileoverview obsidian_delete_note — permanently delete a note. Suspends via
+ * `ctx.requestInput` to confirm with the user before the DELETE, and is
+ * re-entered with the answer on `ctx.inputs`.
  * @module mcp-server/tools/definitions/obsidian-delete-note.tool
  */
 
-import { tool, z } from '@cyanheads/mcp-ts-core';
+import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { TargetSchema } from './_shared/schemas.js';
 
+/** Answered by the client in the confirmation round; re-validated on re-entry. */
+const DeleteConfirmation = z.object({
+  confirm: z.boolean().describe('Set to true to delete the note. Any other value cancels.'),
+});
+
 export const obsidianDeleteNote = tool('obsidian_delete_note', {
   description:
-    'Permanently delete a note from the vault. Confirms with the user before deleting when the client supports interactive confirmation. Recovery requires the local trash in Obsidian — there is no API-level undo.',
+    'Permanently delete a note from the vault. Asks the user to confirm before deleting — the call is answered with a confirmation request and retried with the answer. Recovery requires the local trash in Obsidian — there is no API-level undo.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Which note to delete.'),
@@ -23,7 +28,7 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
     previousSizeInBytes: z
       .number()
       .describe(
-        'Byte size of the note immediately before deletion. The destructive blast radius — useful for confirming the agent destroyed what it expected.',
+        'Byte size of the note immediately before deletion. Confirms the size of what was removed.',
       ),
     currentSizeInBytes: z
       .number()
@@ -41,7 +46,7 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
     {
       reason: 'cancelled',
       code: JsonRpcErrorCode.InvalidRequest,
-      when: 'User declined the deletion via interactive elicitation.',
+      when: 'User declined, cancelled, or answered false to the confirmation request.',
       recovery: 'Re-run the tool when the user is ready to confirm deletion.',
     },
     {
@@ -94,25 +99,42 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
     const pathTarget = { type: 'path' as const, path };
 
     /**
-     * Probe size before showing the elicitation prompt so the user sees how
-     * much they're about to destroy. Throws `note_missing` if the file is
-     * already gone — preempts a confusing post-elicit DELETE 404.
+     * Probe size before asking for confirmation so the user sees how much
+     * they're about to destroy. Throws `note_missing` if the file is already
+     * gone — preempts a confusing post-confirmation DELETE 404. The probe runs
+     * again on re-entry, so the size is re-verified against the answer round.
      */
     const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
 
-    if (ctx.elicit) {
-      const confirmed = await ctx.elicit(
-        `Permanently delete '${path}' (${previousSizeInBytes} bytes)? This cannot be undone via the API; recovery would require Obsidian's local trash.`,
-        z.object({
-          confirm: z.boolean().describe('Set to true to delete the note. Any other value cancels.'),
-        }),
-      );
-      if (confirmed.action !== 'accept' || confirmed.content?.confirm !== true) {
-        throw ctx.fail('cancelled', 'Deletion cancelled by user.', {
-          path,
-          ...ctx.recoveryFor('cancelled'),
-        });
-      }
+    /**
+     * A declined or cancelled prompt is a dead end, not a round to retry —
+     * re-asking would burn the round budget until the client gives up.
+     */
+    const view = ctx.inputs.view('confirm');
+    if (view.kind === 'elicit' && view.action !== 'accept') {
+      throw ctx.fail('cancelled', `User sent '${view.action}' for the deletion confirmation.`, {
+        path,
+        ...ctx.recoveryFor('cancelled'),
+      });
+    }
+
+    const answer = ctx.inputs.accepted('confirm', DeleteConfirmation);
+    if (!answer) {
+      return ctx.requestInput({
+        inputRequests: {
+          confirm: inputRequired.elicit({
+            message: `Permanently delete '${path}' (${previousSizeInBytes} bytes)? This cannot be undone via the API; recovery would require Obsidian's local trash.`,
+            requestedSchema: DeleteConfirmation,
+          }),
+        },
+      });
+    }
+
+    if (!answer.confirm) {
+      throw ctx.fail('cancelled', 'Deletion cancelled by user.', {
+        path,
+        ...ctx.recoveryFor('cancelled'),
+      });
     }
 
     await svc.deleteNote(ctx, pathTarget);

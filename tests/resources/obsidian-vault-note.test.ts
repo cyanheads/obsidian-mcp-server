@@ -30,7 +30,10 @@ describe('obsidian://vault/{+path}', () => {
 
     const out = await obsidianVaultNote.handler(
       obsidianVaultNote.params!.parse({ path: 'Projects/A.md' }),
-      createMockContext({ uri: new URL('obsidian://vault/Projects/A.md') }),
+      createMockContext({
+        errors: obsidianVaultNote.errors,
+        uri: new URL('obsidian://vault/Projects/A.md'),
+      }),
     );
     expect(out.path).toBe('Projects/A.md');
     expect(out.frontmatter).toEqual({ title: 'A' });
@@ -46,7 +49,10 @@ describe('obsidian://vault/{+path}', () => {
     await expect(
       obsidianVaultNote.handler(
         obsidianVaultNote.params!.parse({ path: 'Missing.md' }),
-        createMockContext({ uri: new URL('obsidian://vault/Missing.md') }),
+        createMockContext({
+          errors: obsidianVaultNote.errors,
+          uri: new URL('obsidian://vault/Missing.md'),
+        }),
       ),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
   });

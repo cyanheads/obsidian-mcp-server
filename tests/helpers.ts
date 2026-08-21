@@ -12,6 +12,7 @@
  * @module tests/helpers
  */
 
+import { Headers, type HeadersInit, Response } from 'undici';
 import { afterEach, beforeEach } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import {
@@ -21,6 +22,21 @@ import {
 } from '@/services/obsidian/obsidian-service.js';
 
 export const TEST_BASE_URL = 'https://obsidian.test';
+
+/**
+ * Build a stub upstream response. `ObsidianService` is typed against undici's
+ * `fetch`, and undici's `Response` carries members (`textStream`) that the
+ * ambient global `Response` — sourced from `undici-types` via `@types/node` —
+ * does not, so a stub built with the global constructor does not satisfy
+ * `ObsidianFetch`. Constructing through undici's own class is what makes a
+ * hand-rolled fetch stub conform; every stub in the suite goes through here.
+ */
+export function mockResponse(...args: ConstructorParameters<typeof Response>): Response {
+  return new Response(...args);
+}
+
+/** The response type a stub fetch must produce — annotate scripted-reply tables with this. */
+export type MockResponse = ReturnType<typeof mockResponse>;
 
 export function makeTestConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   return {
@@ -122,7 +138,7 @@ export function setupHarness(): { current: () => TestHarness } {
       const opts: DispatchOpts = {
         path: u.pathname + u.search,
         method: (init.method ?? 'GET').toUpperCase(),
-        headers: normalizeHeaders(init.headers as HeadersInit | undefined),
+        headers: normalizeHeaders(init.headers),
         body: init.body == null ? undefined : String(init.body),
       };
       const ix = pool.consume(opts);
@@ -154,7 +170,10 @@ function normalizeHeaders(input: HeadersInit | undefined): Record<string, string
     return out;
   }
   if (Array.isArray(input)) return Object.fromEntries(input);
-  return { ...input };
+  /** A record entry set to `undefined` means "no such header" — drop it rather than record it. */
+  return Object.fromEntries(
+    Object.entries(input).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
 }
 
 function buildResponse(reply: ReplyFn | StaticReply, opts: DispatchOpts): Response {
@@ -182,7 +201,7 @@ function buildResponse(reply: ReplyFn | StaticReply, opts: DispatchOpts): Respon
   if (!finalHeaders.has('content-disposition') && servesAFile(opts, body)) {
     finalHeaders.set('content-disposition', `attachment; filename="${fileNameOf(opts.path)}"`);
   }
-  return new Response(text, { status, headers: finalHeaders });
+  return mockResponse(text, { status, headers: finalHeaders });
 }
 
 /**

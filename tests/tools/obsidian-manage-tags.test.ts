@@ -39,7 +39,7 @@ describe('obsidian_manage_tags / list', () => {
         target: { type: 'path', path: 'N.md' },
         operation: 'list',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianManageTags.errors }),
     );
 
     if (out.result.operation !== 'list') throw new Error('expected list branch');
@@ -83,7 +83,7 @@ describe('obsidian_manage_tags / add', () => {
         tags: ['fresh'],
         location: 'frontmatter',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianManageTags.errors }),
     );
 
     expect(putCalls).toBe(1);
@@ -128,7 +128,7 @@ describe('obsidian_manage_tags / add', () => {
         tags: ['existing'],
         location: 'frontmatter',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianManageTags.errors }),
     );
 
     expect(putCalls).toBe(0);

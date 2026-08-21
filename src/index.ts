@@ -115,10 +115,12 @@ const { services } = await createApp({
  */
 const bannerCtx = requestContextService.createRequestContext({
   operation: 'startup',
-  ...policy.describe(),
-  enableCommands: config.enableCommands && !config.readOnly,
-  omnisearchUrl: obsidian.omnisearchUrl,
-  omnisearchReachable,
+  additionalContext: {
+    ...policy.describe(),
+    enableCommands: config.enableCommands && !config.readOnly,
+    omnisearchUrl: obsidian.omnisearchUrl,
+    omnisearchReachable,
+  },
 });
 services.logger.info('Path policy', bannerCtx);
 services.logger.info(

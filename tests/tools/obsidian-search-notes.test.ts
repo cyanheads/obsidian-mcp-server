@@ -17,7 +17,13 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { makeTestConfig, type ReplyFn, setupHarness, TEST_BASE_URL } from '../helpers.js';
+import {
+  makeTestConfig,
+  mockResponse,
+  type ReplyFn,
+  setupHarness,
+  TEST_BASE_URL,
+} from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -54,7 +60,7 @@ describe('obsidian_search_notes / text', () => {
         query: 'a',
         pathPrefix: 'Projects/',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianSearchNotes.errors }),
     );
     if (out.result.mode !== 'text') throw new Error('expected text branch');
     expect(out.result.hits).toHaveLength(1);
@@ -76,7 +82,7 @@ describe('obsidian_search_notes / text', () => {
         { headers: { 'content-type': 'application/json' } },
       );
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: obsidianSearchNotes.errors });
     await obsidianSearchNotes.handler(
       obsidianSearchNotes.input.parse({ mode: 'text', query: 'hello' }),
       ctx,
@@ -95,7 +101,7 @@ describe('obsidian_search_notes / text', () => {
       })
       .reply(200, [], { headers: { 'content-type': 'application/json' } });
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: obsidianSearchNotes.errors });
     await obsidianSearchNotes.handler(
       obsidianSearchNotes.input.parse({ mode: 'text', query: 'nothingmatches' }),
       ctx,
@@ -150,7 +156,7 @@ describe('obsidian_search_notes / text', () => {
 
     const out = await obsidianSearchNotes.handler(
       obsidianSearchNotes.input.parse({ mode: 'text', query: 'x' }),
-      createMockContext(),
+      createMockContext({ errors: obsidianSearchNotes.errors }),
     );
     if (out.result.mode !== 'text') throw new Error('expected text branch');
     const hit = out.result.hits[0];
@@ -176,7 +182,7 @@ describe('obsidian_search_notes / text', () => {
 
     const out = await obsidianSearchNotes.handler(
       obsidianSearchNotes.input.parse({ mode: 'text', query: 'x', maxMatchesPerHit: 3 }),
-      createMockContext(),
+      createMockContext({ errors: obsidianSearchNotes.errors }),
     );
     if (out.result.mode !== 'text') throw new Error('expected text branch');
     const hit = out.result.hits[0];
@@ -200,7 +206,7 @@ describe('obsidian_search_notes / text', () => {
 
     const out = await obsidianSearchNotes.handler(
       obsidianSearchNotes.input.parse({ mode: 'text', query: 'x' }),
-      createMockContext(),
+      createMockContext({ errors: obsidianSearchNotes.errors }),
     );
     if (out.result.mode !== 'text') throw new Error('expected text branch');
     const hit = out.result.hits[0];
@@ -234,7 +240,7 @@ describe('obsidian_search_notes / cursor pagination', () => {
 
     const first = await obsidianSearchNotes.handler(
       obsidianSearchNotes.input.parse({ mode: 'text', query: 'x' }),
-      createMockContext(),
+      createMockContext({ errors: obsidianSearchNotes.errors }),
     );
     if (first.result.mode !== 'text') throw new Error('expected text branch');
     expect(first.result.hits).toHaveLength(50); // DEFAULT_PAGE_SIZE
@@ -247,7 +253,7 @@ describe('obsidian_search_notes / cursor pagination', () => {
         query: 'x',
         cursor: first.result.nextCursor,
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianSearchNotes.errors }),
     );
     if (second.result.mode !== 'text') throw new Error('expected text branch');
     expect(second.result.hits).toHaveLength(50);
@@ -274,7 +280,7 @@ describe('obsidian_search_notes / cursor pagination', () => {
     await expect(
       obsidianSearchNotes.handler(
         obsidianSearchNotes.input.parse({ mode: 'text', query: 'x', cursor: 'not-a-cursor' }),
-        createMockContext(),
+        createMockContext({ errors: obsidianSearchNotes.errors }),
       ),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
   });
@@ -294,7 +300,7 @@ describe('obsidian_search_notes / jsonlogic', () => {
         mode: 'jsonlogic',
         logic: { '!!': [{ var: 'tags' }] },
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianSearchNotes.errors }),
     );
     if (out.result.mode !== 'jsonlogic') throw new Error('expected jsonlogic branch');
     expect(out.result.hits).toEqual([{ filename: 'A.md', result: true }]);
@@ -350,7 +356,7 @@ describe('obsidian_search_notes / omnisearch (mode-conditional)', () => {
 
     const out = await omnisearchTool.handler(
       omnisearchTool.input.parse({ mode: 'omnisearch', query: 'bob' }),
-      createMockContext(),
+      createMockContext({ errors: omnisearchTool.errors }),
     );
     if (out.result.mode !== 'omnisearch') throw new Error('expected omnisearch branch');
     expect(out.result.hits).toHaveLength(1);
@@ -383,7 +389,7 @@ describe('obsidian_search_notes / omnisearch (mode-conditional)', () => {
 
     const out = await omnisearchTool.handler(
       omnisearchTool.input.parse({ mode: 'omnisearch', query: 'x' }),
-      createMockContext(),
+      createMockContext({ errors: omnisearchTool.errors }),
     );
     if (out.result.mode !== 'omnisearch') throw new Error('expected omnisearch branch');
     expect(out.result.truncated).toBe(true);
@@ -419,7 +425,7 @@ describe('obsidian_search_notes / probeOmnisearch', () => {
   it('returns true when upstream returns 200 + application/json + JSON array', async () => {
     const fetchImpl: ObsidianFetch = async (url) => {
       if (url.includes(':51361/search')) {
-        return new Response('[]', {
+        return mockResponse('[]', {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
@@ -432,14 +438,14 @@ describe('obsidian_search_notes / probeOmnisearch', () => {
 
   it('returns false when upstream returns 200 but empty body (unrouted path)', async () => {
     const fetchImpl: ObsidianFetch = async () =>
-      new Response('', { status: 200, headers: { 'content-type': 'text/plain' } });
+      mockResponse('', { status: 200, headers: { 'content-type': 'text/plain' } });
     const svc = new ObsidianService(makeTestConfig(), fetchImpl);
     expect(await svc.probeOmnisearch()).toBe(false);
   });
 
   it('returns false when upstream returns 200 with JSON content-type but non-array body', async () => {
     const fetchImpl: ObsidianFetch = async () =>
-      new Response('{"error":"x"}', {
+      mockResponse('{"error":"x"}', {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });
@@ -458,7 +464,7 @@ describe('obsidian_search_notes / probeOmnisearch', () => {
   it('derives the omnisearch URL from baseUrl host with port 51361, mapping 127.0.0.1 → localhost', () => {
     const svc = new ObsidianService(
       makeTestConfig({ baseUrl: 'http://127.0.0.1:27123' }),
-      async () => new Response('[]'),
+      async () => mockResponse('[]'),
     );
     expect(svc.omnisearchUrl).toBe('http://localhost:51361');
   });
@@ -466,7 +472,7 @@ describe('obsidian_search_notes / probeOmnisearch', () => {
   it('honors OBSIDIAN_OMNISEARCH_URL override', () => {
     const svc = new ObsidianService(
       makeTestConfig({ omnisearchUrl: 'http://omni.example:9999/' }),
-      async () => new Response('[]'),
+      async () => mockResponse('[]'),
     );
     expect(svc.omnisearchUrl).toBe('http://omni.example:9999');
   });
@@ -629,7 +635,10 @@ describe('obsidian_search_notes / contextLength drives the rendered text', () =>
       .reply(echoContextWindow);
 
     const input = obsidianSearchNotes.input.parse({ mode: 'text', query: 'TERM', contextLength });
-    const out = await obsidianSearchNotes.handler(input, createMockContext());
+    const out = await obsidianSearchNotes.handler(
+      input,
+      createMockContext({ errors: obsidianSearchNotes.errors }),
+    );
     if (out.result.mode !== 'text') throw new Error('expected text branch');
 
     const structured = out.result.hits[0]?.matches[0]?.context ?? '';
@@ -651,7 +660,7 @@ describe('obsidian_search_notes — path-policy post-filter', () => {
     const fetchImpl: ObsidianFetch = async (url) => {
       const u = new URL(url);
       if (u.pathname.startsWith('/search/simple/')) {
-        return new Response(
+        return mockResponse(
           JSON.stringify([
             {
               filename: 'public/a.md',
@@ -679,7 +688,7 @@ describe('obsidian_search_notes — path-policy post-filter', () => {
 
     const out = await obsidianSearchNotes.handler(
       obsidianSearchNotes.input.parse({ mode: 'text', query: 'x' }),
-      createMockContext(),
+      createMockContext({ errors: obsidianSearchNotes.errors }),
     );
     if (out.result.mode !== 'text') throw new Error('expected text branch');
     expect(out.result.hits.map((h) => h.filename)).toEqual(['public/a.md', 'public/sub/c.md']);
@@ -688,7 +697,7 @@ describe('obsidian_search_notes — path-policy post-filter', () => {
 
   it('filters jsonlogic hits against readPaths', async () => {
     const fetchImpl: ObsidianFetch = async () =>
-      new Response(
+      mockResponse(
         JSON.stringify([
           { filename: 'public/a.md', result: 1 },
           { filename: 'secret/b.md', result: 2 },
@@ -700,7 +709,7 @@ describe('obsidian_search_notes — path-policy post-filter', () => {
 
     const out = await obsidianSearchNotes.handler(
       obsidianSearchNotes.input.parse({ mode: 'jsonlogic', logic: { var: 'path' } }),
-      createMockContext(),
+      createMockContext({ errors: obsidianSearchNotes.errors }),
     );
     if (out.result.mode !== 'jsonlogic') throw new Error('expected jsonlogic branch');
     expect(out.result.hits.map((h) => h.filename)).toEqual(['public/a.md']);
@@ -718,7 +727,7 @@ describe('obsidian_search_notes — path-policy post-filter', () => {
     }));
     const fetchImpl: ObsidianFetch = async (url) => {
       if (url.includes(':51361/search')) {
-        return new Response(JSON.stringify(fiftyRaw), {
+        return mockResponse(JSON.stringify(fiftyRaw), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
@@ -730,7 +739,7 @@ describe('obsidian_search_notes — path-policy post-filter', () => {
 
     const out = await omnisearchTool.handler(
       omnisearchTool.input.parse({ mode: 'omnisearch', query: 'x' }),
-      createMockContext(),
+      createMockContext({ errors: omnisearchTool.errors }),
     );
     if (out.result.mode !== 'omnisearch') throw new Error('expected omnisearch branch');
     expect(out.result.hits).toHaveLength(5);

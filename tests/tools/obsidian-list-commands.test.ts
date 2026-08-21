@@ -29,7 +29,7 @@ describe('obsidian_list_commands', () => {
 
     const out = await obsidianListCommands.handler(
       obsidianListCommands.input.parse({}),
-      createMockContext(),
+      createMockContext({ errors: obsidianListCommands.errors }),
     );
     expect(out.commands).toEqual([
       { id: 'editor:save-file', name: 'Save current file' },
@@ -62,7 +62,7 @@ describe('obsidian_list_commands', () => {
 
     const out = await obsidianListCommands.handler(
       obsidianListCommands.input.parse({ nameRegex: '^Templater' }),
-      createMockContext(),
+      createMockContext({ errors: obsidianListCommands.errors }),
     );
     expect(out.commands).toEqual([
       { id: 'templater-obsidian:new-template', name: 'Templater: Create new note from template' },
@@ -83,7 +83,7 @@ describe('obsidian_list_commands', () => {
 
     const out = await obsidianListCommands.handler(
       obsidianListCommands.input.parse({ nameRegex: '^nothing-matches$' }),
-      createMockContext(),
+      createMockContext({ errors: obsidianListCommands.errors }),
     );
     expect(out.commands).toEqual([]);
     expect(out.appliedFilters).toEqual({ nameRegex: '^nothing-matches$' });

@@ -50,7 +50,7 @@ describe('obsidian_replace_in_note', () => {
           { search: 'Hi world', replace: 'Hi earth' },
         ],
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
     );
 
     expect(getBody()).toBe(after);
@@ -82,7 +82,7 @@ describe('obsidian_replace_in_note', () => {
         target: { type: 'path', path: 'N.md' },
         replacements: [{ search: 'absent', replace: 'present' }],
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
     );
 
     expect(out.totalReplacements).toBe(0);
@@ -100,7 +100,7 @@ describe('obsidian_replace_in_note', () => {
         target: { type: 'path', path: 'N.md' },
         replacements: [{ search: 'foo', replace: 'bar', useRegex: true, caseSensitive: false }],
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
     );
 
     expect(out.totalReplacements).toBe(3);
@@ -117,7 +117,7 @@ describe('obsidian_replace_in_note', () => {
         target: { type: 'path', path: 'N.md' },
         replacements: [{ search: '(quick) (brown)', replace: '$2 $1', useRegex: true }],
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
     );
 
     expect(getBody()).toBe(after);
@@ -134,7 +134,7 @@ describe('obsidian_replace_in_note', () => {
         target: { type: 'path', path: 'N.md' },
         replacements: [{ search: 'cat', replace: 'dog', wholeWord: true }],
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
     );
 
     expect(getBody()).toBe(after);
@@ -151,7 +151,7 @@ describe('obsidian_replace_in_note', () => {
         target: { type: 'path', path: 'N.md' },
         replacements: [{ search: 'fo+', replace: 'X', useRegex: true, wholeWord: true }],
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
     );
 
     expect(getBody()).toBe(after);
@@ -168,7 +168,7 @@ describe('obsidian_replace_in_note', () => {
         target: { type: 'path', path: 'N.md' },
         replacements: [{ search: 'quick brown', replace: 'slow red', flexibleWhitespace: true }],
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
     );
 
     expect(getBody()).toBe(after);
@@ -185,7 +185,7 @@ describe('obsidian_replace_in_note', () => {
         target: { type: 'path', path: 'N.md' },
         replacements: [{ search: 'cat', replace: 'dog$1', wholeWord: true }],
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
     );
 
     expect(getBody()).toBe(after);

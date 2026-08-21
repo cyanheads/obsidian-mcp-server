@@ -8,7 +8,7 @@
  * @module tests/tools/path-error-contracts.test
  */
 
-import type { ToolDefinition } from '@cyanheads/mcp-ts-core';
+import type { AnyToolDefinition } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -26,7 +26,7 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { makeTestConfig } from '../helpers.js';
+import { makeTestConfig, mockResponse } from '../helpers.js';
 
 /** A folder path and a dot-segment path, substituted into each tool's own input shape. */
 const FOLDER = 'Inbox';
@@ -44,7 +44,7 @@ function installFolderUpstream(): string[] {
     const u = new URL(url);
     requests.push(`${(init.method ?? 'GET').toUpperCase()} ${u.pathname}`);
     const body = JSON.stringify({ files: ['a.md', 'b.md', 'nested/'] });
-    return new Response(init.method === 'HEAD' ? '' : body, {
+    return mockResponse(init.method === 'HEAD' ? '' : body, {
       status: 200,
       headers: {
         'content-type': 'application/json; charset=utf-8',
@@ -56,13 +56,11 @@ function installFolderUpstream(): string[] {
   return requests;
 }
 
-/** The matrix spans nine unrelated input/output shapes, so the row type stays open. */
-type AnyTool = ToolDefinition<never, never, never>;
-
 interface Cell {
   /** Minimal valid input addressing `path` — the shortest route to the path guard. */
   input: (path: string) => Record<string, unknown>;
-  tool: AnyTool;
+  /** Type-erased — the matrix spans nine unrelated input/output shapes. */
+  tool: AnyToolDefinition;
 }
 
 const byPath = (path: string) => ({ target: { type: 'path', path } });
@@ -94,7 +92,7 @@ const MATRIX: Cell[] = [
 ];
 
 /** The recovery sentence this tool's contract advertises for `reason`. */
-function declaredRecovery(tool: AnyTool, reason: string): string {
+function declaredRecovery(tool: AnyToolDefinition, reason: string): string {
   const entry = tool.errors?.find((e) => e.reason === reason);
   if (!entry) throw new Error(`${tool.name} declares no '${reason}' contract entry`);
   return entry.recovery;

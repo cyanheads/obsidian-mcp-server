@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { encodeVaultPath, ObsidianService } from '@/services/obsidian/obsidian-service.js';
 import {
   makeTestConfig,
+  mockResponse,
   type PathMatcher,
   type ReplyFn,
   setupHarness,
@@ -705,13 +706,11 @@ describe('ObsidianService directory guard on note reads', () => {
    * the response headers.
    */
   it('tryGetSize rejects a folder instead of reporting the listing byte count as a note size', async () => {
-    const svc = new ObsidianService(
-      makeTestConfig(),
-      async () =>
-        new Response('', {
-          status: 200,
-          headers: { ...listingHeaders, 'content-length': '226' },
-        }),
+    const svc = new ObsidianService(makeTestConfig(), async () =>
+      mockResponse('', {
+        status: 200,
+        headers: { ...listingHeaders, 'content-length': '226' },
+      }),
     );
 
     await expect(svc.tryGetSize(ctx, { type: 'path', path: 'Inbox' })).rejects.toMatchObject({
@@ -721,17 +720,15 @@ describe('ObsidianService directory guard on note reads', () => {
   });
 
   it('tryGetSize accepts a file HEAD carrying the filename header', async () => {
-    const svc = new ObsidianService(
-      makeTestConfig(),
-      async () =>
-        new Response('', {
-          status: 200,
-          headers: {
-            'content-type': 'application/json; charset=utf-8',
-            'content-disposition': 'attachment; filename="data.json"',
-            'content-length': '19',
-          },
-        }),
+    const svc = new ObsidianService(makeTestConfig(), async () =>
+      mockResponse('', {
+        status: 200,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'content-disposition': 'attachment; filename="data.json"',
+          'content-length': '19',
+        },
+      }),
     );
 
     expect(await svc.tryGetSize(ctx, { type: 'path', path: 'data.json' })).toBe(19);
@@ -783,19 +780,17 @@ describe('ObsidianService directory guard on note reads', () => {
    * express the upstream omitting it.
    */
   it('reads a note+json reply carrying no Content-Disposition as a note, not a folder', async () => {
-    const svc = new ObsidianService(
-      makeTestConfig(),
-      async () =>
-        new Response(
-          JSON.stringify({
-            path: 'a.md',
-            content: 'body',
-            frontmatter: {},
-            tags: [],
-            stat: { ctime: 1, mtime: 2, size: 4 },
-          }),
-          { status: 200, headers: { 'content-type': 'application/vnd.olrapi.note+json' } },
-        ),
+    const svc = new ObsidianService(makeTestConfig(), async () =>
+      mockResponse(
+        JSON.stringify({
+          path: 'a.md',
+          content: 'body',
+          frontmatter: {},
+          tags: [],
+          stat: { ctime: 1, mtime: 2, size: 4 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/vnd.olrapi.note+json' } },
+      ),
     );
 
     await expect(svc.getNoteJson(ctx, { type: 'path', path: 'a.md' })).resolves.toMatchObject({

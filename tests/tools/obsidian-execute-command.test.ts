@@ -28,7 +28,7 @@ describe('obsidian_execute_command', () => {
 
     const out = await obsidianExecuteCommand.handler(
       obsidianExecuteCommand.input.parse({ commandId: 'editor:save-file' }),
-      createMockContext(),
+      createMockContext({ errors: obsidianExecuteCommand.errors }),
     );
 
     expect(seenPath).toBe('/commands/editor%3Asave-file/');

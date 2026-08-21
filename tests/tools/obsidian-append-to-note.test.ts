@@ -34,7 +34,7 @@ describe('obsidian_append_to_note (whole file)', () => {
         target: { type: 'path', path: 'Note.md' },
         content: 'tail',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianAppendToNote.errors }),
     );
 
     expect(seenMethod).toBe('POST');
@@ -59,7 +59,7 @@ describe('obsidian_append_to_note (whole file)', () => {
         target: { type: 'path', path: 'Note.md' },
         content: 'B'.repeat(50),
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianAppendToNote.errors }),
     );
 
     expect(out).toEqual({
@@ -86,7 +86,7 @@ describe('obsidian_append_to_note (whole file)', () => {
         target: { type: 'path', path: 'Note.md' },
         content: 'BBBB',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianAppendToNote.errors }),
     );
 
     expect(out.previousSizeInBytes).toBe(4);
@@ -116,7 +116,7 @@ describe('obsidian_append_to_note (section)', () => {
         content: '- new task',
         createTargetIfMissing: true,
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianAppendToNote.errors }),
     );
 
     expect(seenHeaders.operation ?? seenHeaders.Operation).toBe('append');
@@ -161,7 +161,7 @@ describe('obsidian_append_to_note (section)', () => {
         section: { type: 'heading', target: 'Section A' },
         content: '- new task',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianAppendToNote.errors }),
     );
 
     expect(seenTarget).toBe('Sandbox::Section A');

@@ -16,10 +16,10 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { makeTestConfig } from '../helpers.js';
+import { type MockResponse, makeTestConfig, mockResponse } from '../helpers.js';
 
 let ctx: Context;
-let upstreamHits: number;
+let upstreamHits = 0;
 
 beforeEach(() => {
   ctx = createMockContext();
@@ -32,7 +32,7 @@ afterEach(() => {
 
 function buildService(
   config: Partial<ServerConfig>,
-  scriptedReplies?: Map<string, () => Response>,
+  scriptedReplies?: Map<string, () => MockResponse>,
 ) {
   const fetchImpl: ObsidianFetch = async (url) => {
     upstreamHits++;
@@ -57,8 +57,8 @@ describe('write tools — assertWritable before upstream', () => {
   });
 
   it('allows writeNote on a path inside writePaths', async () => {
-    const replies = new Map<string, () => Response>([
-      ['/vault/projects/foo.md', () => new Response('', { status: 200 })],
+    const replies = new Map<string, () => MockResponse>([
+      ['/vault/projects/foo.md', () => mockResponse('', { status: 200 })],
     ]);
     const svc = buildService({ writePaths: ['projects'] }, replies);
     await svc.writeNote(ctx, { type: 'path', path: 'projects/foo.md' }, 'x');
@@ -107,11 +107,11 @@ describe('read tools — assertReadable before upstream', () => {
   });
 
   it('listFiles allows the vault root regardless of readPaths', async () => {
-    const replies = new Map<string, () => Response>([
+    const replies = new Map<string, () => MockResponse>([
       [
         '/vault/',
         () =>
-          new Response(JSON.stringify({ files: ['projects/', 'secret/', 'note.md'] }), {
+          mockResponse(JSON.stringify({ files: ['projects/', 'secret/', 'note.md'] }), {
             status: 200,
             headers: { 'content-type': 'application/json' },
           }),
@@ -135,10 +135,10 @@ describe('read tools — assertReadable before upstream', () => {
 
 describe('write-implies-read for the same path', () => {
   it('getNoteContent passes when path is in writePaths only', async () => {
-    const replies = new Map<string, () => Response>([
+    const replies = new Map<string, () => MockResponse>([
       [
         '/vault/projects/foo.md',
-        () => new Response('hello', { status: 200, headers: { 'content-type': 'text/markdown' } }),
+        () => mockResponse('hello', { status: 200, headers: { 'content-type': 'text/markdown' } }),
       ],
     ]);
     const svc = buildService({ readPaths: ['public'], writePaths: ['projects'] }, replies);
@@ -149,11 +149,11 @@ describe('write-implies-read for the same path', () => {
 
 describe('non-path targets — gate after JSON resolution', () => {
   it('getNoteJson on `active` throws path_forbidden when resolved path is out of scope', async () => {
-    const replies = new Map<string, () => Response>([
+    const replies = new Map<string, () => MockResponse>([
       [
         '/active/',
         () =>
-          new Response(
+          mockResponse(
             JSON.stringify({
               path: 'secret/foo.md',
               content: 'hi',
@@ -175,8 +175,8 @@ describe('non-path targets — gate after JSON resolution', () => {
 
 describe('unrestricted policy — no extra calls or behavior changes', () => {
   it('writeNote on any path passes through with one upstream call', async () => {
-    const replies = new Map<string, () => Response>([
-      ['/vault/anywhere/foo.md', () => new Response('', { status: 200 })],
+    const replies = new Map<string, () => MockResponse>([
+      ['/vault/anywhere/foo.md', () => mockResponse('', { status: 200 })],
     ]);
     const svc = buildService({}, replies);
     await svc.writeNote(ctx, { type: 'path', path: 'anywhere/foo.md' }, 'x');
@@ -191,10 +191,10 @@ describe('Windows-style paths integrate end-to-end', () => {
    * and the encoder produces a forward-slash URL.
    */
   it('Windows separators match forward-slash prefix and reach forward-slash URL', async () => {
-    const replies = new Map<string, () => Response>([
+    const replies = new Map<string, () => MockResponse>([
       [
         '/vault/Public/sub/note.md',
-        () => new Response('hello', { status: 200, headers: { 'content-type': 'text/markdown' } }),
+        () => mockResponse('hello', { status: 200, headers: { 'content-type': 'text/markdown' } }),
       ],
     ]);
     const svc = buildService({ readPaths: ['public'] }, replies);
@@ -237,8 +237,8 @@ describe('Windows-style paths integrate end-to-end', () => {
   });
 
   it('Windows-style write path matches write prefix and reaches upstream', async () => {
-    const replies = new Map<string, () => Response>([
-      ['/vault/projects/note.md', () => new Response('', { status: 200 })],
+    const replies = new Map<string, () => MockResponse>([
+      ['/vault/projects/note.md', () => mockResponse('', { status: 200 })],
     ]);
     const svc = buildService({ writePaths: ['projects'] }, replies);
     await svc.writeNote(ctx, { type: 'path', path: 'projects\\note.md' }, 'x');

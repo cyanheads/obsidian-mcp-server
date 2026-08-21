@@ -5,7 +5,6 @@
  * @module tests/tools/obsidian-open-in-ui.test
  */
 
-import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -16,7 +15,7 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { makeTestConfig, setupHarness } from '../helpers.js';
+import { makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -37,20 +36,20 @@ const noteJson = (path: string) => ({
 function withPolicy(
   config: Partial<ServerConfig>,
   files: Record<string, unknown>,
-): { requests: string[]; ctx: Context } {
+): { requests: string[]; ctx: Parameters<typeof obsidianOpenInUi.handler>[1] } {
   const requests: string[] = [];
   const fetchImpl: ObsidianFetch = async (url, init) => {
     const u = new URL(url);
     requests.push(`${(init.method ?? 'GET').toUpperCase()} ${u.pathname}`);
-    if (u.pathname.startsWith('/open/')) return new Response('', { status: 200 });
+    if (u.pathname.startsWith('/open/')) return mockResponse('', { status: 200 });
     const body = files[u.pathname];
     if (body === undefined) {
-      return new Response(JSON.stringify({ message: 'Not Found' }), {
+      return mockResponse(JSON.stringify({ message: 'Not Found' }), {
         status: 404,
         headers: { 'content-type': 'application/json' },
       });
     }
-    return new Response(JSON.stringify(body), {
+    return mockResponse(JSON.stringify(body), {
       status: 200,
       headers: {
         'content-type': 'application/vnd.olrapi.note+json',
@@ -83,7 +82,7 @@ describe('obsidian_open_in_ui', () => {
 
     const out = await obsidianOpenInUi.handler(
       obsidianOpenInUi.input.parse({ path: 'N.md' }),
-      createMockContext(),
+      createMockContext({ errors: obsidianOpenInUi.errors }),
     );
     expect(opened).toBe(true);
     expect(out).toEqual({ path: 'N.md', opened: true, createdIfMissing: false });
@@ -156,7 +155,7 @@ describe('obsidian_open_in_ui', () => {
 
     const out = await obsidianOpenInUi.handler(
       obsidianOpenInUi.input.parse({ path: 'N.md', failIfMissing: false }),
-      createMockContext(),
+      createMockContext({ errors: obsidianOpenInUi.errors }),
     );
     expect(probed).toBe(true);
     expect(out).toEqual({ path: 'N.md', opened: true, createdIfMissing: false });
@@ -179,7 +178,7 @@ describe('obsidian_open_in_ui', () => {
 
     const out = await obsidianOpenInUi.handler(
       obsidianOpenInUi.input.parse({ path: 'N.md', failIfMissing: false }),
-      createMockContext(),
+      createMockContext({ errors: obsidianOpenInUi.errors }),
     );
     expect(opened).toBe(true);
     expect(out).toEqual({ path: 'N.md', opened: true, createdIfMissing: true });
@@ -208,7 +207,7 @@ describe('obsidian_open_in_ui', () => {
 
     const out = await obsidianOpenInUi.handler(
       obsidianOpenInUi.input.parse({ path: 'MyNote.md', failIfMissing: false }),
-      createMockContext(),
+      createMockContext({ errors: obsidianOpenInUi.errors }),
     );
     expect(openedPath).toContain('/open/mynote.md');
     expect(out).toEqual({ path: 'mynote.md', opened: true, createdIfMissing: false });
@@ -362,7 +361,7 @@ describe('obsidian_open_in_ui — path policy on the create-capable branch', () 
 
     const out = await obsidianOpenInUi.handler(
       obsidianOpenInUi.input.parse({ path: 'MyNote.md' }),
-      createMockContext(),
+      createMockContext({ errors: obsidianOpenInUi.errors }),
     );
     expect(openedPath).toContain('/open/mynote.md');
     expect(out).toEqual({ path: 'mynote.md', opened: true, createdIfMissing: false });
@@ -387,7 +386,7 @@ describe('obsidian_open_in_ui — path policy on the create-capable branch', () 
 
     await obsidianOpenInUi.handler(
       obsidianOpenInUi.input.parse({ path: 'N.md', newLeaf: true }),
-      createMockContext(),
+      createMockContext({ errors: obsidianOpenInUi.errors }),
     );
     expect(seenPath).toContain('newLeaf=true');
   });

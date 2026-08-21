@@ -34,7 +34,7 @@ describe('obsidian_manage_frontmatter / get', () => {
         target: { type: 'path', path: 'N.md' },
         key: 'priority',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianManageFrontmatter.errors }),
     );
 
     if (out.result.operation !== 'get') throw new Error('expected get branch');
@@ -54,7 +54,7 @@ describe('obsidian_manage_frontmatter / get', () => {
         target: { type: 'path', path: 'N.md' },
         key: 'priority',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianManageFrontmatter.errors }),
     );
     if (out.result.operation !== 'get') throw new Error('expected get branch');
     expect(out.result.exists).toBe(false);
@@ -89,7 +89,7 @@ describe('obsidian_manage_frontmatter / set', () => {
         key: 'priority',
         value: 9,
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianManageFrontmatter.errors }),
     );
 
     expect(seenHeaders.operation ?? seenHeaders.Operation).toBe('replace');
@@ -150,7 +150,7 @@ describe('obsidian_manage_frontmatter / delete', () => {
         target: { type: 'path', path: 'N.md' },
         key: 'priority',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianManageFrontmatter.errors }),
     );
 
     expect(getCount).toBe(1);

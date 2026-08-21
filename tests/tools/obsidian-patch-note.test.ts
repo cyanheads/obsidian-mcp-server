@@ -36,7 +36,7 @@ describe('obsidian_patch_note', () => {
         content: 'note prefix',
         patchOptions: { applyIfContentPreexists: true, trimTargetWhitespace: true },
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianPatchNote.errors }),
     );
 
     expect(seenHeaders.operation ?? seenHeaders.Operation).toBe('prepend');
@@ -87,7 +87,7 @@ describe('obsidian_patch_note', () => {
         operation: 'replace',
         content: 'New.',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianPatchNote.errors }),
     );
 
     expect(seenTarget).toBe('Sandbox::Section A');
@@ -134,7 +134,7 @@ describe('obsidian_patch_note', () => {
           operation: 'append',
           content: 'y',
         }),
-        createMockContext(),
+        createMockContext({ errors: obsidianPatchNote.errors }),
       ),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
   });

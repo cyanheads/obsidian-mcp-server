@@ -37,7 +37,7 @@ describe('obsidian_write_note (whole file)', () => {
         target: { type: 'path', path: 'Note.md' },
         content: 'fresh body',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianWriteNote.errors }),
     );
 
     expect(seenMethod).toBe('PUT');
@@ -94,7 +94,7 @@ describe('obsidian_write_note (whole file)', () => {
         content: 'replacement',
         overwrite: true,
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianWriteNote.errors }),
     );
 
     expect(seenBody).toBe('replacement');
@@ -126,7 +126,7 @@ describe('obsidian_write_note (section)', () => {
         section: { type: 'heading', target: 'Top::Sub' },
         content: 'replacement',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianWriteNote.errors }),
     );
 
     expect(seenHeaders.operation ?? seenHeaders.Operation).toBe('replace');
@@ -164,7 +164,7 @@ describe('obsidian_write_note (section)', () => {
         section: { type: 'heading', target: 'Top::Section A' },
         content: '## Section A\n\nbody line 1\nbody line 2',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianWriteNote.errors }),
     );
 
     expect(seenBody).toBe('body line 1\nbody line 2');
@@ -187,7 +187,7 @@ describe('obsidian_write_note (section)', () => {
         section: { type: 'heading', target: 'Top::Section A' },
         content: '## Different Heading\n\nbody',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianWriteNote.errors }),
     );
 
     expect(seenBody).toBe('## Different Heading\n\nbody');
@@ -211,7 +211,7 @@ describe('obsidian_write_note (section)', () => {
         content: '{"a":1}',
         contentType: 'json',
       }),
-      createMockContext(),
+      createMockContext({ errors: obsidianWriteNote.errors }),
     );
     expect(seenContentType).toBe('application/json');
   });
