@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP resource definition. Use when the user asks to add a resource, expose data via URI, or create a readable endpoint.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -177,6 +177,35 @@ Beyond `description`, `params`, `handler`, and `list`, the builder also supports
 | `title` | Human-readable display title (defaults to `name`). |
 | `examples` | Array of `{ name, uri }` example entries surfaced in `resources/list` for discoverability. |
 | `complete` | Per-variable completion callbacks for URI template variables. Keys match template variable names. Enables `completion/complete` and the `completions` capability. |
+| `cacheHint` | `{ ttlMs?, cacheScope? }` — how long a client may cache this resource's `resources/read` result on protocol revision 2026-07-28. See below. |
+
+### Cache hints (2026-07-28)
+
+A resource that serves slow-changing data can declare how long its `resources/read` result stays fresh. `ttlMs` is the lifetime in milliseconds (a non-negative safe integer); `cacheScope` is `'private'` (only the requesting client may cache it) or `'public'` (shared caches may too).
+
+```typescript
+export const referenceTable = resource('reference://units', {
+  description: 'Unit conversion reference table.',
+  cacheHint: { ttlMs: 86_400_000, cacheScope: 'public' },
+  handler: () => UNIT_TABLE,
+});
+```
+
+Resolution is per field, most specific first: the resource's own `cacheHint`, then the `resources/read` entry of `createApp({ cacheHints })`, then the SDK defaults (`ttlMs: 0`, `cacheScope: 'private'`). So a resource that names only a scope still inherits the server-wide lifetime.
+
+Set a server-wide policy for the list operations alongside it — those results the SDK builds itself, so a resource cannot speak for them:
+
+```typescript
+await createApp({
+  cacheHints: {
+    'tools/list': { ttlMs: 3_600_000, cacheScope: 'public' },
+    'resources/read': { ttlMs: 60_000 },
+  },
+  resources: [referenceTable],
+});
+```
+
+Cacheable operations are `tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, `resources/read`, and `server/discover`. Responses to 2025-era clients are unaffected — the hint only fills fields the 2026-07-28 revision defines.
 
 ## Checklist
 
@@ -189,6 +218,7 @@ Beyond `description`, `params`, `handler`, and `list`, the builder also supports
 - [ ] If `errors[]` contract declared: every entry has a `recovery` field (≥5 words, lint-enforced)
 - [ ] Data is reachable via the tool surface — confirm by checking `src/mcp-server/tools/definitions/` for a tool that exposes this data, or document why this resource is resources-only
 - [ ] `list()` function provided if the resource is discoverable
+- [ ] `cacheHint` set if the data is slow-changing and worth caching (`ttlMs` a non-negative safe integer)
 - [ ] Pagination used for large result sets (`extractCursor`/`paginateArray`) — applies to both `handler` data and `list()` catalogs with many entries
 - [ ] Registered in the project's existing `createApp()` resource list (directly or via barrel)
 - [ ] `bun run devcheck` passes

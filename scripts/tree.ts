@@ -131,9 +131,15 @@ async function loadIgnoreHandler(
   return ig;
 }
 
-function isIgnored(entryPath: string, root: string, ig: Ignore): boolean {
+/**
+ * A directory-only pattern (`/data/`, `.claude/`) matches only when the tested
+ * path carries the trailing slash too — `ignore` has no other way to tell a
+ * directory from a file of the same name. The caller holds the `Dirent`, so the
+ * flag is free.
+ */
+function isIgnored(entryPath: string, root: string, ig: Ignore, isDirectory: boolean): boolean {
   const rel = relative(root, entryPath).split(sep).join(posix.sep);
-  return ig.ignores(rel);
+  return ig.ignores(isDirectory ? `${rel}/` : rel);
 }
 
 /**
@@ -182,7 +188,7 @@ async function generateTree(
   }
 
   const filteredEntries = entries
-    .filter((entry) => !isIgnored(join(resolvedDir, entry.name), root, ig))
+    .filter((entry) => !isIgnored(join(resolvedDir, entry.name), root, ig, entry.isDirectory()))
     .sort((a, b) => {
       if (a.isDirectory() && !b.isDirectory()) return -1;
       if (!a.isDirectory() && b.isDirectory()) return 1;

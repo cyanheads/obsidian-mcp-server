@@ -4,7 +4,7 @@ description: >
   Scaffold a test file for an existing tool, resource, or service. Use when the user asks to add tests, improve coverage, or when a definition exists without a matching test file.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.6"
   audience: external
   type: reference
 ---
@@ -35,9 +35,9 @@ Read the handler and identify:
 | **Happy path** | Valid input → expected output. Include at least one. |
 | **Input variations** | Optional fields omitted, defaults applied, boundary values |
 | **Error paths** | Invalid state, missing resources, service failures → correct error thrown |
-| **`ctx.state` usage** | Use `createMockContext({ tenantId: 'test' })` to enable storage |
-| **`ctx.elicit`** | Mock with `vi.fn()`, also test the absent case (undefined) |
-| **`ctx.progress`** | Use `createMockContext({ progress: true })` for task tools |
+| **`ctx.state` usage** | Available on any mock context (tenant `'default'` unless `{ tenantId }` says otherwise). It runs the production storage path, so use storage-legal keys (`cache/v1/abc`, never `cache:v1:abc`) and assert TTL expiry with fake timers. |
+| **`ctx.requestInput` / `ctx.inputs`** | Two rounds. First round: assert the handler throws the input-required signal (`.rejects.toSatisfy(isInputRequiredSignal)`), or catch it and assert on `error.result.inputRequests`. Second round: seed `createMockContext({ inputResponses })` and assert the handler completes. Cover the decline/cancel branch too. |
+| **`ctx.signal`** | Pass `createMockContext({ signal: controller.signal })` and assert a long loop stops early rather than running to completion. |
 | **`ctx.fail` (typed contract)** | Definitions with `errors[]` need `fail` attached to the mock ctx — `createMockContext({ errors: myTool.errors })` does it for you. Assert on `data.reason` (stable per-contract entry), not just `code`. |
 | **`format` function** | Test separately if defined — it's pure, no ctx needed. Verify it renders the IDs and fields the model needs, not just a count or title. For projection-style tools, test non-default field selections. |
 | **Sparse upstream payloads** | For third-party API integrations, build a fixture with omitted fields. Assert normalized output still validates and `format()` preserves unknown values instead of inventing facts. |
@@ -183,31 +183,53 @@ describe('{{ServiceClass}}', () => {
 
 If you need to test the accessor's "not initialized" guard, do it in a separate isolated-module test (`vi.resetModules()` before importing the service module). Don't mix that assertion into a suite that already calls `init{{ServiceClass}}()` in `beforeEach()`.
 
-### Task tool test
+### Multi-round-trip tool test
 
-For tools with `task: true`, use `createMockContext({ progress: true })`:
+A handler that calls `ctx.requestInput(...)` throws an `InputRequiredSignal` — in production the handler factory converts it to an `input_required` result; in a unit test it surfaces as a thrown value. Test both rounds.
 
 ```typescript
-it('reports progress during execution', async () => {
-  const ctx = createMockContext({ progress: true });
-  const input = {{TOOL_EXPORT}}.input.parse({ count: 3, delayMs: 10 });
-  await {{TOOL_EXPORT}}.handler(input, ctx);
+import { isInputRequiredSignal } from '@cyanheads/mcp-ts-core';
+import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 
-  const progress = ctx.progress as ContextProgress & {
-    _total: number;
-    _completed: number;
-    _messages: string[];
-  };
-  expect(progress._total).toBe(3);
-  expect(progress._completed).toBe(3);
+it('requests the missing input on the first round', async () => {
+  const ctx = createMockContext();
+  const input = {{TOOL_EXPORT}}.input.parse({ path: '/tmp/x' });
+
+  try {
+    await {{TOOL_EXPORT}}.handler(input, ctx);
+    throw new Error('Expected the handler to request input.');
+  } catch (error) {
+    if (!isInputRequiredSignal(error)) throw error;
+    expect(Object.keys(error.result.inputRequests ?? {})).toEqual(['confirm']);
+  }
 });
 
+it('completes once the response is supplied', async () => {
+  const ctx = createMockContext({
+    inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
+  });
+  const input = {{TOOL_EXPORT}}.input.parse({ path: '/tmp/x' });
+
+  await expect({{TOOL_EXPORT}}.handler(input, ctx)).resolves.toMatchObject({ deleted: '/tmp/x' });
+});
+
+it('does not re-ask after a decline', async () => {
+  const ctx = createMockContext({ inputResponses: { confirm: { action: 'decline' } } });
+  const input = {{TOOL_EXPORT}}.input.parse({ path: '/tmp/x' });
+
+  // Terminal, not another round — re-asking would burn the round budget.
+  await expect({{TOOL_EXPORT}}.handler(input, ctx)).rejects.toThrow(McpError);
+});
+```
+
+### Cancellation test
+
+```typescript
 it('respects cancellation', async () => {
   const controller = new AbortController();
-  const ctx = createMockContext({ progress: true, signal: controller.signal });
+  const ctx = createMockContext({ signal: controller.signal });
   const input = {{TOOL_EXPORT}}.input.parse({ count: 100, delayMs: 10 });
 
-  // Abort after a short delay
   setTimeout(() => controller.abort(), 50);
   const result = await {{TOOL_EXPORT}}.handler(input, ctx);
 
@@ -286,7 +308,7 @@ When scaffolding tests for an existing handler, use the Zod schemas to generate 
 - [ ] Happy path tested with valid input → expected output
 - [ ] Error paths tested (at least one `.rejects.toThrow()`)
 - [ ] `format` function tested if defined
-- [ ] `createMockContext` options match handler's ctx usage (`tenantId`, `progress`, `elicit`)
+- [ ] `createMockContext` options match handler's ctx usage (`tenantId`, `inputResponses`, `requestState`, `errors`, `signal`)
 - [ ] Service re-initialized in `beforeEach` if handler depends on a service singleton
 - [ ] If handler has optional fields: tested with empty-string inner values (form-client simulation)
 - [ ] If wrapping external API: sparse-payload case tested — fixture omits at least one optional upstream field; output still validates and `format()` renders uncertainty honestly instead of inventing values

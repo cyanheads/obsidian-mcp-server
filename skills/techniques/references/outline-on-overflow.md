@@ -84,7 +84,7 @@ export const getLabel = tool('get_label', {
 
 - `budget` — serialized-byte threshold (default `DEFAULT_OUTLINE_BUDGET_BYTES`). A helper argument, **not** an env var: a deploy-tunable threshold would drift a tool's output *shape* across environments.
 - `extract` — custom section extractor. Default: one section per top-level key, sized by `JSON.stringify(value).length`. Override only when "section" means something other than a top-level key.
-- `notice` — custom re-call notice builder. Default names the three largest sections as examples.
+- `notice` — custom re-call notice builder, called as `(sections, budget)`. The default's worked example names the **largest section that fits the budget**, with its byte size inline; when no single section fits it says so and points at narrowing the request instead of naming a section. Naming the largest sections would hand the agent the most expensive retrieval available — the one most likely to blow the same budget the outline exists to enforce.
 
 The flow:
 
@@ -92,6 +92,8 @@ The flow:
 2. **Under budget** → `{ kind: 'full', ...doc }`.
 3. **Over budget, ≥ 2 sections** → the outline (sections sorted largest-first). The agent re-calls with `sections: [...]`.
 4. **Over budget, < 2 sections** → `full` anyway (nothing to pick between). A single section that *alone* exceeds budget is a known limitation — sub-section outlining is out of scope.
+
+The budget bounds the **disclosure**, not the selection. `selectSections` returns whatever the agent named, so a selection over several sections — or one section larger than the budget — comes back whole. That is deliberate: the agent asked for those sections by name, and truncating the answer is the thing this technique exists to avoid. The default notice reports each example's size so the selection can be sized before it is made.
 
 ## Re-retrieval — why the selection call is stateless
 

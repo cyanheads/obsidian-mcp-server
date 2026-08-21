@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.8"
+  version: "2.9"
   audience: external
   type: debug
 ---
@@ -243,7 +243,9 @@ mcp_init <url-from-mcp_start>
 
 Runs `initialize`, sends `notifications/initialized`, prints `sid=<id>` to capture for `mcp_call`, plus the protocol version the server negotiated.
 
-The helper requests the SDK's current protocol version. **If `protocol=` comes back older than `requested=`, the server capped it** — every call after that exercises an older protocol than a current client would negotiate. Note it as a `bug` finding and check the pinned `@modelcontextprotocol/sdk` version; don't quietly test the downgraded surface. To deliberately test an older version, set `MCP_FIELD_TEST_PROTOCOL`.
+The helper requests the newest `initialize`-negotiated revision the SDK supports (`2025-11-25`). **If `protocol=` comes back older than `requested=`, the server capped it** — every call after that exercises an older protocol than a current client would negotiate. Note it as a `bug` finding and check the pinned `@modelcontextprotocol/server` version; don't quietly test the downgraded surface. To deliberately test an older version, set `MCP_FIELD_TEST_PROTOCOL`.
+
+This exercises the **2025-era arm**: `initialize` negotiates the revision, the server mints an `Mcp-Session-Id`, and every later call rides that session. The [2026-07-28 revision](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports) is not in the `initialize` ladder at all — it is selected per request by the `io.modelcontextprotocol/protocolVersion` key in the request's own `_meta` envelope, and carries no session. Curl-based field testing therefore covers the sessionful leg; exercise the per-request leg from a real 2026-era client or an integration test.
 
 ### 3. Surface the catalog
 

@@ -4,7 +4,7 @@ description: >
   Authentication, authorization, and multi-tenancy patterns for `@cyanheads/mcp-ts-core`. Use when implementing auth scopes on tools/resources, configuring auth modes (none/jwt/oauth), working with JWT/OAuth env vars, or understanding how tenantId flows through ctx.state.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: reference
 ---
@@ -175,11 +175,11 @@ A `WARNING`-level log is emitted at startup whenever the flag is active so opera
 ```ts
 handler: async (input, ctx) => {
   // Automatically scoped to ctx.tenantId — no manual prefixing
-  await ctx.state.set('item:123', { name: 'Widget', count: 42 });
-  const item = await ctx.state.get<Item>('item:123');
-  await ctx.state.delete('item:123');
+  await ctx.state.set('item/123', { name: 'Widget', count: 42 });
+  const item = await ctx.state.get<Item>('item/123');
+  await ctx.state.delete('item/123');
 
-  const page = await ctx.state.list('item:', { cursor, limit: 20 });
+  const page = await ctx.state.list('item/', { cursor, limit: 20 });
   // page: { items: Array<{ key, value }>, cursor?: string }
 },
 ```

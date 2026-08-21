@@ -4,7 +4,7 @@ description: >
   Post-init orientation for an MCP server built on @cyanheads/mcp-ts-core. Use after running `@cyanheads/mcp-ts-core init` to understand the project structure, conventions, and skill sync model. Also use when onboarding to an existing project for the first time.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: workflow
 ---
@@ -27,8 +27,8 @@ What `init` actually creates:
 CLAUDE.md                                       # Agent protocol — Claude Code
 AGENTS.md                                       # Agent protocol — other agents (Codex, Cursor, etc.)
 package.json                                    # Starter deps + scripts (placeholders substituted on init)
-tsconfig.json                                   # TypeScript config
-tsconfig.build.json                             # Build-only TS config
+tsconfig.json                                   # Typecheck config — covers src/ and tests/, emits nothing
+tsconfig.build.json                             # Build config — emits src/ to dist/, tests excluded
 vitest.config.ts                                # Test runner config
 biome.json                                      # Lint + format config
 devcheck.config.json                            # Which devcheck steps to run
@@ -57,6 +57,9 @@ tests/
   tools/echo.tool.test.ts                       # Starter tests (one per echo definition)
   resources/echo.resource.test.ts
   prompts/echo.prompt.test.ts
+  smoke/definitions.smoke.test.ts               # Every shipped definition executed once
+  integration/echo-contract.int.test.ts         # The echo tool driven through the production surfaces
+  fuzz/echo-tool.fuzz.test.ts                   # Property-based coverage, via the fast-check dev dep
 ```
 
 Add these as needed:

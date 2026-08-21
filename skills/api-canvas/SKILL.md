@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.0"
+  version: "2.1"
   audience: external
   type: reference
 ---
@@ -296,7 +296,7 @@ Most canvas use cases are public-data analytics: fetch from an upstream API, sta
 | Table naming | `spillover()` auto-names the table `spilled_<id>`; pass `tableName` for a stable handle. A dataframe-query surface commonly adds its own `df_<id>` convention. |
 | Access control | Possession of the `canvas_id` is access — unguessable in practice (see [token-sharing model](#the-token-sharing-model)). TTL + the framework rate limiter backstop brute force. |
 | Enable flag | None of your own — canvas presence is the gate (`CANVAS_PROVIDER_TYPE=duckdb`; `getCanvas()` returns `undefined` otherwise). |
-| Tools | A fetcher that spills **plus a `dataframe_query` tool — mandatory once anything emits a `canvas_id`**: a token with no query tool in the same server is dead output (the agent can't reach the staged data). `dataframe_describe` is strongly recommended — it lets the agent discover staged table and column names before writing SQL. `dataframe_drop` is optional. None are framework-provided; you register them. |
+| Tools | A fetcher that spills **plus the dataframe trio — all three ship whenever canvas is integrated**. `dataframe_query` is mandatory once anything emits a `canvas_id`: a token with no query tool in the same server is dead output (the agent can't reach the staged data). `dataframe_describe` is required alongside it — the agent discovers staged table and column names before writing SQL. `dataframe_drop` is implemented but **opt-in via a server env var**: when the flag is off, register it with `disabledTool()` (see `add-tool`) so it stays visible in the manifest with the enable hint while uncallable. None are framework-provided; you register them. |
 | Fetcher output | Two things in one response: the inline preview (answer to the immediate question) and the table handle (escape hatch for follow-up SQL via `dataframe_query`). Neither replaces the other. |
 
 > The `MCP_HTTP_MAX_BODY_BYTES` request-body cap is **inbound-only** — it bounds the JSON-RPC request, not the upstream data a handler stages into the canvas or the rows it returns. Canvas servers send small requests (queries, SQL, canvas IDs) regardless of dataset size, so the cap never constrains canvas ingestion.

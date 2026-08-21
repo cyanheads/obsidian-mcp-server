@@ -1,10 +1,10 @@
 ---
 name: tool-defs-analysis
 description: >
-  Read-only audit of MCP definition language across an existing surface — tools, resources, prompts, server instructions. Walks every definition file and checks 15 categories the LLM reads to decide whether and how to call: voice & tense, internal leaks, audience leaks, defaults, recovery hints, field descriptions, cross-references, sparsity, examples, structure, mutator observability, unit-bearing numeric names, validator-enforced constraints, annotations truthfulness, single-line strings — then a cross-surface pass: naming taxonomy, parameter vocabulary, tool overlap, instructions drift, length outliers. Produces grouped findings with file:line citations and a numbered options list. Use during polish, after a refactor, or before a release. Complements `field-test` (behavior testing) and `security-pass` (security audit).
+  Read-only audit of MCP definition language across an existing surface — tools, resources, prompts, server instructions. Walks every definition file and checks 16 categories the LLM reads to decide whether and how to call: voice & tense, internal leaks, audience leaks, defaults, recovery hints, field descriptions, cross-references, sparsity, examples, structure, mutator observability, unit-bearing numeric names, validator-enforced constraints, annotations truthfulness, single-line strings, exclusive modes in the schema — then a cross-surface pass: naming taxonomy, parameter vocabulary, tool overlap, instructions drift, length outliers. Produces grouped findings with file:line citations and a numbered options list. Use during polish, after a refactor, or before a release. Complements `field-test` (behavior testing) and `security-pass` (security audit).
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: audit
 ---
@@ -22,7 +22,7 @@ This skill is the **review-time pass** for that drift. Read each definition the 
 | `security-pass` | Injection, scopes, input sinks |
 | `tool-defs-analysis` (this) | LLM-facing language across the existing surface |
 
-`field-test` already audits descriptions for implementation leaks, meta-coaching, and consumer-aware phrasing during its catalog step — that's a fast shallow pass alongside live tool calls. This skill is the deeper review: 15 categories, every field, every recovery hint, every default value, with file:line citations — plus a cross-surface pass for the drift no single file shows.
+`field-test` already audits descriptions for implementation leaks, meta-coaching, and consumer-aware phrasing during its catalog step — that's a fast shallow pass alongside live tool calls. This skill is the deeper review: 16 categories, every field, every recovery hint, every default value, with file:line citations — plus a cross-surface pass for the drift no single file shows.
 
 **Read-only.** This skill produces a report; the maintainer applies fixes. While running it, do not run git, do not stage or commit, do not update the changelog, do not run `devcheck`, do not invoke wrapup or release workflows. Fixes flow through the normal authoring path (edit the definition, then re-run this skill if you want to verify).
 
@@ -57,7 +57,7 @@ The `*tool.ts` / `*resource.ts` patterns also catch `*.app-tool.ts` / `*.app-res
 
 Use `TaskCreate` — one task per file. Mark each complete after its findings are captured.
 
-### 2. Walk the 15 categories per file
+### 2. Walk the 16 categories per file
 
 Read each definition file in full. Apply every category — most files trip more than one. Capture each hit with `file:line`, the offending excerpt, and a one-line fix.
 
@@ -201,6 +201,16 @@ Field-test catches this in its leak audit; this skill is the more thorough pass.
 
 **Fix:** collapse to one single-line string literal.
 
+#### 16. Exclusive modes in the schema
+
+**Look in:** input schemas where two or more optional fields are alternatives rather than additions — the describes say "provide either X or Y", "ignored when Z is set", "one of".
+
+**Check:** the exclusivity is in the schema, as a `z.discriminatedUnion` on a mode literal, so each branch advertises its own `required` list and the model reads which arguments go together. A mutex that lives only in prose reaches a weaker model unreliably: it fills both, or neither, and the handler answers with a validation error for a rule the schema said nothing about.
+
+**Smell:** every field optional with a describe explaining when to omit it; a handler opening with `if (!a && !b) throw` / `if (a && b) throw`; a `mode`/`kind`/`by` enum whose value decides which *other* fields are required.
+
+**Fix:** `input: z.discriminatedUnion('mode', [...])` — see the `add-tool` skill. Not every all-optional schema qualifies: fields that genuinely compose (independent filters, pagination) stay flat.
+
 ### 3. Cross-surface pass
 
 The per-file walk misses drift that only shows between files. After it, sweep the whole surface:
@@ -260,7 +270,7 @@ End with:
 - [ ] Scope confirmed (whole server / module / specific files)
 - [ ] Severity floor applied — nits suppressed if user requested
 - [ ] Inventory built — every `*.tool.ts`, `*.app-tool.ts`, `*.resource.ts`, `*.app-resource.ts`, `*.prompt.ts` listed; server `instructions` located if set
-- [ ] Each file walked through all 15 categories (per-file, not 15 separate passes)
+- [ ] Each file walked through all 16 categories (per-file, not 16 separate passes)
 - [ ] Cross-surface pass run — naming taxonomy, parameter vocabulary, tool overlap, instructions drift, length outliers
 - [ ] **Read-only:** no git, no commits, no changelog edits, no `devcheck`, no wrapup invoked during the audit
 - [ ] Findings carry file:line citation, excerpt, issue, fix — excerpts verbatim, line numbers verified

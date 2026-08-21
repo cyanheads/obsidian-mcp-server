@@ -78,7 +78,7 @@ The header tagline must match the `package.json` `description`.
 | Version | info | Always — link to `CHANGELOG.md` |
 | License | info | Always |
 | Docker | info | Published to ghcr.io or Docker Hub |
-| MCP SDK | info | Always — show the `@modelcontextprotocol/sdk` version |
+| MCP SDK | info | Always — show the `@modelcontextprotocol/server` version |
 | npm | info | Published to npm |
 | TypeScript | info | Always |
 | Bun | info | If using Bun (standard for this framework) |

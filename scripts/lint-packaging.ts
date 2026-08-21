@@ -98,7 +98,7 @@ export const KNOWN_DEV_DIRS = ['skills/', '.agents/', '.claude/'];
  */
 export const CRITICAL_RUNTIME_PATHS = [
   'node_modules/@opentelemetry/api/build/src/',
-  'node_modules/@modelcontextprotocol/sdk/dist/',
+  'node_modules/@modelcontextprotocol/server/dist/',
   'node_modules/@cyanheads/mcp-ts-core/dist/',
   'dist/index.js',
 ];

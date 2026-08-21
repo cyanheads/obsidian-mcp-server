@@ -4,7 +4,7 @@ description: >
   Cloudflare Workers deployment using `createWorkerHandler` from `@cyanheads/mcp-ts-core/worker`. Covers the full handler signature, binding types, CloudflareBindings extensibility, runtime compatibility guards, and wrangler.toml requirements.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: reference
 ---
@@ -211,6 +211,14 @@ export function getServerConfig() {
 > `DuckDB canvas requires Node.js or Bun. Set CANVAS_PROVIDER_TYPE=none or omit it for Cloudflare Workers deployment.`
 
 Leave the env unset (or set to `none`) for Worker deployments. Tools that conditionally use canvas should check the module-level accessor (`if (!getCanvas()) { ... }`) and surface a clear "feature unavailable on this deployment" message. See `api-canvas` for the full DataCanvas reference and setup wiring pattern.
+
+**The default notification bus is per-isolate.** `core.notify` and the modern era's `subscriptions/listen` streams share a change-event bus that defaults to in-process — which on Workers means one bus per isolate, so a background emission reaches only the listeners that happen to live in the isolate that produced it. Handler-time `ctx.notify*` is unaffected (the listen stream and the handler are the same request). For fan-out that must cross isolates, supply a bus of your own, backed by a Durable Object or another shared channel:
+
+```ts
+createWorkerHandler({ tools, eventBus: myDurableObjectBackedBus });
+```
+
+The interface is the SDK's `ServerEventBus` — `publish(event)` and `subscribe(listener)`. See `api-context`'s notification section for what publishes onto it.
 
 ---
 

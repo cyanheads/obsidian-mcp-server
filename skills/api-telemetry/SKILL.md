@@ -4,16 +4,18 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.7"
   audience: external
   type: reference
 ---
 
 ## Overview
 
-The framework auto-instruments every tool, resource, prompt, storage, LLM, speech, and graph call — each gets its own span and the standard counters/histograms. HTTP server requests pick up spans from `HttpInstrumentation` (all Node.js HTTP traffic, skips `/healthz`) plus `httpInstrumentationMiddleware` from `@hono/otel` on the MCP HTTP endpoint when installed (optional Tier 3 peer — `bun add @hono/otel`). On Bun, `HttpInstrumentation` silently no-ops and `@hono/otel` is the only HTTP coverage. Auth checks, session lifecycle, and task lifecycle are tracked as **metrics only** — auth decorates the active HTTP span with attributes, sessions and tasks emit counters.
+The framework auto-instruments every tool, resource, prompt, storage, LLM, speech, and graph call — each gets its own span and the standard counters/histograms. HTTP server requests pick up spans from `HttpInstrumentation` (all Node.js HTTP traffic, skips `/healthz`) plus `httpInstrumentationMiddleware` from `@hono/otel` on the MCP HTTP endpoint when installed (optional Tier 3 peer — `bun add @hono/otel`). On Bun, `HttpInstrumentation` silently no-ops and `@hono/otel` is the only HTTP coverage. Auth checks and session lifecycle are tracked as **metrics only** — auth decorates the active HTTP span with attributes, sessions emit counters.
 
 `requestId`, `traceId`, and `tenantId` correlate automatically across spans, metrics, and logs. Pino logs get `trace_id`/`span_id` injected when a span is active.
+
+A handler's `ctx.traceId` / `ctx.spanId` name the execution span it runs in — `tool_execution:<name>` or `resource_read:<name>` — not the enclosing HTTP request span. Under HTTP the trace ID is the request's, so handler logs join to the request; the span ID is the child execution's, so they join to that span's attributes and duration. On stdio, where no transport span exists, both are still populated from the execution span the framework opens. Both are `undefined` when telemetry is disabled: the non-recording span a disabled pipeline produces carries all-zero IDs, and the framework reports no correlation rather than IDs that correlate to nothing.
 
 For the helper API surface (`withSpan`, `createCounter`, `createHistogram`, `buildTraceparent`, etc.) — see the `api-utils` skill, `Telemetry` section. This skill is the catalog of **what** is emitted; that one is the reference for **how** to emit your own.
 
@@ -55,20 +57,54 @@ Cloud platform detection auto-populates resource attributes:
 
 ---
 
+## Flush at exit
+
+Spans batch and metrics push on a 15-second cycle, so a process that exits between cycles takes its telemetry with it. `ServerHandle.shutdown()` is the drain: it stops the transport, then force-flushes traces and metrics through the OTLP exporters and closes the logger.
+
+| Trigger | Path |
+|:--------|:-----|
+| `SIGTERM` / `SIGINT` | `shutdown(signal)` |
+| `uncaughtException` / `unhandledRejection` | `shutdown(signal)`, then `process.exit(1)` |
+| stdin EOF, stdio transport | `shutdown('STDIN_EOF')`, then `process.exit(0)` |
+| `ServerHandle.shutdown()` called directly | the same drain, no exit |
+
+**Stdin EOF is a disconnect.** A stdio host closing the pipe runs the cleanup a signal runs, exactly once — the shutdown detaches the signal handlers and the EOF watcher as it starts, so neither can re-enter it — and the process then exits explicitly instead of waiting to run out of handles. Two things follow: the OTLP export leaves the process, and a `setInterval` a service registered without `unref()` can no longer keep the server resident after its client is gone. The path writes nothing to stdout.
+
+**The drain is bounded.** Shutdown-on-exit races a 10-second backstop, so a cleanup step that never settles still terminates the process. The logger bounds its own flush separately, per pino instance: a completing callback is awaited in full, and a runtime whose callback never arrives releases shutdown rather than hanging it.
+
+Workers has no `ServerHandle` and no `NodeSDK` — flush whatever exporter you wired there yourself, via `ctx.waitUntil()`.
+
+---
+
 ## Spans
 
 Every handler call gets a span. Nested operations (storage, graph, LLM) become child spans on the same trace. All spans carry `code.function.name` and `code.namespace` for code-attribution. Errors are recorded via `span.recordException()` and `SpanStatusCode.ERROR`; `McpError` codes surface as the `*.error_code` attribute.
 
 | Span name | Source | Key attributes |
 |:----------|:-------|:---------------|
-| `tool_execution:<tool>` | every tool call | `mcp.tool.input_bytes`, `mcp.tool.output_bytes`, `mcp.tool.duration_ms`, `mcp.tool.success`, `mcp.tool.error_code`, `mcp.tool.partial_success`, `mcp.tool.batch.{succeeded,failed}_count` |
-| `resource_read:<resource>` | every resource handler | `mcp.resource.uri`, `mcp.resource.mime_type`, `mcp.resource.size_bytes`, `mcp.resource.duration_ms`, `mcp.resource.success`, `mcp.resource.error_code` |
-| `prompt_generation:<prompt>` | every prompt handler | `mcp.prompt.input_bytes`, `mcp.prompt.output_bytes`, `mcp.prompt.message_count`, `mcp.prompt.duration_ms`, `mcp.prompt.success`, `mcp.prompt.error_code` |
+| `tool_execution:<tool>` | every tool call | `mcp.tool.input_bytes`, `mcp.tool.output_bytes`, `mcp.tool.duration_ms`, `mcp.tool.success`, `mcp.tool.error_code`, `mcp.tool.input_required`, `mcp.tool.partial_success`, `mcp.tool.batch.{succeeded,failed}_count` |
+| `resource_read:<resource>` | every resource handler | `mcp.resource.uri`, `mcp.resource.mime_type`, `mcp.resource.size_bytes`, `mcp.resource.duration_ms`, `mcp.resource.success`, `mcp.resource.error_code`, `mcp.resource.input_required` |
+| `prompt_generation:<prompt>` | every prompt handler | `mcp.prompt.input_bytes`, `mcp.prompt.output_bytes`, `mcp.prompt.message_count`, `mcp.prompt.duration_ms`, `mcp.prompt.success`, `mcp.prompt.error_code`, `mcp.prompt.input_required` |
 | `storage:<op>` | `StorageService` (every call) | `mcp.storage.operation`, `mcp.storage.duration_ms`, `mcp.storage.success`, `mcp.storage.key_count` (batch ops) |
 | `graph:<op>` | `GraphService` (every call) | `mcp.graph.operation`, `mcp.graph.duration_ms`, `mcp.graph.success` |
 | `gen_ai.chat_completion` | OpenRouter LLM provider | `gen_ai.system=openrouter`, `gen_ai.request.model`, `gen_ai.request.{max_tokens,temperature,top_p,streaming}`, `gen_ai.response.model`, `gen_ai.usage.{input,output,total}_tokens` |
 | `speech:tts` | ElevenLabs provider | `mcp.speech.provider`, `mcp.speech.operation`, `mcp.speech.input_bytes`, `mcp.speech.output_bytes`, `mcp.speech.duration_ms`, `mcp.speech.success` |
 | `speech:stt` | Whisper provider | same as `speech:tts` |
+
+A handler that ends its round with `ctx.requestInput(...)` closes its span `OK` with `mcp.*.input_required` set — no recorded exception, no error-counter increment. Multi-round-trip input is protocol control flow, so it never inflates error rates; split on that attribute to tell an incomplete round from a completed call.
+
+### The measured region
+
+A tool or resource call is measured from the start of the handler through the response pipeline that follows it: output-schema validation, `format()`, the enrichment merge, and the trailer render for tools; output-schema validation and `format()` for resources. Telemetry therefore records the outcome the client sees — a failure in any of those is an ERROR span, `success=false` counters, an error-counter increment, and `isSuccess: false` in the completion log, matching the `isError: true` the caller receives. Prompt generation has no post-handler pipeline, so its region is the generate function alone.
+
+Two consequences worth knowing when reading a dashboard:
+
+| Signal | What it covers |
+|:-------|:---------------|
+| `mcp.tool.duration` / `mcp.resource.duration` | The handler **plus** validation, formatting, and the enrichment merge — time to produce the result, not time spent in handler code. An expensive `format()` shows up here. |
+| `mcp.tool.output_bytes` / `mcp.resource.output_bytes` | The handler's returned domain value, not the assembled result. `content[]` re-renders the data the structured payload already carries, so measuring the assembly would double-count it. Nothing is recorded for a call that fails after the handler. |
+
+`mcp.tool.partial_success` and the `mcp.tool.batch.*` counts read the same domain value, so a batch envelope (`{ succeeded, failed }`) is still detected once the result has been assembled around it.
 
 Trace context propagates across boundaries via W3C `traceparent` headers. See `api-utils` → `telemetry/trace` for `withSpan`, `buildTraceparent`, `extractTraceparent`, `createContextWithParentTrace`, `injectCurrentContextInto`, `runInContext` signatures.
 
@@ -86,12 +122,12 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.tool.duration` | histogram | `ms` | `mcp.tool.name`, `mcp.tool.success` |
 | `mcp.tool.errors` | counter | `{errors}` | `mcp.tool.name`, `mcp.tool.error_category` (`upstream`/`server`/`client`) |
 | `mcp.tool.input_bytes` | histogram | `bytes` | `mcp.tool.name` |
-| `mcp.tool.output_bytes` | histogram | `bytes` | `mcp.tool.name` (success only) |
+| `mcp.tool.output_bytes` | histogram | `bytes` | `mcp.tool.name` (success only; the handler's returned value) |
 | `mcp.tool.param.usage` | counter | `{uses}` | `mcp.tool.name`, `mcp.tool.param` (top-level keys supplied by caller) |
 | `mcp.resource.reads` | counter | `{reads}` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.duration` | histogram | `ms` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.errors` | counter | `{errors}` | `mcp.resource.name` |
-| `mcp.resource.output_bytes` | histogram | `bytes` | `mcp.resource.name` (success only) |
+| `mcp.resource.output_bytes` | histogram | `bytes` | `mcp.resource.name` (success only; the handler's returned value) |
 | `mcp.prompt.generations` | counter | `{generations}` | `mcp.prompt.name`, `mcp.prompt.success` |
 | `mcp.prompt.duration` | histogram | `ms` | `mcp.prompt.name`, `mcp.prompt.success` |
 | `mcp.prompt.errors` | counter | `{errors}` | `mcp.prompt.name`, `mcp.prompt.error_category` |
@@ -118,7 +154,7 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.graph.duration` | histogram | `ms` | `mcp.graph.operation`, `mcp.graph.success` |
 | `mcp.graph.errors` | counter | `{errors}` | `mcp.graph.operation` |
 
-### Transport, auth, sessions, tasks
+### Transport, auth, sessions
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
@@ -128,12 +164,6 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.session.duration` | histogram | `s` | — |
 | `mcp.sessions.active` | observable gauge | `{sessions}` | — |
 | `mcp.heartbeat.failures` | counter | `{failures}` | `mcp.connection.transport` (`stdio`/`http`) |
-| `mcp.http.close_failures` | counter | `{failures}` | `surface` (`transport`/`server`), `trigger` (`success`/`error`/`sse-abort`) — per-request close threw or timed out |
-| `mcp.http.per_request.created` | counter | `{instances}` | `kind` (`server`/`transport`) — per-request `McpServer` and `McpSessionTransport` instances created |
-| `mcp.http.per_request.finalized` | counter | `{instances}` | `kind` (`server`/`transport`) — per-request instances reclaimed by GC; persistent gap vs `created` indicates a leak |
-| `mcp.tasks.created` | counter | `{tasks}` | `mcp.task.store_type` (`in-memory`/`storage`) |
-| `mcp.tasks.status_changes` | counter | `{transitions}` | `mcp.task.status`, `mcp.task.store_type` |
-| `mcp.tasks.active` | observable gauge | `{tasks}` | — (in-memory store only) |
 
 ### Errors, rate limits, HTTP client
 

@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.13"
   audience: external
   type: reference
 ---
@@ -47,11 +47,35 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 | `websiteUrl` | `string?` | Canonical homepage / repository URL |
 | `description` | `string?` | One-line description; wins over `MCP_SERVER_DESCRIPTION` when set |
 | `icons` | `Implementation['icons']?` | Array of icon objects: `{ src, mimeType?, sizes?: string[], theme?: 'light'\|'dark' }` |
+| `cacheHints` | `CacheHints?` | Cache hints for the 2026-07-28 cacheable results, keyed by operation — see below |
+
+#### Cache hints (`cacheHints`)
+
+API-only, no env var. Sets the `ttlMs` / `cacheScope` a client may cache a cacheable result for on protocol revision 2026-07-28. Keys are the closed set of cacheable operations: `tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, `resources/read`, `server/discover`.
+
+```ts
+await createApp({
+  cacheHints: {
+    'tools/list': { ttlMs: 3_600_000, cacheScope: 'public' },
+    'resources/read': { ttlMs: 60_000 },
+  },
+});
+```
+
+- `ttlMs` — cache lifetime in milliseconds; must be a non-negative safe integer. An invalid value fails at startup with a `ConfigurationError` naming the field.
+- `cacheScope` — `'private'` (only the requesting client may cache) or `'public'` (shared caches may too).
+- A resource's own `cacheHint` overrides the `resources/read` entry for that resource, field by field — see the `add-resource` skill.
+- Omitting a hint keeps the SDK defaults (`ttlMs: 0`, `cacheScope: 'private'`). Responses to 2025-era clients are never affected.
+
+---
+
+### Environment & logging
+
+| Env Var | `AppConfig` field | Default | Notes |
+|:--------|:-----------------|:--------|:------|
 | `NODE_ENV` | `environment` | `development` | Aliases: `dev`→`development`, `prod`→`production`, `test`→`testing` |
 | `MCP_LOG_LEVEL` | `logLevel` | `debug` | Aliases: `warn`→`warning`, `err`→`error`, `fatal`/`silent`→`emerg`, `trace`→`debug`, `information`→`info` |
 | `LOGS_DIR` | `logsPath` | `<project-root>/logs` | Node.js only; absolute or relative to project root |
-
----
 
 ### Transport
 
@@ -62,10 +86,13 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 | `MCP_HTTP_HOST` | `mcpHttpHost` | `127.0.0.1` | Bind address |
 | `MCP_HTTP_ENDPOINT_PATH` | `mcpHttpEndpointPath` | `/mcp` | HTTP endpoint path |
 | `MCP_HTTP_MAX_BODY_BYTES` | `mcpHttpMaxBodyBytes` | `1048576` (1 MiB) | Max **inbound** JSON-RPC request body; oversized requests get `413` before per-request allocation. Does **not** cap upstream data staged into a canvas or response sizes. `0` disables (defer to runtime/proxy). |
-| `MCP_HTTP_MAX_PORT_RETRIES` | `mcpHttpMaxPortRetries` | `15` | Retry count if port is busy |
+| `MCP_HTTP_MAX_PORT_RETRIES` | `mcpHttpMaxPortRetries` | `15` | Rungs of the port ladder walked when a bind collides; each rung tries `port + 1`. See [Port binding](#port-binding) |
 | `MCP_HTTP_PORT_RETRY_DELAY_MS` | `mcpHttpPortRetryDelayMs` | `50` | Delay between port retries (ms) |
 | `MCP_SESSION_MODE` | `mcpSessionMode` | `auto` | `stateless` \| `stateful` \| `auto` |
 | `MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS` | `mcpStatefulSessionStaleTimeoutMs` | `1800000` | 30 min; stale session eviction |
+| `MCP_HTTP_RESUMABILITY` | `mcpHttpResumability` | `true` | SSE stream replay under stateful HTTP. On by default — selecting a session mode is the opt-in. Kill switch only; no effect on stateless serving or the session-less 2026-07-28 era |
+| `MCP_HTTP_RESUMABILITY_MAX_EVENTS` | `mcpHttpResumabilityMaxEvents` | `512` | Events retained per session for replay; oldest evicted first. Lower it on a server whose tools return large results |
+| `MCP_HTTP_RESUMABILITY_TTL_MS` | `mcpHttpResumabilityTtlMs` | `300000` | 5 min; how long a retained event stays replayable |
 | `MCP_RESPONSE_VERBOSITY` | `mcpResponseVerbosity` | `standard` | `minimal` \| `standard` \| `full` |
 | `MCP_ALLOWED_ORIGINS` | `mcpAllowedOrigins` | — | Comma-separated list; omit to allow all |
 | `MCP_SERVER_RESOURCE_IDENTIFIER` | `mcpServerResourceIdentifier` | — | RFC 8707 resource indicator URL |
@@ -73,6 +100,14 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 | `MCP_HEARTBEAT_INTERVAL_MS` | `mcpHeartbeatIntervalMs` | `0` (disabled) | Heartbeat ping interval; 0 disables |
 | `MCP_HEARTBEAT_MISS_THRESHOLD` | `mcpHeartbeatMissThreshold` | `3` | Missed heartbeats before session is considered stale |
 | `MCP_GC_PRESSURE_INTERVAL_MS` | `mcpGcPressureIntervalMs` | `0` (disabled) | Bun-only opt-in forced GC loop for HTTP deployments with heap growth |
+
+#### Port binding
+
+`MCP_HTTP_PORT` is where the HTTP transport starts, not necessarily where it ends up. Startup walks a ladder: bind `MCP_HTTP_PORT`, and on a collision wait `MCP_HTTP_PORT_RETRY_DELAY_MS` and try the next port, up to `MCP_HTTP_MAX_PORT_RETRIES` times. Read the bound port off the `HTTP transport listening at …` log line or the startup banner — with the defaults the server may be anywhere in `3010`–`3025`. Pin the port by setting `MCP_HTTP_MAX_PORT_RETRIES=0`, which makes a collision a startup failure instead of a silent move.
+
+- **Startup resolves only once the server reports `'listening'`.** A bind failure arriving after the listen call — a collision the pre-bind probe could not see, because another process took the port in between — is routed to the ladder like any other, not reported as a successful start.
+- **A failure the ladder cannot clear rejects immediately.** Each rung only changes the port, so `EACCES` (privileged port, typically `<1024` as a non-root user) and `EADDRNOTAVAIL` (the `MCP_HTTP_HOST` address is not local to this machine) fail startup on the first attempt with the OS error as the rejection's `cause`, rather than burning every rung. Ladder exhaustion carries the last bind error as `cause` too, when a real bind attempt produced one.
+- **Runtime caveat:** Bun reports a permission-denied bind as `EADDRINUSE` where Node reports `EACCES`. On Bun a privileged port therefore reads as an ordinary collision and walks the whole ladder before failing with `Failed to bind to any port after N retries.` — on Node the same port fails on the first attempt, naming `EACCES`.
 
 ---
 
@@ -174,16 +209,6 @@ Activated when both `SUPABASE_URL` and `SUPABASE_ANON_KEY` are set.
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `openTelemetry.metricsEndpoint` | — | OTLP metrics endpoint URL |
 | `OTEL_TRACES_SAMPLER_ARG` | `openTelemetry.samplingRatio` | `1.0` | 0–1; fraction of traces to export |
 | `OTEL_LOG_LEVEL` | `openTelemetry.logLevel` | `INFO` | OTel SDK internal log level: `NONE` \| `ERROR` \| `WARN` \| `INFO` \| `DEBUG` \| `VERBOSE` \| `ALL` |
-
----
-
-### Tasks
-
-| Env Var | `AppConfig` field | Default | Notes |
-|:--------|:-----------------|:--------|:------|
-| `TASK_STORE_TYPE` | `tasks.storeType` | `in-memory` | `in-memory` \| `storage`; aliases: `mem`/`memory`→`in-memory`, `persistent`→`storage` |
-| `TASK_STORE_TENANT_ID` | `tasks.tenantId` | `system-tasks` | Tenant ID for task state storage |
-| `TASK_STORE_DEFAULT_TTL_MS` | `tasks.defaultTtlMs` | — | TTL for completed tasks (ms); null = no expiry |
 
 ---
 

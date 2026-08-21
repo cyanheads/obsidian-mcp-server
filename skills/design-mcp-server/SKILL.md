@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.20"
+  version: "2.22"
   audience: external
   type: workflow
 ---
@@ -52,7 +52,9 @@ The server name (repo name, npm package, public identity) must communicate what 
 
 - **Use the canonical platform/brand name, not abbreviations.** `libofcongress-mcp-server` not `loc-mcp-server` ("loc" reads as lines-of-code or location). `federal-reserve-mcp-server` not `fred-mcp-server` ("fred" reads as a person's name).
 - **Add a descriptive suffix when the base name is a non-obvious acronym.** Pattern: `{acronym}-{domain}-mcp-server` — e.g., `eia-energy-mcp-server`, `bls-labor-mcp-server`, `nhtsa-vehicle-safety-mcp-server`. Skip when the name is already self-descriptive (`earthquake-mcp-server`, `wikidata-mcp-server`).
-- **The name becomes the tool prefix.** Every tool is `{prefix}_{verb}_{noun}`, so the server name shows up in every tool call an agent sees. A descriptive name gives agents domain context without reading the server's instructions.
+- **Don't overclaim scope.** A name asserts breadth on two independent axes, and must be honest on both. *Source breadth:* is this a first-party wrapper around one provider's API, or genuine aggregation across several independent sources behind one normalized surface? *Domain or jurisdiction breadth:* one, or many? A generic name claims breadth on whichever axis it leaves unqualified. `threat-intel-mcp-server` earns its generic name by aggregating independent sources for one workflow; that same name over a single vendor's API would be a defect — name that for the vendor. When the real scope is one jurisdiction, put it in the name (`uk-legislation-mcp-server`, `statistics-canada-mcp-server`) rather than letting a generic noun imply worldwide coverage a user will only discover is absent after installing. Note that aggregating several bodies *within* one jurisdiction earns a cross-source name, not a cross-jurisdiction one.
+- **Aggregation is a claim about entities, not endpoints.** One provider publishing five APIs is still first-party. Wrapping several endpoints of the same upstream does not make a server an aggregator and does not earn a generic name.
+- **The tool prefix derives from the name but is a separate identifier.** Every tool is `{prefix}_{verb}_{noun}`, so the prefix shows up in every tool call an agent sees, and a descriptive one gives agents domain context without reading the server's instructions. The prefix names the *source*, dropping the descriptive qualifier the repo name carries for human browsing: `eia-energy-mcp-server` → `eia_`, `nhtsa-vehicle-safety-mcp-server` → `nhtsa_`. Because it names the source rather than the repo, the two can diverge — a later repo rename does not have to move the prefix, and usually shouldn't: renaming an advertised tool surface is a breaking change for every existing client, while renaming a package is not.
 
 ## Steps
 
@@ -139,7 +141,7 @@ Most tools follow the `{server}_{verb}_{noun}` default — one focused responsib
 
 | Shape | Purpose | Typical form | Examples |
 |:------|:--------|:-------------|:---------|
-| **Workflow** | Multi-step orchestration that replaces a common agent chain | N upstream calls (often parallelized); may elicit confirmation; may need mid-flow cleanup | `clinicaltrials_find_studies` (search → filter → rank) |
+| **Workflow** | Multi-step orchestration that replaces a common agent chain | N upstream calls (often parallelized); may request confirmation; may need mid-flow cleanup | `clinicaltrials_find_studies` (search → filter → rank) |
 | **Instruction** | State-aware procedural guidance — advice, not action | Static markdown + a few live-state fetches, `readOnlyHint: true`, outputs `nextToolSuggestions` pre-filling the recommended follow-up. No writes. | `git_wrapup_instructions` |
 | **Reference** | Decode opaque domain vocabulary — codes, enums, identifier formats, coverage windows — so agents can build valid inputs for the rest of the surface | Static tables or one cached fetch (often zero upstream calls); consolidate N lists under one `topic` enum; `readOnlyHint: true`, `openWorldHint: false` when offline | `medcode_list_systems`, `osv_list_ecosystems` |
 
@@ -267,20 +269,34 @@ A reference tool is the surface's decoder ring: which codes exist, what they mea
 
 Tools that perform multi-step mutations (the Workflow shape) have two safety considerations beyond single-call tools. Both are about giving the agent — and the human behind it — a chance to catch a bad invocation before it commits.
 
-**Elicit-guarded destructive modes with annotation fallback.** When a workflow's `mode` parameter switches between safe and destructive arms (`draft` vs `send`, `plan` vs `apply`), gate the destructive arm behind `ctx.elicit` when the client supports it, so a human confirms before the irreversible step fires. Elicitation isn't universally available — headless stdio sessions and many non-interactive clients don't expose it. Fall back on `destructiveHint: true` in annotations so those clients' approval flows still surface the risk. Document the fallback in the handler so maintainers don't assume elicit always runs:
+**Confirmation-gated destructive modes, with an annotation fallback.** When a workflow's `mode` parameter switches between safe and destructive arms (`draft` vs `send`, `plan` vs `apply`), gate the destructive arm on a confirmation the handler asks for via `ctx.requestInput(...)`, so a human approves before the irreversible step fires. The handler is re-entered with the answer on `ctx.inputs`; it does not `await` mid-call.
+
+The gate is always *reachable* — `ctx.requestInput` is present on every transport and both protocol eras — but it is not always *answerable*: a client that never fulfils the `input_required` result simply doesn't retry, and the destructive step never runs. Keep `destructiveHint: true` in annotations so those clients' own approval flows still surface the risk.
 
 ```ts
-annotations: { destructiveHint: true },        // fallback for clients without elicit
+annotations: { destructiveHint: true },        // client-side approval flows still see the risk
 // ...
-async handler(input, ctx) {
-  if (input.mode === 'apply' && ctx.elicit) {
-    const confirm = await ctx.elicit(
-      `Apply migration affecting ${affectedRowCount} rows in production? Cannot be rolled back automatically.`,
-      z.object({ confirmed: z.literal(true).describe('Type true to apply.') }),
-    );
-    if (confirm.action !== 'accept') throw new Error('Migration cancelled by user.');
+const Confirm = z.object({ confirmed: z.literal(true).describe('Type true to apply.') });
+
+handler(input, ctx) {
+  if (input.mode === 'apply') {
+    // A decline is terminal — re-asking would loop until the round budget runs out.
+    const view = ctx.inputs.view('confirm');
+    if (view.kind === 'elicit' && view.action !== 'accept') {
+      throw validationError('Migration cancelled by user.');
+    }
+    if (!ctx.inputs.accepted('confirm', Confirm)) {
+      return ctx.requestInput({
+        inputRequests: {
+          confirm: inputRequired.elicit({
+            message: `Apply migration affecting ${affectedRowCount} rows in production? Cannot be rolled back automatically.`,
+            requestedSchema: Confirm,
+          }),
+        },
+      });
+    }
   }
-  // destructive step proceeds; destructiveHint covers clients that skipped elicit
+  // destructive step proceeds
 }
 ```
 
@@ -620,13 +636,13 @@ Each step is independently testable.
 
 Keep it concise. The design doc is a working reference, not a spec document — enough to orient a developer (or agent) implementing the server, not more.
 
-**Workflow Analysis example.** For multi-step workflow tools, document the upstream call sequence in a table — it drives several downstream decisions during implementation: the service-layer method shape, retry boundaries, where cleanup or elicit belongs, and what post-action state to fetch for the response.
+**Workflow Analysis example.** For multi-step workflow tools, document the upstream call sequence in a table — it drives several downstream decisions during implementation: the service-layer method shape, retry boundaries, where cleanup or the confirmation round belongs, and what post-action state to fetch for the response.
 
-`deploy_release` (5–8 upstream calls, plus elicit):
+`deploy_release` (5–8 upstream calls, plus a confirmation round):
 
 | # | Call | Purpose | Mode gate |
 |:--|:-----|:--------|:----------|
-| 0 | `ctx.elicit` confirmation | Human approval before promote | `promote` (when available) |
+| 0 | `ctx.requestInput` confirmation | Human approval before promote | `promote` |
 | 1 | `POST /releases` | Create release record | always |
 | 2 | `PUT /releases/{id}/artifacts` | Attach build artifacts | always |
 | 3 | `GET /releases/{id}/preflight` | Health checks, smoke tests | always |
@@ -636,7 +652,7 @@ Keep it concise. The design doc is a working reference, not a spec document — 
 | 7 | `GET /releases/{id}` | Post-action state for response | always |
 | — | `DELETE /releases/{id}/canary-traffic` | Cleanup canary if mid-flow error | on error + `cleanupOnError` |
 
-The table surfaces design questions early: should the elicit happen before or after the artifacts are attached? Does cleanup drop the canary on any failure, or only failures past the promote step? What does the response body need from the final GET — version, traffic percentage, health summary? Answering these during design is far cheaper than mid-implementation.
+The table surfaces design questions early: should the confirmation round happen before or after the artifacts are attached? Does cleanup drop the canary on any failure, or only failures past the promote step? What does the response body need from the final GET — version, traffic percentage, health summary? Answering these during design is far cheaper than mid-implementation.
 
 ### 9. Confirm and Proceed
 
@@ -685,7 +701,7 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] **If an upstream API has no native search but the relevant set is bounded:** MCP-side list filtering considered — a distinct local filter param (`filter`/`nameContains`, not `query`), filtering the full set, strict token match (fuzzy only when a caller needs typo tolerance)
 - [ ] **If the server has workflow tools:** call-flow documented (upstream sequence + mode arms) in design doc's Workflow Analysis
 - [ ] **If state-aware procedural guidance adds value:** instruction tool considered with `nextToolSuggestions` pre-filled from diagnostics
-- [ ] **If workflow tools have destructive modes:** destructive arm guarded by `ctx.elicit` when available, with `destructiveHint` annotation as fallback for non-interactive clients
+- [ ] **If workflow tools have destructive modes:** destructive arm gated on a `ctx.requestInput` confirmation read back from `ctx.inputs`, with `destructiveHint` annotation so clients that never fulfil the round still surface the risk
 - [ ] **If a parameter determines blast radius:** safe default set (e.g., `mode: 'preview'`, `dryRun: true`, `confirmCount` required)
 - [ ] **App tools default to no.** If one was proposed, verified there's a real human-in-the-loop in an MCP Apps-capable client justifying the iframe/CSP/`format()`-twin maintenance cost — otherwise dropped in favor of a standard tool
 - [ ] **If the server exposes resources:** URIs use `{param}` templates, pagination planned for large lists

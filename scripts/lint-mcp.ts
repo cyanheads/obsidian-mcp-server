@@ -42,9 +42,7 @@ try {
 function isToolLike(v: unknown): boolean {
   if (!v || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
-  const hasHandler = typeof o.handler === 'function';
-  const hasTaskHandlers = o.taskHandlers != null && typeof o.taskHandlers === 'object';
-  return (hasHandler || hasTaskHandlers) && o.input != null && o.output != null;
+  return typeof o.handler === 'function' && o.input != null && o.output != null;
 }
 
 function isResourceLike(v: unknown): boolean {

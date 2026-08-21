@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit, annotated tag) is already complete — this skill is the post-wrapup publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.11"
+  version: "1.11"
   audience: external
   type: workflow
 ---
@@ -73,13 +73,19 @@ If working tree is dirty or HEAD isn't on `v<version>`, halt.
 
 ### 2. Run the verification gate
 
-All three must succeed. Check `package.json` `scripts` for `test:all`; if absent, fall back to `test`:
+All must succeed. Check `package.json` `scripts` for `test:all`; if absent, fall back to `test`:
 
 ```bash
 bun run devcheck
 bun run rebuild
 bun run test:all        # or `bun run test` if no test:all
+bun run test:package    # only if the script exists — NOT part of test:all
 ```
+
+`test:package` is a separate gate wherever a project defines one: it verifies the public-export
+manifest against what the built subpaths actually export. A release that adds, removes, or renames
+an export passes `test:all` and fails here. Regenerate the manifest with the command the failure
+names rather than editing it by hand.
 
 Any non-zero exit → halt with the failing command's output.
 
@@ -199,6 +205,8 @@ Skip any destination that was skipped in its step.
 
 Confirm each published artifact is actually live — don't rely on a successful push exit code alone. For each destination that succeeded:
 
+**Never disable the sandbox to complete a verification.** A verification `curl` — most often the MCP Registry one — can come back blocked by a sandbox network restriction while npm and GHCR pass. Do **not** set `dangerouslyDisableSandbox` or otherwise route around the restriction; report the block and let the orchestrator verify from its own session. **A blocked verification is not evidence of a failed publish** — when the publish step itself reported success, report the two facts separately rather than treating the block as something to defeat.
+
 - **npm**: `npm view <package.json#name>@<version> version` — must return the version string
 - **MCP Registry**: `curl -s "https://registry.modelcontextprotocol.io/v0.1/servers/<mcpName>/versions/<version>"` — must return HTTP 200 with `server.version` matching `<version>` (`mcpName` is the `name` field from `server.json`; URL-encode `/` as `%2F`). The search endpoint (`/v0.1/servers?search=`) paginates and may not include the latest version for packages with many releases — always use the direct version lookup.
 - **GitHub Release**: `gh release view v<VERSION> -R <OWNER>/<REPO> --json assets --jq '.assets[].name'` — must list the `.mcpb` file
@@ -212,6 +220,7 @@ If any check fails, halt and report which destination is unreachable. A successf
 - [ ] `bun run devcheck` passes
 - [ ] `bun run rebuild` succeeds
 - [ ] `bun run test:all` (or `test`) passes
+- [ ] `bun run test:package` passes, when the project defines it
 - [ ] Commits pushed to origin
 - [ ] Tags pushed to origin
 - [ ] `bun publish --access public` succeeds

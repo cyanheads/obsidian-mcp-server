@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against this MCP server's own repo. Use for server-specific issues — tool logic, service integrations, config problems, or domain bugs that aren't caused by the framework.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: workflow
 ---
@@ -277,7 +277,7 @@ Not sure where the bug lives? Quick checks:
 | Error in `src/mcp-server/tools/` or `src/services/` | | Yes |
 | Same bug reproduces with a bare `tool()` definition (no services) | Yes | |
 | Bug disappears when you swap in a dummy handler | | Yes |
-| `ctx.state`, `ctx.log`, `ctx.elicit` behave wrong on any tool | Yes | |
+| `ctx.state`, `ctx.log`, `ctx.inputs` behave wrong on any tool | Yes | |
 | Only one specific tool/resource is affected | | Yes |
 
 When genuinely ambiguous, file against this server's repo and note that it might be a framework issue. The maintainer can transfer it upstream.

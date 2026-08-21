@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against @cyanheads/mcp-ts-core when you hit a framework issue. Use when a builder, utility, context method, or config behaves contrary to the documented API — not for server-specific application bugs.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: workflow
 ---
@@ -15,7 +15,7 @@ You've isolated a problem to `@cyanheads/mcp-ts-core` itself — not your server
 
 - Framework builder (`tool()`, `resource()`, `prompt()`) rejects valid input or produces incorrect output
 - `createApp()` or `createWorkerHandler()` fails on a valid config
-- `Context` properties (`ctx.log`, `ctx.state`, `ctx.elicit`, etc.) behave contrary to docs
+- `Context` properties (`ctx.log`, `ctx.state`, `ctx.inputs`, etc.) behave contrary to docs
 - A utility from `/utils`, `/errors`, `/auth`, `/storage`, `/services` returns wrong results or throws unexpectedly
 - Type exports are incorrect or missing (compile error on documented usage)
 - The definition linter (`bun run lint:mcp`) produces false positives or misses real violations

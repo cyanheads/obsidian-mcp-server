@@ -4,7 +4,7 @@ description: >
   Post-session code review and cleanup against a working tree of changes. Analyzes `git diff` to simplify, consolidate, and align changed code with the existing codebase — modernize syntax, remove unnecessary complexity, consolidate duplicated logic, catch efficiency issues. Use after a substantive working session, or when asked to clean up, simplify, reduce slop, consolidate, modernize, tighten up, or de-slop code. For `@cyanheads/mcp-ts-core` projects, includes specific transformations for tool/resource/prompt definitions, the ctx pattern, error factories, and framework idioms.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: workflow
 ---
@@ -62,7 +62,7 @@ Evaluate the changes across these dimensions. Not every dimension applies to eve
 
 - **Error throwing patterns** — Prefer framework error factories (`McpError`, `validationError`, `notFound`, `httpErrorFromResponse`) over raw `throw new Error()`. Tool handlers should throw — the framework catches, classifies, and instruments.
 - **Error codes** — `InvalidParams` only for malformed JSON-RPC params shape. `ValidationError` for domain validation. `NotFound` for missing entities. Don't conflate them.
-- **Ctx usage** — Use `ctx.log`, `ctx.state`, `ctx.elicit` — don't reach for global loggers or request-scoped storage directly. The `ctx` pattern carries tenant scope and OTel context.
+- **Ctx usage** — Use `ctx.log`, `ctx.state`, `ctx.enrich` — don't reach for global loggers or request-scoped storage directly. The `ctx` pattern carries tenant scope and OTel context.
 - **Zod schemas** — Every tool input/output field needs `.describe()`. Zod 4 requires `z.record(z.string(), z.string())` not `z.record(z.string())`. Use `.optional()` rather than `.nullish()` unless null is semantically distinct from absent.
 - **Tool annotations** — `readOnlyHint`, `idempotentHint`, `openWorldHint` should reflect reality. A read-only tool with `readOnlyHint: false` gives clients the wrong picture.
 - **`exactOptionalPropertyTypes` boundaries** — If a downstream type insists on the field being present-or-not-present (not present-as-undefined), use a mapped widening type at the boundary. The pattern is documented in the framework.

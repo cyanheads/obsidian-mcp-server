@@ -31,7 +31,7 @@ Also check for stale framework references — servers migrated from `mcp-ts-temp
 Pick examples that:
 
 - Show the most common or important capability
-- Demonstrate any non-trivial patterns the server uses (e.g., `ctx.state`, `ctx.elicit`, `task: true`, services)
+- Demonstrate any non-trivial patterns the server uses (e.g., `ctx.state`, `ctx.requestInput` / `ctx.inputs`, `ctx.enrich`, services)
 - Include a handler with real business logic, not just passthrough
 
 Keep 1-2 examples per primitive type (tool, resource, prompt). Don't list every definition — the README handles that.
@@ -46,7 +46,7 @@ Compare the structure diagram against the actual directory layout. If it still r
 
 ### 4. Update the Context Table
 
-Review the `ctx` feature table. Remove rows for features the server doesn't use (e.g., `ctx.elicit` if no tools call it). Add any custom context usage that's become important. The table should reflect what this server actually uses, not the full framework surface.
+Review the `ctx` feature table. Remove rows for features the server doesn't use (e.g., `ctx.requestInput` / `ctx.inputs` if no handler collects extra input). Add any custom context usage that's become important. The table should reflect what this server actually uses, not the full framework surface.
 
 ### 5. Update Server Config Example
 

@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: audit
 ---
@@ -44,7 +44,7 @@ find src/mcp-server/prompts/definitions -name "*.prompt.ts" 2>/dev/null | sort
 find src/services -maxdepth 1 -mindepth 1 -type d | sort
 ```
 
-Note: tool / resource / prompt counts, auth mode, storage provider, upstream APIs, which tools have `destructiveHint`, which handlers use `ctx.elicit`, which services hold module-scope state, whether the server reads `roots`.
+Note: tool / resource / prompt counts, auth mode, storage provider, upstream APIs, which tools have `destructiveHint`, which handlers request a consent round via `ctx.requestInput`, which services hold module-scope state, whether the server reads `roots`.
 
 **If transport is streamable HTTP or SSE**, also capture:
 
@@ -108,25 +108,27 @@ grep -rn "auth: \[" src/mcp-server/tools/definitions/
 
 **Smell:** every tool shares the same scope string. Or: `MCP_AUTH_DISABLE_SCOPE_CHECKS=true` set without a documented compensating ACL — confirm the deployment relies on a meaningful access control layer below the framework before approving.
 
-#### Axis 3 — Destructive ops without elicit
+#### Axis 3 — Destructive ops without a consent round
 
-`ctx.elicit` moves consent off the LLM and onto the user. Destructive tools without it trust the LLM not to be tricked.
+`ctx.requestInput` moves consent off the LLM and onto the user: the handler returns an `input_required` result and only runs the side effect once it is re-entered with an accepted response. Destructive tools without that round trust the LLM not to be tricked.
 
 **Look in:** handlers with `destructiveHint: true` or side-effecting verbs in names (`delete_*`, `send_*`, `pay_*`, `publish_*`, `drop_*`).
 
 ```bash
 grep -rn "destructiveHint" src/mcp-server/tools/definitions/
-grep -rn "ctx.elicit" src/mcp-server/tools/definitions/
+grep -rn "ctx.requestInput\|ctx.inputs" src/mcp-server/tools/definitions/
 ```
 
 **Check:**
 
-- Each destructive handler calls `ctx.elicit` before the side effect?
-- Fallback when elicit is unavailable — **proceeds on the tool annotations, and says so in the tool description?** Do NOT require a refusal here: `ctx.elicit` is `undefined` on *every* Streamable HTTP request (the transport builds a fresh `McpServer` per request, so the SDK never records the client's capabilities — mcp-ts-core#312), so a refusing fallback makes the gated tools permanently unusable on the hosted transport. That is an outage, not a hardening. What IS in scope: a **declined or unparseable** elicit response must never proceed, and any doc claiming the gate protects "clients that support elicitation" must name the HTTP limitation or it overstates the control.
-- Elicit **response** validated against a Zod schema before use? The returned payload is LLM-mediated, not user-direct — "user confirmed" does not mean "user authored these exact fields."
-- Consent is scoped to the specific target (e.g., record ID rendered in the prompt), not a generic "proceed?"
+- Each destructive handler reads `ctx.inputs` for the confirmation and returns `ctx.requestInput(...)` before the side effect?
+- The confirmation **response** is validated — `ctx.inputs.accepted(key, Schema)` with a schema, not the bare overload. The SDK never re-validates a response against the schema its request advertised, and the payload is LLM-mediated: "user confirmed" does not mean "user authored these exact fields."
+- A **declined or cancelled** response is terminal — checked via `ctx.inputs.view(key)` and thrown on, never re-asked (a re-ask loops until the round budget runs out) and never treated as consent.
+- Consent is scoped to the specific target (e.g., record ID rendered in the message), not a generic "proceed?"
+- Any `requestState` carried across rounds is integrity-protected if it influences authorization, resource access, or which target gets mutated. It round-trips through the client and comes back attacker-controlled; the SDK does not sign or verify it.
+- **The weak point is answerability, not availability.** `ctx.requestInput` is present on every transport and both protocol eras — the 2025-era shim issues the real `elicitation/create` round trip, the 2026-07-28 client fulfils the embedded request directly. A client that never retries simply leaves the destructive step un-run, which fails safe. Keep `destructiveHint: true` so client-side approval flows still surface the risk, and do not accept "proceed anyway when the round is unavailable" as a fallback — there is no such state to detect.
 
-**Smell:** `destructiveHint: true` file with no `ctx.elicit?.(...)` in it. Or: `const { confirmed } = await ctx.elicit(...)` without a schema — `confirmed` could be anything.
+**Smell:** `destructiveHint: true` file with no `ctx.requestInput` in it. Or `ctx.inputs.accepted('confirm')` with no schema argument — the content could be anything. Or a handler that re-issues the same request after a `decline`.
 
 #### Axis 4 — Upstream auth shape
 
@@ -295,7 +297,7 @@ Group by severity. Each 3–5 lines.
 | Severity | Meaning |
 |:---------|:--------|
 | **critical** | Exploitable now: auth bypass, exfiltration, arbitrary code/file/network access |
-| **high** | Structural gap with clear attacker benefit even without immediate PoC (destructive op without elicit, admin scope on read tool, SSRF-capable URL input) |
+| **high** | Structural gap with clear attacker benefit even without immediate PoC (destructive op without a consent round, admin scope on read tool, SSRF-capable URL input) |
 | **medium** | Defense-in-depth gap weakening a boundary (missing per-tenant rate limit, error carries upstream response) |
 | **low** | Hardening / polish (tighter output schema, narrower error data, minor comment) |
 
@@ -314,7 +316,7 @@ Numbered, cherry-pickable.
 
 ```
 1. Add SSRF guard to `fetch_url.tool.ts` — block private IPs + non-http schemes (critical, #1)
-2. Gate `delete_record.tool.ts` behind `ctx.elicit` (high, #3)
+2. Gate `delete_record.tool.ts` behind a `ctx.requestInput` confirmation round (high, #3)
 3. Split `admin` into `record:read` + `record:write` across 4 tools (high, #4)
 4. Move `const tokenCache = new Map()` out of module scope in `auth-service.ts` (medium, #7)
 5. Cap pagination loop in `list_all_tickets` at 1000 items (medium, #9)
@@ -328,12 +330,12 @@ End with:
 ## Checklist
 
 - [ ] Scope confirmed (whole server / module / diff)
-- [ ] Map built: tools / resources / prompts, services, upstream APIs, auth mode, elicit / roots usage
+- [ ] Map built: tools / resources / prompts, services, upstream APIs, auth mode, consent-round / roots usage
 - [ ] Deployment surface reviewed (if HTTP): bind address, Origin allowlist, session ID, unauth routes, auth-spec compliance
 - [ ] `fuzzTool` started in parallel
 - [ ] Axis 1 — LLM-facing surfaces (tool / resource / prompt output + descriptions) framed and static
 - [ ] Axis 2 — scope granularity audited
-- [ ] Axis 3 — destructive ops verified to elicit, elicit response schema-validated
+- [ ] Axis 3 — destructive ops verified to gate on a `ctx.requestInput` round, the response schema-validated, decline/cancel terminal
 - [ ] Axis 4 — upstream auth + token passthrough reviewed
 - [ ] Axis 5 — input sinks (URL / path / roots / shell / proto / schema strictness / ReDoS) checked
 - [ ] Axis 6 — tenant isolation: module-scope state swept

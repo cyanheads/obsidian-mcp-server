@@ -4,7 +4,7 @@ description: >
   Catalog of reusable response- and data-shaping techniques for MCP servers built on `@cyanheads/mcp-ts-core` — overflow handling, payload shaping, retrieval patterns. Use when a tool's payload is too large, awkwardly shaped, or expensive to retrieve and you want a proven pattern instead of inventing one. Each technique has a self-contained reference under `references/`.
 metadata:
   author: cyanheads
-  version: "0.2"
+  version: "0.3"
   audience: external
   type: reference
 ---
