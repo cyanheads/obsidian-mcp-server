@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-3.2.12-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-3.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -38,7 +38,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | `obsidian_replace_in_note` | Body-wide search-replace inside a single note. Literal or regex matching with whole-word, whitespace-flexible, and case-sensitivity options; supports capture-group replacement. |
 | `obsidian_manage_frontmatter` | Atomic `get` / `set` / `delete` on a single frontmatter key. |
 | `obsidian_manage_tags` | Add, remove, or list tags. Defaults to the frontmatter `tags:` array; `location: 'inline'` or `'both'` opts into mutating the note body. |
-| `obsidian_delete_note` | Permanently delete a note. Elicits human confirmation when the client supports it. |
+| `obsidian_delete_note` | Permanently delete a note. Always asks the user to confirm first — the call is answered with a confirmation request and retried with the answer. |
 | `obsidian_open_in_ui` | Open a file in the Obsidian app UI, with `failIfMissing` and `newLeaf` toggles. |
 | `obsidian_execute_command` | Execute an Obsidian command-palette command by ID. **Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`.** |
 
@@ -134,7 +134,9 @@ Add, remove, or list tags on a note. Operates on one of two representations, def
 
 ### `obsidian_delete_note`
 
-Permanently delete a note. When the client supports `elicit`, the server requests human confirmation before issuing the `DELETE` and the prompt includes the file's byte size — destructive blast radius visible before the user confirms. Without elicitation, the `destructiveHint` annotation surfaces the operation in the host's approval flow. The output reports `previousSizeInBytes` (size at the moment of deletion) and `currentSizeInBytes: 0`.
+Permanently delete a note. The first call answers with a confirmation request rather than a deletion — the prompt includes the file's byte size, so the destructive blast radius is visible before the user confirms — and the tool is retried with the answer. Declining or cancelling fails the call with `cancelled` and issues no `DELETE`; the `destructiveHint` annotation also surfaces the operation in the host's approval flow. The output reports `previousSizeInBytes` (size at the moment of deletion) and `currentSizeInBytes: 0`.
+
+The confirmation is not optional and has no fallback path: a client that cannot serve the input round-trip cannot complete a delete. Every other tool is unaffected.
 
 ---
 
@@ -200,7 +202,7 @@ Obsidian-specific:
 - Section-aware editing across headings, block references, and frontmatter fields via `PATCH`-with-target operations
 - Tag reconciliation across both representations: frontmatter `tags:` array and inline `#tag` syntax (skipping fenced code blocks)
 - Search across up to three modes: text, JSONLogic, and (when the plugin is reachable) BM25-ranked Omnisearch — cursor-paginated per the MCP 2025-11-25 spec, with per-file match clipping in text mode
-- Optional human-in-the-loop confirmation for destructive deletes via `ctx.elicit`
+- Required human-in-the-loop confirmation for destructive deletes — a multi-round-trip `input_required` round served on both protocol revisions, with no unconfirmed path through the tool
 - Folder-scoped read/write permissions via `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` and a global `OBSIDIAN_READ_ONLY` kill switch — denies are typed `path_forbidden` with the active scope echoed back in the error data
 - Opt-in command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`) — registered only when `OBSIDIAN_ENABLE_COMMANDS=true`
 - Forgiving path resolution on `obsidian_get_note` and `obsidian_open_in_ui` — silently retries case-mismatched paths against the canonical filename, throws `Conflict` on ambiguous case matches, and enriches `NotFound` with `Did you mean: …?` suggestions when only near-matches exist. `obsidian_delete_note` is deliberately excluded — a destructive op shouldn't silently rewrite the target path.
@@ -257,6 +259,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 - [Bun v1.3.0](https://bun.sh/) or higher (or Node.js v24+).
 - The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin, **v4.0.0 through v5.x**, installed and enabled in your vault. Generate an API key in **Settings → Community Plugins → Local REST API** and copy it into `OBSIDIAN_API_KEY`. Plugin v6.0 removes the markdown-patch 1.x wire format this server pins for section-targeted writes and the document map.
 - Periodic-note targets (`target: { "type": "periodic" }`) additionally need plugin **v5.0.1 or earlier** — v5.0.2 removed the built-in `/periodic/` routes. Every other target type is unaffected.
+- An MCP client that can answer an input request (elicitation). `obsidian_delete_note` always asks for confirmation before deleting, so a client without that support can read and write notes but cannot delete one.
 - This server defaults to `http://127.0.0.1:27123` for simplicity. Enable **"Non-encrypted (HTTP) Server"** in the plugin settings to use it. To use the always-on HTTPS port instead, set `OBSIDIAN_BASE_URL=https://127.0.0.1:27124`; the plugin's self-signed cert is handled by `OBSIDIAN_VERIFY_SSL=false` (the default).
 
 ### Installation
@@ -373,7 +376,9 @@ See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rule
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Bugs, feature requests, and documentation gaps belong in an issue — see [CONTRIBUTING.md](.github/CONTRIBUTING.md) for what makes one actionable, and [CODE_OF_CONDUCT.md](.github/CODE_OF_CONDUCT.md) for how we work together. Security reports go through [SECURITY.md](.github/SECURITY.md), never a public issue.
+
+Pull requests are welcome for small, self-contained fixes. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck

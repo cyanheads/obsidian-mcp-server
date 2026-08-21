@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.3.0](changelog/3.3.x/3.3.0.md) — 2026-08-21 · ⚠️ Breaking
+
+mcp-ts-core ^0.12.3 brings the MCP SDK v2 wire surface: tool schemas advertise JSON Schema 2020-12 and declare the error envelope, tool inputs are strict at the root, and obsidian_delete_note always requires a confirmation round-trip.
+
 ## [3.2.12](changelog/3.2.x/3.2.12.md) — 2026-08-02
 
 Frontmatter rewrites keep the note body byte-for-byte, and obsidian_search_notes renders match context in full instead of clipping content[] to 240 characters

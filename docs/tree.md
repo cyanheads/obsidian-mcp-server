@@ -1,22 +1,21 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-08-02 21:38:57
+Generated on: 2026-08-21 12:19:06
 
 ```text
 obsidian-mcp-server/
-├── .agents/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
 │   ├── mcp.json
 │   └── plugin.json
-├── .gemini/
 ├── .github/
 │   ├── ISSUE_TEMPLATE/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
@@ -26,6 +25,7 @@ obsidian-mcp-server/
 │   ├── 3.0.x/
 │   ├── 3.1.x/
 │   ├── 3.2.x/
+│   ├── 3.3.x/
 │   └── template.md
 ├── docs/
 │   └── openapi.yaml

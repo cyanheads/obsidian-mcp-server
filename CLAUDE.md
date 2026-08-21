@@ -1,10 +1,10 @@
 # Agent Protocol
 
 **Server:** obsidian-mcp-server
-**Version:** 3.2.12
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.11.1`
+**Version:** 3.3.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.12.3`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/sdk` ^1.30.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
 **Zod:** ^4.4.3
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -34,7 +34,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
-- **Check `ctx.elicit`** for presence before calling — used by `obsidian_delete_note` to confirm destructive ops.
+- **Confirm destructive ops with `ctx.requestInput`.** `obsidian_delete_note` reads `ctx.inputs` first and `return ctx.requestInput(...)` when the answer is missing; the handler is re-entered with it. Never `await` user input mid-handler.
 - **All Obsidian access goes through `getObsidianService()`.** No direct `fetch()` calls to the Local REST API in tools/resources — the service centralizes auth, TLS, timeouts, and `ctx.signal` propagation.
 - **Secrets in env vars only.** `OBSIDIAN_API_KEY` is required; never hardcoded.
 - **Command-palette tools are opt-in.** `obsidian_list_commands` and `obsidian_execute_command` are callable only when `OBSIDIAN_ENABLE_COMMANDS=true` — Obsidian commands are opaque and can be destructive. When the flag is unset, the entry point wraps both with `disabledTool()` so they're absent from `tools/list` (LLM can't invoke) but visible in the operator-facing manifest with a hint to enable them.
@@ -91,7 +91,7 @@ export const obsidianListTags = tool('obsidian_list_tags', {
 });
 ```
 
-For a destructive tool with optional human-in-the-loop confirmation, see `obsidian-delete-note.tool.ts` — it uses `ctx.elicit` when present and falls back to the `destructiveHint` annotation otherwise.
+For a destructive tool with human-in-the-loop confirmation, see `obsidian-delete-note.tool.ts` — it suspends with `ctx.requestInput` for an embedded `elicitation/create` round, branches on `ctx.inputs.view()` so a declined prompt fails instead of re-asking, and carries the `destructiveHint` annotation.
 
 ### Resource — `obsidian://status`
 
@@ -176,12 +176,12 @@ Handlers receive a unified `ctx` object. Properties this server actually uses:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
-| `ctx.elicit` | Optional human-in-the-loop confirmation. **Check for presence first** — used by `obsidian_delete_note` to confirm destructive operations when the client supports elicitation. |
+| `ctx.requestInput` / `ctx.inputs` | Multi-round-trip human-in-the-loop confirmation. Always present, both protocol eras — `obsidian_delete_note` requests a confirmation round before the DELETE. `requestInput` returns `never`, so write it in return position. |
 | `ctx.signal` | `AbortSignal` propagated to the Local REST API client so per-request timeouts and client cancellations cut off in-flight HTTP. |
 | `ctx.requestId` | Unique request ID — surfaces in log lines for correlation. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio. |
 
-The framework also provides `ctx.state` and `ctx.progress`. They aren't used by this server — Obsidian is single-vault and stateless from the server's perspective, so per-tenant KV and progress streams aren't needed. See the framework `CLAUDE.md` for the full surface.
+The framework also provides `ctx.state`. It isn't used by this server — Obsidian is single-vault and stateless from the server's perspective, so per-tenant KV isn't needed. See the framework `CLAUDE.md` for the full surface.
 
 ---
 

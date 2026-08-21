@@ -1,6 +1,6 @@
 {
   "name": "obsidian-mcp-server",
-  "version": "3.2.12",
+  "version": "3.3.0",
   "description": "Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
@@ -14,7 +14,7 @@
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "obsidian-mcp-server",
-    "shortDescription": "Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP.",
+    "shortDescription": "Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP. STDIO or Streamable HTTP.",
     "longDescription": "Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP. STDIO or Streamable HTTP.",
     "developerName": "cyanheads",
     "category": "productivity",
