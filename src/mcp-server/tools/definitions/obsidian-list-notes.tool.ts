@@ -239,7 +239,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
     if (result.entries.length === 0) {
       lines.push('', '_(empty)_');
     } else {
-      lines.push('', '```');
+      lines.push('', TYPE_LEGEND, '```');
       lines.push(...renderTree(result.entries));
       lines.push('```');
     }
@@ -317,6 +317,15 @@ async function walkVault(
     }
   }
 }
+
+/**
+ * Each entry's `type` is carried symbolically by the trailing slash rather than
+ * repeated on every line — a vault listing runs to hundreds of entries, and a
+ * per-line `[file]` tag is pure redundancy in the payload a model reads. The
+ * legend states the encoding once so `type` stays recoverable from `content[]`.
+ */
+const TYPE_LEGEND =
+  'Entry `type`: a trailing `/` marks a `directory`; every other line is a `file`.';
 
 /**
  * Render entries (in DFS order) as a box-drawing tree. Builds a parent→children

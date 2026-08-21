@@ -25,7 +25,7 @@ describe('obsidian_list_notes / non-recursive (depth: 1)', () => {
 
     const out = await obsidianListNotes.handler(
       obsidianListNotes.input.parse({ depth: 1 }),
-      createMockContext(),
+      createMockContext({ errors: obsidianListNotes.errors }),
     );
     expect(out.path).toBe('');
     expect(out.appliedFilters.depth).toBe(1);
@@ -42,7 +42,7 @@ describe('obsidian_list_notes / non-recursive (depth: 1)', () => {
 
     const out = await obsidianListNotes.handler(
       obsidianListNotes.input.parse({ path: '/Projects/', depth: 1 }),
-      createMockContext(),
+      createMockContext({ errors: obsidianListNotes.errors }),
     );
     expect(out.path).toBe('/Projects/');
     expect(out.entries).toEqual([{ path: 'Projects/Plan.md', type: 'file' }]);
@@ -60,7 +60,7 @@ describe('obsidian_list_notes / recursive walk', () => {
 
     const out = await obsidianListNotes.handler(
       obsidianListNotes.input.parse({}),
-      createMockContext(),
+      createMockContext({ errors: obsidianListNotes.errors }),
     );
     expect(out.appliedFilters.depth).toBe(2);
     expect(out.entries.map((e) => e.path)).toEqual([
@@ -84,7 +84,7 @@ describe('obsidian_list_notes / recursive walk', () => {
 
     const out = await obsidianListNotes.handler(
       obsidianListNotes.input.parse({ depth: 3 }),
-      createMockContext(),
+      createMockContext({ errors: obsidianListNotes.errors }),
     );
     expect(out.appliedFilters.depth).toBe(3);
     expect(out.entries.map((e) => e.path)).toEqual([
@@ -108,7 +108,7 @@ describe('obsidian_list_notes / recursive walk', () => {
 
     const out = await obsidianListNotes.handler(
       obsidianListNotes.input.parse({ depth: 2 }),
-      createMockContext(),
+      createMockContext({ errors: obsidianListNotes.errors }),
     );
     const inner = out.entries.find((e) => e.path === 'Sub/Inner');
     expect(inner).toEqual({ path: 'Sub/Inner', type: 'directory', truncated: true });
@@ -127,7 +127,7 @@ describe('obsidian_list_notes / recursive walk', () => {
 
     const out = await obsidianListNotes.handler(
       obsidianListNotes.input.parse({ depth: 2 }),
-      createMockContext(),
+      createMockContext({ errors: obsidianListNotes.errors }),
     );
     expect(out.entries.map((e) => e.path)).toEqual(['Stable', 'Stable/ok.md', 'Vanishing']);
   });
@@ -143,7 +143,7 @@ describe('obsidian_list_notes / recursive walk', () => {
 
     const out = await obsidianListNotes.handler(
       obsidianListNotes.input.parse({ extension: 'md', depth: 2 }),
-      createMockContext(),
+      createMockContext({ errors: obsidianListNotes.errors }),
     );
     expect(out.appliedFilters.extension).toBe('.md');
     expect(out.entries.map((e) => e.path)).toEqual(['note.md', 'Sub', 'Sub/deep.md']);
@@ -163,7 +163,7 @@ describe('obsidian_list_notes / recursive walk', () => {
 
     const out = await obsidianListNotes.handler(
       obsidianListNotes.input.parse({ nameRegex: '^(Projects|Plan|Notes)', depth: 2 }),
-      createMockContext(),
+      createMockContext({ errors: obsidianListNotes.errors }),
     );
     expect(out.appliedFilters.nameRegex).toBe('^(Projects|Plan|Notes)');
     expect(out.entries.map((e) => e.path)).toEqual(['Projects', 'Projects/Plan.md', 'Notes.md']);
@@ -180,7 +180,7 @@ describe('obsidian_list_notes / caps and errors', () => {
 
     const out = await obsidianListNotes.handler(
       obsidianListNotes.input.parse({ depth: 1 }),
-      createMockContext(),
+      createMockContext({ errors: obsidianListNotes.errors }),
     );
     expect(out.entries).toHaveLength(1000);
     expect(out.totals.entries).toBe(1000);
@@ -235,6 +235,7 @@ describe('obsidian_list_notes / format()', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('6 entries');
     expect(text).toContain('depth=3');
+    expect(text).toContain('Entry `type`: a trailing `/` marks a `directory`');
     expect(text).toContain('├── Note.md');
     expect(text).toContain('├── Projects/');
     expect(text).toContain('│   ├── Plan.md');
@@ -251,8 +252,7 @@ describe('obsidian_list_notes / format()', () => {
       appliedFilters: { depth: 1 },
     });
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('Sub/');
-    expect(text).toContain('[truncated');
+    expect(text).toContain('Sub/ [truncated');
   });
 
   it('shows the entry-cap message when results are capped', () => {
