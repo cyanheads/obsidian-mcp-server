@@ -29,6 +29,22 @@ const harness = setupHarness();
 
 const omnisearchTool = buildSearchNotesTool({ omnisearchReachable: true });
 
+/**
+ * Run `fn` and hand back the error it threw, or `undefined` if it resolved.
+ * Used where an assertion needs the error *object* — checking that a key is
+ * absent from `data`, which `toMatchObject` cannot express.
+ */
+async function captureError(
+  fn: () => unknown,
+): Promise<{ code: number; data?: Record<string, unknown> } | undefined> {
+  try {
+    await fn();
+    return undefined;
+  } catch (e) {
+    return e as { code: number; data?: Record<string, unknown> };
+  }
+}
+
 describe('obsidian_search_notes / text', () => {
   it('returns text hits and applies pathPrefix client-side', async () => {
     harness
@@ -486,7 +502,12 @@ describe('obsidian_search_notes / format()', () => {
         hits: [
           {
             filename: 'A.md',
-            matches: [{ context: 'snippet', match: { start: 0, end: 1 } }],
+            matches: [
+              {
+                context: 'snippet',
+                match: { start: 0, end: 1, contextStart: 0, contextEnd: 1 },
+              },
+            ],
           },
         ],
         totalCount: 1,
@@ -519,7 +540,12 @@ describe('obsidian_search_notes / format()', () => {
         hits: [
           {
             filename: 'busy.md',
-            matches: [{ context: 'snippet', match: { start: 0, end: 1 } }],
+            matches: [
+              {
+                context: 'snippet',
+                match: { start: 0, end: 1, contextStart: 0, contextEnd: 1 },
+              },
+            ],
             truncated: true,
             totalMatches: 25,
           },
@@ -547,7 +573,7 @@ describe('obsidian_search_notes / format()', () => {
     expect(text).toContain('200 total');
   });
 
-  it('renders omnisearch hits with score, foundWords, and quoted excerpt', () => {
+  it('renders omnisearch hits with score, foundWords, match offsets, and a fenced excerpt', () => {
     const blocks = omnisearchTool.format!({
       result: {
         mode: 'omnisearch',
@@ -569,7 +595,14 @@ describe('obsidian_search_notes / format()', () => {
     expect(text).toContain('Projects/Note A.md');
     expect(text).toContain('score: 7.42');
     expect(text).toContain('`match`');
-    expect(text).toContain('> context around the match');
+    // The excerpt is vault text, so it is fenced rather than interpolated into
+    // a blockquote — a blockquote leaks its own structure and folds the next
+    // line in by lazy continuation.
+    expect(text).toContain('context around the match');
+    expect(text).not.toContain('> context around the match');
+    expect(text).toMatch(/^```text$/m);
+    // `matches[].offset` reaches the reader instead of being dropped.
+    expect(text).toContain('@ 14');
   });
 
   it('warns about omnisearch truncation when the upstream cap was hit', () => {
@@ -745,5 +778,473 @@ describe('obsidian_search_notes — path-policy post-filter', () => {
     expect(out.result.hits).toHaveLength(5);
     expect(out.result.totalCount).toBe(5);
     expect(out.result.truncated).toBe(true);
+  });
+});
+
+/**
+ * The Local REST API's `glob` / `regexp` operators take `[PATTERN, VALUE]`
+ * (`docs/openapi.yaml`, the vendored upstream spec). Guidance that shows the
+ * reverse order produces a clean, successful, empty result — there is no error
+ * for the caller to react to, so a wrong hint is worse than no hint. These pin
+ * the two in-code surfaces that document the order.
+ */
+describe('obsidian_search_notes / jsonlogic operator-order guidance', () => {
+  const logicRequiredRecovery = obsidianSearchNotes.errors!.find(
+    (e) => e.reason === 'logic_required',
+  )!.recovery;
+
+  it('gives the logic_required recovery hint a working [PATTERN, VALUE] example', () => {
+    // A `{"var": ...}` in the first slot is the inverted order the upstream
+    // silently evaluates to zero hits.
+    expect(logicRequiredRecovery).not.toMatch(/\{\s*"glob"\s*:\s*\[\s*\{\s*"var"/);
+    expect(logicRequiredRecovery).toMatch(/"glob"\s*:\s*\[\s*"/);
+    expect(logicRequiredRecovery).toMatch(/\{\s*"var"\s*:\s*"path"\s*\}\s*\]/);
+  });
+
+  it.each([
+    ['omnisearch-unreachable', buildSearchNotesTool({ omnisearchReachable: false })],
+    ['omnisearch-reachable', buildSearchNotesTool({ omnisearchReachable: true })],
+  ])('states the [PATTERN, VALUE] order in the %s mode description', (_label, built) => {
+    const modeDescription = built.input.shape.mode.description ?? '';
+    expect(modeDescription).toContain('glob');
+    expect(modeDescription).toContain('regexp');
+    expect(modeDescription).toMatch(/\[PATTERN, VALUE\]/);
+  });
+
+  it('documents a backlinks example on the `logic` field', () => {
+    const logicDescription = obsidianSearchNotes.input.shape.logic.description ?? '';
+    expect(logicDescription).toMatch(/backlink/i);
+    // The wikilink-opening pattern must sit in the PATTERN slot, with
+    // `content` as the VALUE it is tested against.
+    expect(logicDescription).toMatch(/"regexp"\s*:\s*\[\s*"/);
+    expect(logicDescription).toMatch(/\{\s*"var"\s*:\s*"content"\s*\}\s*\]/);
+  });
+});
+
+describe('obsidian_search_notes / logic_invalid', () => {
+  const declaredRecovery = obsidianSearchNotes.errors!.find(
+    (e) => e.reason === 'logic_invalid',
+  )?.recovery;
+
+  it('declares logic_invalid on the tool contract', () => {
+    expect(declaredRecovery).toBeTypeOf('string');
+  });
+
+  it('maps an upstream 400 on the jsonlogic route to reason logic_invalid', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/search/', method: 'POST' })
+      .reply(
+        400,
+        { errorCode: 40000, message: 'Invalid JsonLogic query supplied.' },
+        { headers: { 'content-type': 'application/json' } },
+      );
+
+    await expect(
+      obsidianSearchNotes.handler(
+        obsidianSearchNotes.input.parse({ mode: 'jsonlogic', logic: { bogus: [1, 2] } }),
+        createMockContext({ errors: obsidianSearchNotes.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'logic_invalid', recovery: { hint: declaredRecovery } },
+    });
+  });
+
+  it('leaves a 400 on the text-search route out of the logic_invalid branch', async () => {
+    harness
+      .current()
+      .pool.intercept({
+        path: (p) => (p as string).startsWith('/search/simple/'),
+        method: 'POST',
+      })
+      .reply(
+        400,
+        { errorCode: 40000, message: 'Bad simple-search request.' },
+        { headers: { 'content-type': 'application/json' } },
+      );
+
+    const err = await captureError(() =>
+      obsidianSearchNotes.handler(
+        obsidianSearchNotes.input.parse({ mode: 'text', query: 'x' }),
+        createMockContext({ errors: obsidianSearchNotes.errors }),
+      ),
+    );
+    expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err?.data).toBeDefined();
+    expect(Object.hasOwn(err!.data!, 'reason')).toBe(false);
+  });
+});
+
+/**
+ * Upstream reports `start`/`end` against the subject it matched, never against
+ * the `context` window it ships alongside. Two subjects exist: the note body
+ * (window = `body.slice(max(0, start - contextLength), min(len, end + contextLength))`)
+ * and, for a filename match, the note's basename returned whole. The derived
+ * `contextStart`/`contextEnd` pair must land on the matched text in both.
+ */
+describe('obsidian_search_notes / context-relative match offsets', () => {
+  const textSearch = (reply: unknown, contextLength: number, query = 'TERM') => {
+    harness
+      .current()
+      .pool.intercept({
+        path: (p) => (p as string).startsWith('/search/simple/'),
+        method: 'POST',
+      })
+      .reply(200, reply, { headers: { 'content-type': 'application/json' } });
+    return obsidianSearchNotes.handler(
+      obsidianSearchNotes.input.parse({ mode: 'text', query, contextLength }),
+      createMockContext({ errors: obsidianSearchNotes.errors }),
+    );
+  };
+
+  it.each([
+    {
+      label: 'interior body match (window full on both sides)',
+      contextLength: 10,
+      filename: 'Notes/Deep.md',
+      context: `${'A'.repeat(10)}TERM${'B'.repeat(10)}`,
+      match: { start: 500, end: 504 },
+      contextStart: 10,
+    },
+    {
+      label: 'body match near the start of the note (left side clipped)',
+      contextLength: 10,
+      filename: 'Notes/Deep.md',
+      context: `AAATERM${'B'.repeat(10)}`,
+      match: { start: 3, end: 7 },
+      contextStart: 3,
+    },
+    {
+      label: 'body match near the end of the note (right side clipped)',
+      contextLength: 10,
+      filename: 'Notes/Deep.md',
+      context: `${'A'.repeat(10)}TERMBB`,
+      match: { start: 900, end: 904 },
+      contextStart: 10,
+    },
+    {
+      /**
+       * The case `Math.min(start, contextLength)` gets wrong: the whole
+       * basename is the window, so the span sits at `start` even when `start`
+       * runs past `contextLength`.
+       */
+      label: 'filename match with start beyond contextLength',
+      contextLength: 3,
+      filename: 'Notes/Agent TERM Library.md',
+      context: 'Agent TERM Library',
+      match: { start: 6, end: 10 },
+      contextStart: 6,
+    },
+  ])('$label', async ({ contextLength, filename, context, match, contextStart }) => {
+    const out = await textSearch([{ filename, matches: [{ context, match }] }], contextLength);
+    if (out.result.mode !== 'text') throw new Error('expected text branch');
+
+    const hit = out.result.hits[0];
+    expect(hit).toBeDefined();
+    const m = hit!.matches[0];
+    expect(m).toBeDefined();
+
+    // The subject-relative pair is passed through untouched.
+    expect(m!.match.start).toBe(match.start);
+    expect(m!.match.end).toBe(match.end);
+    // The derived pair indexes `context` and lands exactly on the matched text.
+    expect(m!.match.contextStart).toBe(contextStart);
+    expect(m!.match.contextEnd).toBe(contextStart + (match.end - match.start));
+    expect(m!.context.slice(m!.match.contextStart, m!.match.contextEnd)).toBe('TERM');
+  });
+
+  it('resolves both subjects independently when one hit mixes filename and body matches', async () => {
+    const out = await textSearch(
+      [
+        {
+          filename: 'Notes/Agent TERM Library.md',
+          matches: [
+            { context: 'Agent TERM Library', match: { start: 6, end: 10 } },
+            { context: `${'A'.repeat(5)}TERM${'B'.repeat(5)}`, match: { start: 812, end: 816 } },
+          ],
+        },
+      ],
+      5,
+    );
+    if (out.result.mode !== 'text') throw new Error('expected text branch');
+    const matches = out.result.hits[0]?.matches ?? [];
+    expect(matches).toHaveLength(2);
+    expect(matches[0]!.match.contextStart).toBe(6);
+    expect(matches[1]!.match.contextStart).toBe(5);
+    for (const m of matches) {
+      expect(m.context.slice(m.match.contextStart, m.match.contextEnd)).toBe('TERM');
+    }
+  });
+
+  /**
+   * `context === basename` alone does not identify a filename match. A body
+   * window whose left edge is trimmed can coincide with the basename — a note
+   * that quotes its own name, matched so the window lands on that quote — and
+   * the filename reading then slices the wrong text. Both fixtures below are
+   * body matches that the coincidence test alone reads as filename matches.
+   */
+  it.each([
+    {
+      /** Filename reading runs past the end of `context`, slicing to ''. */
+      label: 'body window equal to the basename, span past the end of context',
+      query: 'cer',
+      contextLength: 3,
+      filename: 'Groceries.md',
+      // body 'Buy stuff\nGroceries' (len 19); 'cer' at 13; window = body.slice(10, 19).
+      context: 'Groceries',
+      match: { start: 13, end: 16 },
+      contextStart: 3,
+    },
+    {
+      /** Filename reading stays in range and slices plausible-but-wrong text. */
+      label: 'body window equal to the basename, span still inside context',
+      query: 'rt',
+      contextLength: 3,
+      filename: 'Quarterly Notes.md',
+      // body 'HDR: Quarterly Notes' (len 20); 'rt' at 8; window = body.slice(5, 20).
+      context: 'Quarterly Notes',
+      match: { start: 8, end: 10 },
+      contextStart: 3,
+    },
+  ])('$label', async ({ query, contextLength, filename, context, match, contextStart }) => {
+    const out = await textSearch(
+      [{ filename, matches: [{ context, match }] }],
+      contextLength,
+      query,
+    );
+    if (out.result.mode !== 'text') throw new Error('expected text branch');
+    const m = out.result.hits[0]?.matches[0];
+    expect(m).toBeDefined();
+    expect(m!.match.contextStart).toBe(contextStart);
+    expect(m!.context.slice(m!.match.contextStart, m!.match.contextEnd)).toBe(query);
+  });
+
+  it('describes start/end against the matched subject, not the context window', () => {
+    const matchShape = (
+      obsidianSearchNotes.output.shape.result.options[0] as unknown as {
+        shape: {
+          hits: {
+            element: {
+              shape: {
+                matches: {
+                  element: {
+                    shape: {
+                      match: {
+                        description?: string;
+                        shape: Record<string, { description?: string }>;
+                      };
+                    };
+                  };
+                };
+              };
+            };
+          };
+        };
+      }
+    ).shape.hits.element.shape.matches.element.shape.match;
+
+    // The three strings that previously all claimed a context-window origin.
+    expect(matchShape.description).not.toMatch(/within the context window/i);
+    for (const key of ['start', 'end'] as const) {
+      expect(matchShape.shape[key]!.description).not.toMatch(/in the surrounding context/i);
+    }
+    expect(matchShape.shape.contextStart!.description).toMatch(/context/i);
+    expect(matchShape.shape.contextEnd!.description).toMatch(/context/i);
+  });
+});
+
+/**
+ * `format()` splices upstream-authored text (note excerpts, Omnisearch
+ * excerpts, JSONLogic result payloads) into markdown the model reads as the
+ * tool's own output. A heading, fence, or list marker inside that text must
+ * not be able to end the quoted region and have the remainder reparsed as
+ * document structure. The excerpt is rendered whole either way — clipping it
+ * would reintroduce the content[]/structuredContent divergence fixed in #97.
+ */
+describe('obsidian_search_notes / format() cannot be broken out of by upstream text', () => {
+  const HOSTILE = [
+    '## Not a real heading',
+    '```js',
+    "console.log('escaped the block')",
+    '```',
+    '- not a real bullet',
+    '> not a real quote',
+  ].join('\n');
+
+  it('renders a text-mode context containing headings and fences verbatim and contained', () => {
+    const text = (
+      obsidianSearchNotes.format!({
+        result: {
+          mode: 'text',
+          hits: [
+            {
+              filename: 'A.md',
+              matches: [
+                {
+                  context: HOSTILE,
+                  match: { start: 469, end: 474, contextStart: 100, contextEnd: 105 },
+                },
+              ],
+            },
+          ],
+          totalCount: 1,
+        },
+      })[0] as { text: string }
+    ).text;
+
+    // Whole excerpt survives (no clipping, no lossy escaping).
+    expect(text).toContain(HOSTILE);
+    // …and is wrapped in a fence longer than the longest run inside it, so the
+    // payload's own ``` cannot terminate the block.
+    const fences = text.match(/^`{4,}/gm) ?? [];
+    expect(fences.length).toBeGreaterThanOrEqual(2);
+    // Both offset origins are legible to the reader.
+    expect(text).toContain('100');
+    expect(text).toContain('469');
+  });
+
+  it('renders an omnisearch excerpt containing markdown verbatim and contained', () => {
+    const text = (
+      omnisearchTool.format!({
+        result: {
+          mode: 'omnisearch',
+          hits: [
+            {
+              basename: 'A',
+              excerpt: HOSTILE,
+              filename: 'A.md',
+              foundWords: ['heading'],
+              matches: [{ match: 'heading', offset: 3 }],
+              score: 1,
+            },
+          ],
+          totalCount: 1,
+          truncated: false,
+        },
+      })[0] as { text: string }
+    ).text;
+
+    expect(text).toContain(HOSTILE);
+    expect((text.match(/^`{4,}/gm) ?? []).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('sizes the fence without spreading every backtick run into Math.max', () => {
+    /**
+     * Pins the fold: spreading one argument per backtick run into `Math.max`
+     * overflows the call stack once the runs pass ~1M, and `context` is
+     * upstream text whose size the caller sets with `contextLength`. The input
+     * below is pathological rather than typical — the point is that the sizing
+     * has no input-dependent cliff at all.
+     */
+    const backtickHeavy = '`x'.repeat(1_100_000);
+    const text = (
+      obsidianSearchNotes.format!({
+        result: {
+          mode: 'text',
+          hits: [
+            {
+              filename: 'A.md',
+              matches: [
+                {
+                  context: backtickHeavy,
+                  match: { start: 0, end: 1, contextStart: 0, contextEnd: 1 },
+                },
+              ],
+            },
+          ],
+          totalCount: 1,
+        },
+      })[0] as { text: string }
+    ).text;
+    expect(text).toContain(backtickHeavy);
+    // Longest run inside is 1 backtick, so the floor of 3 applies.
+    expect(text).toMatch(/^```text$/m);
+  });
+
+  it('renders a jsonlogic result whose payload contains a fence without leaking out', () => {
+    const payload = { note: '```\nbreak out\n```' };
+    const text = (
+      obsidianSearchNotes.format!({
+        result: {
+          mode: 'jsonlogic',
+          hits: [{ filename: 'A.md', result: payload }],
+          totalCount: 1,
+        },
+      })[0] as { text: string }
+    ).text;
+
+    expect(text).toContain('break out');
+    // The opening fence must out-run the ``` embedded in the payload.
+    expect(text).toMatch(/^`{4,}json$/m);
+  });
+});
+
+/**
+ * The Local REST API materializes a context window per hit before responding,
+ * so it runs out of string capacity somewhere along `contextLength × hit
+ * count` and answers HTTP 500 with a V8 `RangeError`. Untyped, that reaches
+ * the caller as a bare -32603 naming neither the parameter at fault nor the
+ * two levers that fix it.
+ */
+describe('obsidian_search_notes / context_length_too_large', () => {
+  const declaredRecovery = obsidianSearchNotes.errors!.find(
+    (e) => e.reason === 'context_length_too_large',
+  )?.recovery;
+
+  const replyWith = (status: number, body: unknown) => {
+    harness
+      .current()
+      .pool.intercept({
+        path: (p) => (p as string).startsWith('/search/simple/'),
+        method: 'POST',
+      })
+      .reply(status, body, { headers: { 'content-type': 'application/json' } });
+    return obsidianSearchNotes.handler(
+      obsidianSearchNotes.input.parse({ mode: 'text', query: 'the', contextLength: 500 }),
+      createMockContext({ errors: obsidianSearchNotes.errors }),
+    );
+  };
+
+  const RANGE_ERROR = {
+    errorCode: 50000,
+    message:
+      'Error encountered while calling Obsidian `prepareSimpleSearch` API.\nRangeError: Invalid string length',
+  };
+
+  it('declares context_length_too_large on the tool contract', () => {
+    expect(declaredRecovery).toBeTypeOf('string');
+    // Both levers must be named — lowering the window alone does not help a
+    // caller whose query is simply too broad.
+    expect(declaredRecovery).toMatch(/contextLength/);
+    expect(declaredRecovery).toMatch(/narrow|fewer|filter/i);
+  });
+
+  it('maps the upstream RangeError to a typed, recoverable validation error', async () => {
+    await expect(replyWith(500, RANGE_ERROR)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'context_length_too_large',
+        contextLength: 500,
+        recovery: { hint: declaredRecovery },
+      },
+    });
+  });
+
+  it('does not carry the raw upstream body or envelope on the replacement error', async () => {
+    const err = await captureError(() => replyWith(500, RANGE_ERROR));
+    expect(err?.data).toBeDefined();
+    expect(Object.hasOwn(err!.data!, 'body')).toBe(false);
+    expect(Object.hasOwn(err!.data!, 'upstream')).toBe(false);
+    // The message must not smuggle the upstream body back in either.
+    expect(JSON.stringify(err!.data)).not.toContain('prepareSimpleSearch');
+  });
+
+  it('leaves an unrelated upstream 500 on its existing untyped path', async () => {
+    const err = await captureError(() =>
+      replyWith(500, { errorCode: 50000, message: 'Something else broke.' }),
+    );
+    expect(err?.code).toBe(JsonRpcErrorCode.InternalError);
+    expect(err?.data?.reason).toBeUndefined();
   });
 });

@@ -37,10 +37,24 @@ const TextHitSchema = z
             context: z.string().describe('Surrounding text around the match.'),
             match: z
               .object({
-                start: z.number().describe('Match start offset in the surrounding context.'),
-                end: z.number().describe('Match end offset in the surrounding context.'),
+                start: z
+                  .number()
+                  .describe(
+                    'Match start offset within the subject upstream matched — the note body in the usual case, or the note basename (extension stripped) when the filename itself matched, in which case `context` is that basename. This is not an offset into `context`; use `contextStart` for that. Note-body values index the same string `obsidian_get_note` returns.',
+                  ),
+                end: z
+                  .number()
+                  .describe('Match end offset within the same subject `start` indexes.'),
+                contextStart: z
+                  .number()
+                  .describe(
+                    'Match start offset within `context`. `context.slice(contextStart, contextEnd)` is the matched text.',
+                  ),
+                contextEnd: z.number().describe('Match end offset within `context`.'),
               })
-              .describe('Match offsets within the context window.'),
+              .describe(
+                'Where the match sits, on two origins: `start`/`end` index the matched subject, `contextStart`/`contextEnd` index the accompanying `context` window.',
+              ),
           })
           .describe('A single match within a file.'),
       )
@@ -115,8 +129,8 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       .enum(modeEnum)
       .describe(
         omnisearchReachable
-          ? 'Which search algorithm to run. `text` matches a substring case-insensitively across filenames and note bodies, returning surrounding context windows. `jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`, plus `glob` and `regexp` operators. `omnisearch` runs a BM25-ranked query via the Omnisearch plugin — supports quoted phrases, `-exclusion`, `path:` / `ext:` filters, typo tolerance, and PDF/OCR (with Text Extractor); upstream caps results at 50.'
-          : 'Which search algorithm to run. `text` matches a substring case-insensitively across filenames and note bodies, returning surrounding context windows. `jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`, plus `glob` and `regexp` operators.',
+          ? 'Which search algorithm to run. `text` matches a substring case-insensitively across filenames and note bodies, returning surrounding context windows. `jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`, plus `glob` and `regexp` operators — both take their arguments as `[PATTERN, VALUE]`, so the pattern comes first and the `{"var": ...}` reference second. `omnisearch` runs a BM25-ranked query via the Omnisearch plugin — supports quoted phrases, `-exclusion`, `path:` / `ext:` filters, typo tolerance, and PDF/OCR (with Text Extractor); upstream caps results at 50.'
+          : 'Which search algorithm to run. `text` matches a substring case-insensitively across filenames and note bodies, returning surrounding context windows. `jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`, plus `glob` and `regexp` operators — both take their arguments as `[PATTERN, VALUE]`, so the pattern comes first and the `{"var": ...}` reference second.',
       ),
     query: z
       .string()
@@ -128,7 +142,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       .record(z.string(), z.unknown())
       .optional()
       .describe(
-        'JSONLogic tree. Required for `jsonlogic` mode; ignored in `text` and `omnisearch` modes (use `query` instead — this field must be an object, so passing a string here is rejected).',
+        'JSONLogic tree. Required for `jsonlogic` mode; ignored in `text` and `omnisearch` modes (use `query` instead — this field must be an object, so passing a string here is rejected). `glob` and `regexp` take `[PATTERN, VALUE]` — pattern first: `{"glob": ["Projects/*.md", {"var": "path"}]}`. Backlinks ("what links here") have no dedicated tool or upstream endpoint but are expressible this way: `{"regexp": ["\\\\[\\\\[Target Note(\\\\||#|\\\\]\\\\])", {"var": "content"}]}` finds every note whose body wikilinks `Target Note`, in plain, aliased, or section form. `obsidian_get_note` with `includeLinks: true` covers the outgoing direction.',
       ),
     contextLength: z
       .number()
@@ -244,11 +258,25 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
         'Pass `query` — substring for text mode, or BM25 query syntax (quoted phrases, `-exclusion`, `path:` / `ext:` filters) for omnisearch.',
     },
     {
+      reason: 'context_length_too_large',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The Local REST API exhausted its string capacity building one context window per match, so the whole text search failed.',
+      recovery:
+        'Lower `contextLength`, or narrow the query so fewer notes match. The ceiling is the product of the two, so a broad query fails at a much smaller window than a narrow one does.',
+    },
+    {
       reason: 'logic_required',
       code: JsonRpcErrorCode.ValidationError,
       when: '`logic` is missing for `jsonlogic` mode.',
       recovery:
-        'Pass a JSONLogic tree as `logic`, e.g. `{"glob": [{"var": "path"}, "Projects/*.md"]}`.',
+        'Pass a JSONLogic tree as `logic`. `glob` and `regexp` take `[PATTERN, VALUE]` — pattern first, e.g. `{"glob": ["Projects/*.md", {"var": "path"}]}`.',
+    },
+    {
+      reason: 'logic_invalid',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The Local REST API rejected the JSONLogic tree — an unrecognized operator, or an operand it could not evaluate (an uncompilable `regexp` pattern). A mis-arity operator is not rejected: it evaluates to false and the search returns zero hits.',
+      recovery:
+        'Check the operator names and arity. `glob` and `regexp` take `[PATTERN, VALUE]` — pattern first, e.g. `{"regexp": ["^Inbox/", {"var": "path"}]}`; the reverse order compiles the note field as the pattern.',
     },
     {
       reason: 'omnisearch_unreachable',
@@ -382,7 +410,10 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
             : '';
           lines.push(`### ${h.filename}${trunc}`);
           for (const m of h.matches) {
-            lines.push(`- match[${m.match.start}–${m.match.end}]: ${m.context}`);
+            lines.push(
+              `match at context[${m.match.contextStart}–${m.match.contextEnd}] · subject[${m.match.start}–${m.match.end}]`,
+            );
+            lines.push(...fenced(m.context));
           }
         }
       } else if (result.mode === 'omnisearch') {
@@ -391,15 +422,18 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
           if (h.foundWords.length > 0) {
             lines.push(`**Matched:** ${h.foundWords.map((w) => `\`${w}\``).join(', ')}`);
           }
-          if (h.excerpt) lines.push(`> ${h.excerpt.replace(/\n/g, '\n> ')}`);
+          if (h.matches.length > 0) {
+            lines.push(
+              `**Offsets:** ${h.matches.map((mm) => `\`${mm.match}\` @ ${mm.offset}`).join(', ')}`,
+            );
+          }
+          if (h.excerpt) lines.push(...fenced(h.excerpt));
         }
       } else {
         for (const h of result.hits) {
           lines.push(`### ${h.filename}`);
           lines.push(`result:`);
-          lines.push('```json');
-          lines.push(safeJsonStringify(h.result));
-          lines.push('```');
+          lines.push(...fenced(safeJsonStringify(h.result), 'json'));
         }
       }
       return [{ type: 'text', text: lines.join('\n') }];
@@ -457,6 +491,30 @@ function clipMatches<T extends { matches: unknown[] }>(
     truncated: true,
     totalMatches: hit.matches.length,
   };
+}
+
+/**
+ * Wrap upstream-authored text in a code fence long enough that nothing inside
+ * it can close the block.
+ *
+ * `content[]` is markdown the model reads as this tool's own output, and note
+ * excerpts, Omnisearch excerpts, and JSONLogic payloads are all vault text the
+ * server does not control — a heading, list marker, or fence inside one would
+ * otherwise end the quoted region and have the remainder reparsed as document
+ * structure. This is the single escaping boundary for all three: the payload
+ * is emitted byte-for-byte (clipping it would put `content[]` back out of
+ * parity with `structuredContent` — see #97) and only the delimiter around it
+ * adapts, sized past the longest backtick run in the payload.
+ */
+function fenced(body: string, lang = 'text'): string[] {
+  /**
+   * Reduced rather than spread into `Math.max` — a note that is mostly
+   * backticks yields more runs than the engine's argument limit, and arbitrary
+   * vault text is precisely what this function is for.
+   */
+  const longestRun = (body.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
+  const fence = '`'.repeat(Math.max(3, longestRun + 1));
+  return [`${fence}${lang}`, body, fence];
 }
 
 function safeJsonStringify(v: unknown): string {
