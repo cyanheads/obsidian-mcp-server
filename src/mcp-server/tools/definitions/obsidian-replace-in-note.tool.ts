@@ -1,12 +1,14 @@
 /**
  * @fileoverview obsidian_replace_in_note — string/regex search-replace inside a
  * single note. Composed read → mutate → write at the service layer; replacements
- * are applied sequentially over the evolving body.
+ * are applied sequentially over the evolving text of whichever parts of the note
+ * `scope` selects, with the frontmatter block out of scope by default.
  * @module mcp-server/tools/definitions/obsidian-replace-in-note.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { frontmatterParseError, splice } from '@/services/obsidian/frontmatter-ops.js';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { nameRegexSafetyIssue } from './_shared/regex-safety.js';
 import { TargetSchema } from './_shared/schemas.js';
@@ -45,12 +47,26 @@ const ReplacementSchema = z
   })
   .describe('A single search/replace operation.');
 
+type Replacement = z.infer<typeof ReplacementSchema>;
+
+/** One replacement's effect on a stretch of text. */
+interface Applied {
+  count: number;
+  text: string;
+}
+
 export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
   description:
-    "Search and replace inside a single note, literally or by regex. Replacements run in array order, each over the previous one's output. Use for edits that don't fit `obsidian_patch_note`'s structural targets — e.g., body-wide find-and-replace.",
+    "Search and replace inside a single note, literally or by regex. Replacements run in array order, each over the previous one's output, and cover the note body only unless `scope` says otherwise — the YAML frontmatter block is left byte-identical by default, because a prose edit that lands in a scalar can silently invalidate the whole block. Use for edits that don't fit `obsidian_patch_note`'s structural targets — e.g., body-wide find-and-replace. Prefer `obsidian_manage_frontmatter` for typed edits to a single property.",
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
+    scope: z
+      .enum(['body', 'frontmatter', 'both'])
+      .default('body')
+      .describe(
+        "Which part of the note the replacements run over. `body` leaves the YAML frontmatter block byte-identical. `frontmatter` and `both` also rewrite the YAML between the `---` fences — never the fences themselves — and re-parse it afterwards, failing the whole call and writing nothing if the result no longer parses. That check catches YAML that breaks, not YAML that still parses while meaning something else: a replacement that renames a key or strips a scalar's quotes passes it.",
+      ),
     replacements: z
       .array(ReplacementSchema)
       .min(1)
@@ -66,7 +82,15 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
         z
           .object({
             search: z.string().describe('The search term/pattern that ran.'),
-            count: z.number().describe('Number of matches replaced for this entry.'),
+            count: z
+              .number()
+              .describe('Number of matches replaced for this entry, across every scope it ran in.'),
+            bodyCount: z.number().describe('Matches replaced in the note body.'),
+            frontmatterCount: z
+              .number()
+              .describe(
+                'Matches replaced inside the YAML frontmatter block. Always 0 under the default `body` scope.',
+              ),
           })
           .describe('Counts for one replacement entry.'),
       )
@@ -102,6 +126,13 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
       when: 'A `useRegex: true` replacement supplied a `search` pattern that is well-formed but exceeds the 1024-character limit or contains nested quantifiers known to cause catastrophic backtracking against the note body.',
       recovery:
         'Avoid nested quantifiers like `(a+)+` or `(.*)*`. Use a simpler pattern, or set useRegex to false to match `search` as a literal string.',
+    },
+    {
+      reason: 'frontmatter_invalid',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A `scope` of "frontmatter" or "both" produced YAML that no longer parses as a mapping of properties. Nothing is written — the note keeps its original bytes. The check reads the rewritten YAML only, so a replacement that renames a key or changes a scalar\'s type while still parsing is not caught by it.',
+      recovery:
+        'Narrow the search so it cannot match inside the YAML, or leave scope at "body" and edit the property with obsidian_manage_frontmatter.',
     },
     {
       reason: 'note_missing',
@@ -153,12 +184,30 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
     // Delivered bytes — not note.stat.size (see ObsidianService.tryGetSize).
     const previousSizeInBytes = Buffer.byteLength(note.content, 'utf8');
 
-    let body = note.content;
-    const perReplacement: Array<{ search: string; count: number }> = [];
+    /**
+     * `note.content` is the whole file. Split it so each replacement runs only
+     * over the parts `scope` selects, and so the untouched half is re-attached
+     * from the original bytes rather than re-emitted.
+     */
+    const fm = splice(note.content);
+    const editFrontmatter = fm.hasFrontmatter && input.scope !== 'body';
+    const editBody = input.scope !== 'frontmatter';
+    let yamlText = fm.yamlText;
+    let body = fm.body;
+
+    const perReplacement: Array<{
+      bodyCount: number;
+      count: number;
+      frontmatterCount: number;
+      search: string;
+    }> = [];
     let totalReplacements = 0;
 
-    for (const r of input.replacements) {
-      let count = 0;
+    /**
+     * Compile once per replacement — the pattern guards fire before any text is
+     * touched — and return a function that can run over each in-scope stretch.
+     */
+    const compile = (r: Replacement): ((text: string) => Applied) => {
       if (r.useRegex) {
         const pattern = r.wholeWord ? `\\b(?:${r.search})\\b` : r.search;
         const safetyIssue = nameRegexSafetyIssue(pattern, REPLACE_REGEX_MAX_LENGTH);
@@ -181,36 +230,77 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
         }
         // Count separately, then apply with the string overload so $1/$2/$&
         // capture-group references in `r.replace` are honored.
-        const matches = body.match(re);
-        count = matches ? (re.global ? matches.length : 1) : 0;
-        body = body.replace(re, r.replace);
-      } else if (r.wholeWord || r.flexibleWhitespace) {
+        return (text) => {
+          const matches = text.match(re);
+          return {
+            text: text.replace(re, r.replace),
+            count: matches ? (re.global ? matches.length : 1) : 0,
+          };
+        };
+      }
+      if (r.wholeWord || r.flexibleWhitespace) {
         // Literal-with-transformations: build a regex from the escaped needle.
         // Use the callback overload so `$1`/`$&` in `r.replace` stay literal.
         let escaped = r.search.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
         if (r.flexibleWhitespace) escaped = escaped.replace(/\s+/g, '\\s+');
         if (r.wholeWord) escaped = `\\b${escaped}\\b`;
         const re = new RegExp(escaped, `${r.replaceAll ? 'g' : ''}${r.caseSensitive ? '' : 'i'}`);
-        body = body.replace(re, () => {
-          count++;
-          return r.replace;
-        });
-      } else if (r.caseSensitive) {
-        body = replaceLiteral(body, r.search, r.replace, r.replaceAll, () => {
-          count++;
-        });
-      } else {
-        body = replaceLiteralCaseInsensitive(body, r.search, r.replace, r.replaceAll, () => {
-          count++;
-        });
+        return (text) => {
+          let count = 0;
+          const next = text.replace(re, () => {
+            count++;
+            return r.replace;
+          });
+          return { text: next, count };
+        };
       }
-      perReplacement.push({ search: r.search, count });
+      const replaceEach = r.caseSensitive ? replaceLiteral : replaceLiteralCaseInsensitive;
+      return (text) => {
+        let count = 0;
+        const next = replaceEach(text, r.search, r.replace, r.replaceAll, () => {
+          count++;
+        });
+        return { text: next, count };
+      };
+    };
+
+    for (const r of input.replacements) {
+      const apply = compile(r);
+      let frontmatterCount = 0;
+      let bodyCount = 0;
+      if (editFrontmatter) {
+        const applied = apply(yamlText);
+        yamlText = applied.text;
+        frontmatterCount = applied.count;
+      }
+      // `replaceAll: false` means one substitution for the note, and the
+      // frontmatter comes first — a hit there is that one.
+      if (editBody && (r.replaceAll || frontmatterCount === 0)) {
+        const applied = apply(body);
+        body = applied.text;
+        bodyCount = applied.count;
+      }
+      const count = frontmatterCount + bodyCount;
+      perReplacement.push({ search: r.search, count, bodyCount, frontmatterCount });
       totalReplacements += count;
+    }
+
+    // Validate before the write: a broken block reaching disk costs the note its
+    // properties, and Obsidian reports nothing.
+    if (editFrontmatter && yamlText !== fm.yamlText) {
+      const problem = frontmatterParseError(yamlText);
+      if (problem) {
+        throw ctx.fail(
+          'frontmatter_invalid',
+          `Replacements left the frontmatter of ${note.path} unparseable: ${problem}`,
+          { path: note.path, ...ctx.recoveryFor('frontmatter_invalid') },
+        );
+      }
     }
 
     let currentSizeInBytes = previousSizeInBytes;
     if (totalReplacements > 0) {
-      await svc.writeNote(ctx, target, body, 'markdown');
+      await svc.writeNote(ctx, target, fm.open + yamlText + fm.close + body, 'markdown');
       currentSizeInBytes = await svc.getSize(ctx, { type: 'path', path: note.path });
     }
 
@@ -232,7 +322,9 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
       '**Per replacement**',
     ];
     for (const r of result.perReplacement) {
-      lines.push(`- \`${r.search}\` → ${r.count} match${r.count === 1 ? '' : 'es'}`);
+      lines.push(
+        `- \`${r.search}\` → ${r.count} match${r.count === 1 ? '' : 'es'} (body ${r.bodyCount}, frontmatter ${r.frontmatterCount})`,
+      );
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

@@ -56,8 +56,8 @@ describe('obsidian_replace_in_note', () => {
     expect(getBody()).toBe(after);
     expect(out.totalReplacements).toBe(3);
     expect(out.perReplacement).toEqual([
-      { search: 'Hello', count: 2 },
-      { search: 'Hi world', count: 1 },
+      { search: 'Hello', count: 2, bodyCount: 2, frontmatterCount: 0 },
+      { search: 'Hi world', count: 1, bodyCount: 1, frontmatterCount: 0 },
     ]);
     expect(out.previousSizeInBytes).toBe(Buffer.byteLength(before, 'utf8'));
     expect(out.currentSizeInBytes).toBe(Buffer.byteLength(after, 'utf8'));
@@ -234,5 +234,346 @@ describe('obsidian_replace_in_note', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'regex_unsafe' },
     });
+  });
+});
+
+const FM_NOTE = [
+  '---',
+  'title: MCP Review Scratch',
+  'status: draft',
+  'tags:',
+  '  - alpha',
+  '  - beta',
+  '---',
+  '',
+  '# MCP Review Scratch',
+  '',
+  'Body text mentioning draft.',
+  '',
+].join('\n');
+
+/** The frontmatter prefix of `FM_NOTE`, fences included — the bytes a body-scoped edit may not touch. */
+const FM_PREFIX = FM_NOTE.slice(0, FM_NOTE.indexOf('\n# MCP Review Scratch'));
+
+/** GET only — for cases that must not reach the PUT at all. */
+function stubReadOnly(content: string): () => number {
+  let puts = 0;
+  const pool = harness.current().pool;
+  pool
+    .intercept({ path: '/vault/N.md', method: 'GET' })
+    .reply(200, noteJson(content), { headers: { 'content-type': 'application/json' } });
+  pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply(() => {
+    puts++;
+    return { statusCode: 200, data: '' };
+  });
+  return () => puts;
+}
+
+describe('obsidian_replace_in_note / scope', () => {
+  it('defaults to the body and leaves the frontmatter block byte-identical', async () => {
+    const getBody = stubReplaceFlow(FM_NOTE, 0);
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: 'MCP Review Scratch', replace: 'MCP Review Scratch: v2' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe(FM_NOTE.replace('# MCP Review Scratch', '# MCP Review Scratch: v2'));
+    expect(getBody().startsWith(FM_PREFIX)).toBe(true);
+    expect(out.totalReplacements).toBe(1);
+    expect(out.perReplacement).toEqual([
+      { search: 'MCP Review Scratch', count: 1, bodyCount: 1, frontmatterCount: 0 },
+    ]);
+  });
+
+  it('does not count or rewrite a frontmatter-only match under the default scope', async () => {
+    const puts = stubReadOnly(FM_NOTE);
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: 'status: draft', replace: 'status: published' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(out.totalReplacements).toBe(0);
+    expect(puts()).toBe(0);
+  });
+
+  it('rewrites only the YAML when scope is "frontmatter"', async () => {
+    const getBody = stubReplaceFlow(FM_NOTE, 0);
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        scope: 'frontmatter',
+        replacements: [{ search: 'draft', replace: 'published' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe(FM_NOTE.replace('status: draft', 'status: published'));
+    expect(out.perReplacement).toEqual([
+      { search: 'draft', count: 1, bodyCount: 0, frontmatterCount: 1 },
+    ]);
+  });
+
+  it('counts body and frontmatter hits separately when scope is "both"', async () => {
+    const getBody = stubReplaceFlow(FM_NOTE, 0);
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        scope: 'both',
+        replacements: [{ search: 'draft', replace: 'published' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe(
+      FM_NOTE.replace('status: draft', 'status: published').replace(
+        'mentioning draft.',
+        'mentioning published.',
+      ),
+    );
+    expect(out.totalReplacements).toBe(2);
+    expect(out.perReplacement).toEqual([
+      { search: 'draft', count: 2, bodyCount: 1, frontmatterCount: 1 },
+    ]);
+  });
+
+  it('reports zero matches for scope "frontmatter" on a note that has none', async () => {
+    const puts = stubReadOnly('# Heading\n\ntitle here\n');
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        scope: 'frontmatter',
+        replacements: [{ search: 'title', replace: 'heading' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(out.totalReplacements).toBe(0);
+    expect(puts()).toBe(0);
+  });
+
+  it('leaves a frontmatter-only note with an empty body untouched under the default scope', async () => {
+    const puts = stubReadOnly('---\ntitle: a\n---\n');
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: 'title', replace: 'heading' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(out.totalReplacements).toBe(0);
+    expect(puts()).toBe(0);
+  });
+
+  it('treats a `---` rule inside the body as body text and keeps the real fence', async () => {
+    const before = '---\ntitle: a\n---\n\nIntro\n\n---\n\nOutro\n';
+    const getBody = stubReplaceFlow(before, 0);
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: '---', replace: '===' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe('---\ntitle: a\n---\n\nIntro\n\n===\n\nOutro\n');
+    expect(out.perReplacement).toEqual([
+      { search: '---', count: 1, bodyCount: 1, frontmatterCount: 0 },
+    ]);
+  });
+
+  it('treats an unterminated fence as body text', async () => {
+    const before = '---\ntitle: a\n\nNo closing fence.\n';
+    const getBody = stubReplaceFlow(before, 0);
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: 'title', replace: 'heading' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe('---\nheading: a\n\nNo closing fence.\n');
+    expect(out.perReplacement).toEqual([
+      { search: 'title', count: 1, bodyCount: 1, frontmatterCount: 0 },
+    ]);
+  });
+
+  it('preserves a CRLF frontmatter block byte-for-byte under the default scope', async () => {
+    const before = '---\r\ntitle: a\r\n---\r\n\r\nBody title here.\r\n';
+    const getBody = stubReplaceFlow(before, 0);
+
+    await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: 'title', replace: 'heading' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe('---\r\ntitle: a\r\n---\r\n\r\nBody heading here.\r\n');
+  });
+
+  it('rewrites nested YAML past the first level without disturbing its siblings', async () => {
+    const before = '---\nmeta:\n  inner:\n    deep: draft\nstatus: draft\n---\n\nBody.\n';
+    const getBody = stubReplaceFlow(before, 0);
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        scope: 'frontmatter',
+        replacements: [{ search: 'deep: draft', replace: 'deep: published' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe(
+      '---\nmeta:\n  inner:\n    deep: published\nstatus: draft\n---\n\nBody.\n',
+    );
+    expect(out.perReplacement).toEqual([
+      { search: 'deep: draft', count: 1, bodyCount: 0, frontmatterCount: 1 },
+    ]);
+  });
+});
+
+describe('obsidian_replace_in_note / frontmatter validation', () => {
+  const invalidCases: Array<[string, string, string]> = [
+    ['an unquoted colon breaking a scalar', 'MCP Review Scratch', 'MCP Review Scratch: v2'],
+    ['a rewritten list marker becoming a YAML alias', '  - ', '  * '],
+    ['a stray quote truncating a scalar', 'status: draft', 'status: "draft'],
+  ];
+
+  it.each(invalidCases)(
+    'fails closed on %s and writes nothing',
+    async (_label, search, replace) => {
+      const puts = stubReadOnly(FM_NOTE);
+
+      await expect(
+        obsidianReplaceInNote.handler(
+          obsidianReplaceInNote.input.parse({
+            target: { type: 'path', path: 'N.md' },
+            scope: 'both',
+            replacements: [{ search, replace }],
+          }),
+          createMockContext({ errors: obsidianReplaceInNote.errors }),
+        ),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'frontmatter_invalid',
+          recovery: {
+            hint: obsidianReplaceInNote.errors?.find((e) => e.reason === 'frontmatter_invalid')
+              ?.recovery,
+          },
+        },
+      });
+      expect(puts()).toBe(0);
+    },
+  );
+
+  it('does not run the check when the frontmatter is out of scope', async () => {
+    const before = '---\ntitle: a\n---\n\nRename Foo here.\n';
+    const getBody = stubReplaceFlow(before, 0);
+
+    await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: 'Foo', replace: 'Foo: bar' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe('---\ntitle: a\n---\n\nRename Foo: bar here.\n');
+  });
+
+  it('does not catch a rewrite that renames a key but still parses', async () => {
+    const getBody = stubReplaceFlow(FM_NOTE, 0);
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        scope: 'frontmatter',
+        replacements: [{ search: 'status:', replace: 'state:' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe(FM_NOTE.replace('status: draft', 'state: draft'));
+    expect(out.totalReplacements).toBe(1);
+  });
+});
+
+describe('obsidian_replace_in_note / format()', () => {
+  it('renders the per-scope counts alongside the total', () => {
+    const render = obsidianReplaceInNote.format;
+    if (!render) throw new Error('obsidian_replace_in_note declares no format()');
+    const text = render({
+      path: 'N.md',
+      totalReplacements: 3,
+      perReplacement: [{ search: 'draft', count: 3, bodyCount: 2, frontmatterCount: 1 }],
+      previousSizeInBytes: 10,
+      currentSizeInBytes: 12,
+    })
+      .map((c) => (c.type === 'text' ? c.text : ''))
+      .join('\n');
+
+    expect(text).toContain('N.md');
+    expect(text).toContain('3');
+    expect(text).toContain('body 2');
+    expect(text).toContain('frontmatter 1');
+    expect(text).toContain('10');
+    expect(text).toContain('12');
+  });
+});
+
+describe('obsidian_replace_in_note / replaceAll false across scopes', () => {
+  it('spends its single substitution on the frontmatter when both are in scope', async () => {
+    const getBody = stubReplaceFlow(FM_NOTE, 0);
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        scope: 'both',
+        replacements: [{ search: 'draft', replace: 'published', replaceAll: false }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe(FM_NOTE.replace('status: draft', 'status: published'));
+    expect(out.perReplacement).toEqual([
+      { search: 'draft', count: 1, bodyCount: 0, frontmatterCount: 1 },
+    ]);
+  });
+
+  it('falls through to the body when the frontmatter has no match', async () => {
+    const getBody = stubReplaceFlow(FM_NOTE, 0);
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        scope: 'both',
+        replacements: [{ search: 'Body text', replace: 'Prose', replaceAll: false }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe(FM_NOTE.replace('Body text', 'Prose'));
+    expect(out.perReplacement).toEqual([
+      { search: 'Body text', count: 1, bodyCount: 1, frontmatterCount: 0 },
+    ]);
   });
 });
