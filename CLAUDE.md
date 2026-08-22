@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** obsidian-mcp-server
-**Version:** 3.3.1
+**Version:** 3.4.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.12.3`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
@@ -47,7 +47,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool — `obsidian_list_tags`
 
-A small read-only tool that wraps a single upstream endpoint, normalizes the response into the output schema, and renders a markdown twin in `format()`.
+A small read-only tool that wraps a single upstream endpoint, normalizes the response into the output schema, and renders a markdown twin in `format()`. Reduced for illustration — the live definition also carries `nameRegex` / `minCount` / `limit` inputs, the count-descending sort and cap they feed, an `errors[]` contract, and an `enrichment` block.
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
@@ -66,7 +66,7 @@ export const obsidianListTags = tool('obsidian_list_tags', {
           count: z.number().describe('Usage count across the vault.'),
         }).describe('A tag with its usage count.'),
       )
-      .describe('All tags in the vault, in upstream-provided order.'),
+      .describe('Matching tags ordered by `count` descending.'),
   }),
   auth: ['tool:obsidian_list_tags:read'],
 
@@ -216,8 +216,10 @@ Services that accept `ctx` use the same resolver for parity. The Obsidian servic
 
 ```ts
 // inside obsidian-service.ts
-throw notFound(`Not found: ${display}`, data('note_missing'));
-// where data(reason) does: { path, reason, ...ctx.recoveryFor(reason), upstream? }
+throw notFound(`Not found: ${display}`, data('note_missing'), { cause });
+// where data(reason) does: { path, reason, ...ctx.recoveryFor(reason) }
+// The upstream body is never spread into `data` — it rides as `cause`, which
+// is non-enumerable and so reaches the log without reaching the client.
 ```
 
 **Fallback for ad-hoc throws** (no contract entry fits, prototype tools, service-layer code without a contract): use error factories.

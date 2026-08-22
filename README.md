@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-3.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-3.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 |:----------|:------------|
 | `obsidian_get_note` | Read a note as raw content, full structured form (content + frontmatter + tags + stat, with optional outgoing links), structural document map, or a single section. |
 | `obsidian_list_notes` | List notes and subdirectories under a vault path. Recursive walk (default depth 2, max depth 20; 1000-entry cap) with optional `extension` and `nameRegex` filters. |
-| `obsidian_list_tags` | List every tag found across the vault with usage counts, including hierarchical parents. Optional `nameRegex` post-filters the result set. |
+| `obsidian_list_tags` | List vault tags with usage counts, including hierarchical parents. Ordered by count descending and capped at `limit` (default 200, max 10000), with the withheld remainder disclosed. Optional `nameRegex` and `minCount` narrow the set first. |
 | `obsidian_list_commands` | List Obsidian command-palette commands, optionally filtered by `nameRegex` on display name. **Opt-in via `OBSIDIAN_ENABLE_COMMANDS=true`** (paired with `obsidian_execute_command`). |
 | `obsidian_search_notes` | Search the vault by text, JSONLogic, or BM25-ranked Omnisearch (when the plugin is reachable). Results paginate via opaque cursors. |
 | `obsidian_write_note` | Create a note, replace a single section in place, or — with `overwrite: true` — clobber an existing file. Refuses whole-file writes against an existing path by default. |
@@ -60,7 +60,7 @@ Pair the document-map projection with `obsidian_patch_note` to discover edit tar
 Up to three search modes selected by `mode`:
 
 - `text` — substring match with surrounding context windows. `contextLength` controls characters of context per side of each match (default 100; bump it for more context per hit). Optional `pathPrefix` filter (text mode only — passing `pathPrefix` in any other mode is rejected with `path_prefix_invalid_mode`).
-- `jsonlogic` — JSONLogic tree evaluated against `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`; custom `glob` and `regexp` operators
+- `jsonlogic` — JSONLogic tree evaluated against `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`; custom `glob` and `regexp` operators, both taking `[PATTERN, VALUE]` — pattern first, then the field reference: `{"glob": ["Projects/*.md", {"var": "path"}]}`. The reverse order compiles the note's own field as the pattern: `glob` then matches nothing, and `regexp` fails outright on whatever the field parses as. This is also how backlinks are expressed, since there is no dedicated tool or upstream endpoint for them: `{"regexp": ["\\[\\[Target Note(\\||#|\\]\\])", {"var": "content"}]}` returns every note whose body wikilinks `Target Note`.
 - `omnisearch` — BM25-ranked search via the community [Omnisearch](https://github.com/scambier/obsidian-omnisearch) plugin. Supports quoted phrases, `-exclusion`, `path:` / `ext:` filters, typo tolerance, and PDF + OCR coverage (via [Text Extractor](https://github.com/scambier/obsidian-text-extractor)). Only present in the mode enum when the plugin's HTTP server is reachable at startup; the upstream hard-caps results at 50 — narrow the query to surface more (the response carries `truncated: true` when the cap was likely hit).
 
 Results paginate via opaque cursors per the [MCP 2025-11-25 spec](https://modelcontextprotocol.io/specification/2025-11-25/utils/pagination): omit `cursor` for the first page, then pass `nextCursor` from the prior response. Every result carries `totalCount` (post-path-policy, pre-pagination); `nextCursor` is omitted on the last page. Text-mode hits are additionally clipped per file at `maxMatchesPerHit` (default 10) so a single match-heavy note can't blow the response budget — clipped hits carry `truncated: true` and `totalMatches`.
@@ -181,7 +181,7 @@ The startup banner logs the active scope so operators can verify their config at
 | Resource | `obsidian://tags` | All tags found across the vault, with usage counts. |
 | Resource | `obsidian://status` | Server reachability, auth status, plugin/Obsidian version info, and the plugin manifest. |
 
-All resource data is also reachable via tools — `obsidian_get_note` for `obsidian://vault/{+path}`, `obsidian_list_tags` for `obsidian://tags`. Resources exist for clients that prefer attaching a specific note or vault snapshot to a conversation.
+All resource data is also reachable via tools — `obsidian_get_note` for `obsidian://vault/{+path}`, `obsidian_list_tags` for `obsidian://tags`. Resources exist for clients that prefer attaching a specific note or vault snapshot to a conversation. The tag pair is not a mirror: `obsidian://tags` keeps snapshot semantics and returns the upstream payload whole and unsorted, while `obsidian_list_tags` orders by count and caps.
 
 ## Features
 

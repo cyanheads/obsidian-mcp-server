@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-08-21 12:19:06
+Generated on: 2026-08-22 15:17:11
 
 ```text
 obsidian-mcp-server/
@@ -26,6 +26,7 @@ obsidian-mcp-server/
 │   ├── 3.1.x/
 │   ├── 3.2.x/
 │   ├── 3.3.x/
+│   ├── 3.4.x/
 │   └── template.md
 ├── docs/
 │   └── openapi.yaml
@@ -182,6 +183,7 @@ obsidian-mcp-server/
 │   │   └── obsidian-vault-note.test.ts
 │   ├── services/
 │   │   ├── frontmatter-ops.test.ts
+│   │   ├── obsidian-service-error-containment.test.ts
 │   │   ├── obsidian-service-path-policy.test.ts
 │   │   ├── obsidian-service.test.ts
 │   │   ├── path-policy.test.ts
