@@ -1,6 +1,12 @@
 /**
- * @fileoverview obsidian://tags — vault tag listing with usage counts.
- * Mirrors `obsidian_list_tags` for clients that prefer attaching resources.
+ * @fileoverview obsidian://tags — vault tag listing with usage counts, for
+ * clients that prefer attaching resources.
+ *
+ * Not a mirror of `obsidian_list_tags`: this is a snapshot of the upstream
+ * `/tags/` payload, returned whole and in upstream order. The tool shapes the
+ * same payload for an LLM caller — count-descending, capped, filterable — and
+ * that shaping deliberately lives in the tool handler rather than the shared
+ * `ObsidianService.listTags` both call.
  * @module mcp-server/resources/definitions/obsidian-tags.resource
  */
 
@@ -10,7 +16,7 @@ import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 export const obsidianTags = resource('obsidian://tags', {
   name: 'obsidian-tags',
   description:
-    'All tags found in the Obsidian vault, with usage counts. Includes hierarchical parents (e.g. `work` for `work/tasks`).',
+    'All tags found in the Obsidian vault, with usage counts, in upstream order and uncapped — a full snapshot. Includes hierarchical parents (e.g. `work` for `work/tasks`). Use the `obsidian_list_tags` tool for a count-ranked, capped, filterable view.',
   mimeType: 'application/json',
   params: z.object({}),
   output: z.object({
@@ -23,7 +29,7 @@ export const obsidianTags = resource('obsidian://tags', {
           })
           .describe('A tag with its usage count.'),
       )
-      .describe('All tags in the vault.'),
+      .describe('Every tag in the vault, in upstream-provided order.'),
   }),
   auth: ['resource:obsidian-tags:read'],
 
