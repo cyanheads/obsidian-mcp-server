@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.5.0](changelog/3.5.x/3.5.0.md) — 2026-08-22 · ⚠️ Breaking
+
+obsidian_manage_tags inline removal and obsidian_replace_in_note no longer corrupt notes — whitespace collapse and frontmatter overwrite are both fixed.
+
 ## [3.4.0](changelog/3.4.x/3.4.0.md) — 2026-08-22 · ⚠️ Breaking · 🛡️ Security
 
 obsidian_list_tags now sorts by count and caps at limit by default; JSONLogic glob/regexp docs and text-search offsets are fixed; upstream error text no longer reaches clients.

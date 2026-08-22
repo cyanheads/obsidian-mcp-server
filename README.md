@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-3.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-3.5.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -35,7 +35,7 @@ Fourteen tools grouped by shape — readers fetch notes and metadata, writers cr
 | `obsidian_write_note` | Create a note, replace a single section in place, or — with `overwrite: true` — clobber an existing file. Refuses whole-file writes against an existing path by default. |
 | `obsidian_append_to_note` | Append content to a note. Without `section`, creates the file if missing. With `section`, appends to a specific heading, block, or frontmatter field (file must exist). |
 | `obsidian_patch_note` | Surgical `append` / `prepend` / `replace` against a heading, block reference, or frontmatter field. |
-| `obsidian_replace_in_note` | Body-wide search-replace inside a single note. Literal or regex matching with whole-word, whitespace-flexible, and case-sensitivity options; supports capture-group replacement. |
+| `obsidian_replace_in_note` | Search-replace inside a single note, scoped to the body by default. Literal or regex matching with whole-word, whitespace-flexible, and case-sensitivity options; supports capture-group replacement. |
 | `obsidian_manage_frontmatter` | Atomic `get` / `set` / `delete` on a single frontmatter key. |
 | `obsidian_manage_tags` | Add, remove, or list tags. Defaults to the frontmatter `tags:` array; `location: 'inline'` or `'both'` opts into mutating the note body. |
 | `obsidian_delete_note` | Permanently delete a note. Always asks the user to confirm first — the call is answered with a confirmation request and retried with the answer. |
@@ -106,7 +106,15 @@ Use `obsidian_get_note` with `format: "document-map"` to discover what targets e
 
 ### `obsidian_replace_in_note`
 
-Body-wide search-replace for edits that don't fit `obsidian_patch_note`'s structural targets. The note is fetched, replacements are applied sequentially (each sees the previous output), and the result is written back in a single `PUT`.
+Search-replace for edits that don't fit `obsidian_patch_note`'s structural targets. The note is fetched, replacements are applied sequentially (each sees the previous output), and the result is written back in a single `PUT`.
+
+`scope` selects what the replacements run over:
+
+- `body` (default) — the text after the YAML frontmatter block. The block is re-attached from the original bytes, so it comes back byte-identical.
+- `frontmatter` — only the YAML between the `---` fences. The fences themselves are never matched.
+- `both` — each replacement runs over the frontmatter and then the body; `perReplacement[]` reports `bodyCount` and `frontmatterCount` separately.
+
+With the frontmatter in scope, the rewritten YAML is re-parsed before anything is written: if it no longer parses as a mapping of properties, the call fails with `frontmatter_invalid` and the note keeps its original bytes. That check catches YAML that breaks — an unquoted `:` in a scalar, a list marker rewritten into an alias, a stray quote. It cannot catch an edit that stays well-formed while meaning something else, such as a substring collision that renames a key or a replacement that drops a scalar's quotes and changes its type. Prefer `obsidian_manage_frontmatter` for typed edits to a single property.
 
 Per-replacement options:
 
@@ -114,7 +122,7 @@ Per-replacement options:
 - `caseSensitive` — when `false`, match case-insensitively
 - `wholeWord` — wrap the pattern in `\b…\b`; works in both literal and regex modes
 - `flexibleWhitespace` — substitute any run of whitespace in `search` with `\s+`. Literal mode only — has no effect when `useRegex: true` (express it directly).
-- `replaceAll` — when `false`, only the first match is replaced
+- `replaceAll` — when `false`, only the first match is replaced. Under `scope: 'both'` that one substitution goes to the frontmatter when it matches there, and to the body otherwise.
 
 Literal mode preserves `$1` / `$&` in the replacement verbatim — only `useRegex: true` expands capture-group references.
 
@@ -129,6 +137,8 @@ Add, remove, or list tags on a note. Operates on one of two representations, def
 - `location: 'both'` — opt-in reconciliation across both representations
 
 `add` ensures the tag is present in the requested location(s); `remove` strips it; `list` ignores the input `tags` array. Inline `#tag` occurrences inside fenced code blocks are intentionally left alone.
+
+Inline mode reads and writes the note body only — a `#` inside a YAML scalar is frontmatter, so it is neither listed as an inline tag nor rewritten by a removal. Removing an inline tag takes exactly one adjacent horizontal space with it — the one before the tag, or the one after when no space precedes it; every other byte survives, including nested list indentation, four-space indented code blocks, trailing two-space hard line breaks, and table cell padding.
 
 ---
 
