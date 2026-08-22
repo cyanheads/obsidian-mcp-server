@@ -162,3 +162,90 @@ describe('obsidian_manage_tags / remove', () => {
     });
   });
 });
+
+describe('obsidian_manage_tags / remove inline — byte fidelity through the handler', () => {
+  const RICH = [
+    '---',
+    'title: Q3 #wip planning',
+    'tags:',
+    '  - keepme',
+    '---',
+    '',
+    '# Plan #wip',
+    '',
+    'Hard break here.  ',
+    'Continuation.',
+    '',
+    '- Top level',
+    '    - Nested child',
+    '',
+    '| a | b     |',
+    '| - | ----- |',
+    '| x | y     |',
+    '',
+  ].join('\n');
+
+  const EXPECTED = RICH.replace('# Plan #wip', '# Plan');
+
+  it('writes back only the removal site and reports it on both consumption surfaces', async () => {
+    let putBody = '';
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(RICH, { tags: ['keepme'] }, ['keepme', 'wip']), {
+        headers: { 'content-type': 'application/json' },
+      });
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply((opts) => {
+      putBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(EXPECTED, { tags: ['keepme'] }, ['keepme']), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const out = await obsidianManageTags.handler(
+      obsidianManageTags.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        operation: 'remove',
+        location: 'inline',
+        tags: ['wip'],
+      }),
+      createMockContext({ errors: obsidianManageTags.errors }),
+    );
+
+    expect(putBody).toBe(EXPECTED);
+    if (out.result.operation !== 'remove') throw new Error('expected remove branch');
+    expect(out.result.applied).toEqual(['wip']);
+
+    const render = obsidianManageTags.format;
+    if (!render) throw new Error('obsidian_manage_tags declares no format()');
+    const text = render(out)
+      .map((c) => (c.type === 'text' ? c.text : ''))
+      .join('\n');
+    expect(text).toContain('wip');
+    expect(text).toContain('N.md');
+  });
+
+  it('does not treat a #tag inside a frontmatter scalar as an inline tag', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(RICH, { tags: ['keepme'] }, ['keepme', 'wip']), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const out = await obsidianManageTags.handler(
+      obsidianManageTags.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        operation: 'list',
+      }),
+      createMockContext({ errors: obsidianManageTags.errors }),
+    );
+
+    if (out.result.operation !== 'list') throw new Error('expected list branch');
+    expect(out.result.tags.inline).toEqual(['wip']);
+    expect(out.result.tags.frontmatter).toEqual(['keepme']);
+  });
+});

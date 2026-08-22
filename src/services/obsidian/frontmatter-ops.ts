@@ -7,23 +7,67 @@
 
 import { type Document, isMap, parseDocument } from 'yaml';
 
-const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+const FM_RE = /^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n?)/;
 
-interface Splice {
+/** The two halves of a note: its raw frontmatter prefix and everything after it. */
+export interface Splice {
+  /** Everything after the closing fence. The whole file when `hasFrontmatter` is false. */
   body: string;
+  /** Closing fence with the newlines around it. Empty when `hasFrontmatter` is false. */
+  close: string;
   hasFrontmatter: boolean;
+  /** Opening fence and its newline. Empty when `hasFrontmatter` is false. */
+  open: string;
+  /** The frontmatter prefix verbatim — `open + yamlText + close`, and `''` when there is none. */
+  raw: string;
   /** YAML text between the `---` fences. Empty when `hasFrontmatter` is false. */
   yamlText: string;
 }
 
-function splice(content: string): Splice {
+/**
+ * Split a note into its raw frontmatter prefix and its body. `raw + body`
+ * reconstructs the input byte for byte, which is what makes this the primitive
+ * for body-scoped mutations: rebuild with the original `raw` and the frontmatter
+ * block is untouched by construction. Rebuilding through `serializeFrontmatter`
+ * would instead re-emit the YAML and can reformat scalars nobody asked to change.
+ *
+ * A file whose fence is never closed, whose `---` sits below the first line, or
+ * whose opening `---` carries trailing whitespace has no frontmatter — the whole
+ * thing is body, which is also how Obsidian reads each of those shapes.
+ */
+export function splice(content: string): Splice {
   const m = FM_RE.exec(content);
-  if (!m) return { hasFrontmatter: false, yamlText: '', body: content };
+  if (!m) {
+    return { hasFrontmatter: false, raw: '', open: '', yamlText: '', close: '', body: content };
+  }
   return {
     hasFrontmatter: true,
-    yamlText: m[1] ?? '',
+    raw: m[0],
+    open: m[1] ?? '',
+    yamlText: m[2] ?? '',
+    close: m[3] ?? '',
     body: content.slice(m[0].length),
   };
+}
+
+/**
+ * Describe why `yamlText` is not usable as a frontmatter block, or `undefined`
+ * when it is. Catches YAML that no longer parses and YAML that parses to
+ * something other than a mapping — the two states in which Obsidian reads no
+ * properties at all.
+ *
+ * It cannot catch an edit that stays well-formed while meaning something else:
+ * a renamed key, a scalar that re-parses as a different type. Those are valid
+ * YAML and pass this check.
+ */
+export function frontmatterParseError(yamlText: string): string | undefined {
+  const doc = parseDocument(yamlText);
+  const first = doc.errors[0];
+  if (first) return first.message;
+  if (doc.contents !== null && !isMap(doc.contents)) {
+    return 'Frontmatter must be a YAML mapping of properties.';
+  }
+  return;
 }
 
 /**
@@ -173,6 +217,11 @@ function normalizeTagList(value: unknown): string[] {
 const FENCED_CODE_BLOCK = /(```[\s\S]*?```|~~~[\s\S]*?~~~)/g;
 const INLINE_CODE = /(`[^`\n]+`)/g;
 
+/**
+ * Inline `#tag` syntax lives in the body. The frontmatter block is spliced off
+ * first and re-attached verbatim, so a `#` inside a YAML scalar is neither read
+ * as a tag nor rewritten by a removal.
+ */
 function mutateInlineTags(
   content: string,
   tags: string[],
@@ -180,7 +229,8 @@ function mutateInlineTags(
   applied: Set<string>,
   skipped: Set<string>,
 ): string {
-  const segments = splitProtectedSegments(content);
+  const { raw, body } = splice(content);
+  const segments = splitProtectedSegments(body);
   let updatedNonCode = false;
 
   if (operation === 'add') {
@@ -198,15 +248,22 @@ function mutateInlineTags(
       .map((t) => `#${t}`)
       .join(' ');
     if (additions.length > 0) {
+      /**
+       * The separator turns on everything that precedes the insertion point in
+       * the finished note — `raw` and every segment — not on any one of them.
+       * A note that is nothing but frontmatter has an empty body while `raw`
+       * already ends in a newline, and a note whose body ends at a closing code
+       * fence ends in a protected segment the tag must not be glued to.
+       */
+      const preceding = raw + segments.map((s) => s.text).join('');
+      const sep = preceding.endsWith('\n') ? '' : '\n';
       const trailing = segments.length > 0 ? (segments[segments.length - 1] ?? null) : null;
       if (trailing && !trailing.protected) {
-        const sep = trailing.text.endsWith('\n') ? '' : '\n';
         trailing.text = `${trailing.text}${sep}${additions}\n`;
-        updatedNonCode = true;
       } else {
-        segments.push({ protected: false, text: `\n${additions}\n` });
-        updatedNonCode = true;
+        segments.push({ protected: false, text: `${sep}${additions}\n` });
       }
+      updatedNonCode = true;
     }
   } else {
     for (const tag of tags) {
@@ -214,21 +271,55 @@ function mutateInlineTags(
       let found = false;
       for (const s of segments) {
         if (s.protected) continue;
-        if (re.test(s.text)) {
-          s.text = s.text.replace(re, (_full, leading: string) => leading);
-          // collapse double spaces left behind
-          s.text = s.text.replace(/[ \t]{2,}/g, ' ').replace(/ \n/g, '\n');
+        /**
+         * One pass is not enough: the regex consumes the space after the tag,
+         * and that space is the left boundary the next occurrence needs, so a
+         * single pass stops at the first of two same tags separated by one
+         * space. Repeat until the segment stops changing — every pass drops at
+         * least the tag itself, so this terminates.
+         */
+        for (
+          let next = s.text.replace(re, removeAt);
+          next !== s.text;
+          next = s.text.replace(re, removeAt)
+        ) {
+          s.text = next;
           found = true;
-          updatedNonCode = true;
         }
       }
-      if (found) applied.add(tag);
-      else skipped.add(tag);
+      if (found) {
+        applied.add(tag);
+        updatedNonCode = true;
+      } else {
+        skipped.add(tag);
+      }
     }
   }
 
   if (!updatedNonCode) return content;
-  return segments.map((s) => s.text).join('');
+  return raw + segments.map((s) => s.text).join('');
+}
+
+/**
+ * Close the gap a removed tag leaves without touching anything else. Exactly one
+ * adjacent horizontal space goes with the tag — the one before it when there is
+ * one, otherwise the one after — so neighbouring words neither jam together nor
+ * end up separated by a widened gap. Everything outside that span survives byte
+ * for byte: list and code-block indentation, a trailing two-space hard line
+ * break, table cell padding.
+ */
+function removeAt(
+  full: string,
+  leading: string,
+  trailing: string,
+  offset: number,
+  whole: string,
+): string {
+  if (!/^[ \t]$/.test(leading)) return leading;
+  // A space is all that marks the start of an immediately following tag —
+  // taking it would silently stop that tag being one.
+  if (trailing === '' && whole[offset + full.length] === '#') return leading;
+  return trailing;
 }
 
 interface Segment {
@@ -256,12 +347,17 @@ function splitProtectedSegments(content: string): Segment[] {
   return segments;
 }
 
+/** Captures the character before the tag and the single horizontal space after it, if any. */
 function makeInlineTagRegex(tag: string): RegExp {
   const escaped = tag.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
-  return new RegExp(`(^|[^\\w/])#${escaped}(?![\\w/-])`, 'g');
+  return new RegExp(`(^|[^\\w/])#${escaped}(?![\\w/-])([ \\t]?)`, 'g');
 }
 
-/** Read-only helpers for `obsidian_manage_tags list`. */
+/**
+ * Read-only helpers for `obsidian_manage_tags list`. Inline tags are read from
+ * the body only, matching where a removal can actually reach — a `#` inside a
+ * YAML scalar is frontmatter, not a tag.
+ */
 export function listTagsFromContent(
   content: string,
   frontmatter: Record<string, unknown>,
@@ -272,7 +368,7 @@ export function listTagsFromContent(
   const fmTags = normalizeTagList(frontmatter.tags);
   const inline: string[] = [];
   const seen = new Set<string>();
-  for (const seg of splitProtectedSegments(content)) {
+  for (const seg of splitProtectedSegments(splice(content).body)) {
     if (seg.protected) continue;
     const re = /(^|[^\w/])#([a-zA-Z][\w/-]*)/g;
     for (;;) {
