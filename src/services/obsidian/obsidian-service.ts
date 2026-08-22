@@ -9,12 +9,14 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import {
   conflict,
   forbidden,
+  JsonRpcErrorCode,
+  McpError,
   notFound,
   serviceUnavailable,
   unauthorized,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { httpStatusToErrorCode, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Agent, type Dispatcher, type RequestInit, fetch as undiciFetch } from 'undici';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import { PathPolicy } from './path-policy.js';
@@ -421,14 +423,47 @@ export class ObsidianService {
 
   // ── Search ───────────────────────────────────────────────────────────────
 
+  /**
+   * Text search. The upstream materializes one context window per matching
+   * note before it responds, so an oversized `contextLength` on a broad query
+   * exhausts V8's string capacity and comes back as an opaque 500 — caught
+   * here and re-thrown typed, the way `searchOmnisearch` re-throws its own
+   * reachability failure.
+   */
   async searchText(ctx: Context, query: string, contextLength = 100): Promise<TextSearchHit[]> {
     const params = new URLSearchParams({ query, contextLength: String(contextLength) });
-    const res = await this.#request(ctx, `/search/simple/?${params}`, { method: 'POST' });
+    let res: UndiciResponse;
+    try {
+      res = await this.#request(ctx, `/search/simple/?${params}`, { method: 'POST' });
+    } catch (err) {
+      if (!isStringCapacityOverflow(err)) throw err;
+      /**
+       * Built fresh rather than decorated: `contextLength` is the actionable
+       * fact and only this frame knows it. `cause` keeps the caught error —
+       * and through it the upstream body `#throwForStatus` attached — on the
+       * server side for the log record.
+       */
+      throw validationError(
+        `The Local REST API ran out of string capacity assembling match contexts for this search (contextLength ${contextLength}). It builds a context window for every matching note before responding, so the ceiling tracks contextLength multiplied by the number of matches rather than either alone.`,
+        {
+          reason: 'context_length_too_large',
+          contextLength,
+          ...ctx.recoveryFor('context_length_too_large'),
+        },
+        { cause: err },
+      );
+    }
     const raw = (await res.json()) as RawSimpleSearchHit[];
     // Upstream returns a constant `score` that carries no ranking signal for
     // text mode — drop it on the way out so consumers don't mistake it for
     // relevance. Omnisearch is the source of real BM25 ranking.
-    return raw.map((h) => ({ filename: h.filename, matches: h.matches }));
+    return raw.map((h) => ({
+      filename: h.filename,
+      matches: h.matches.map((m) => ({
+        context: m.context,
+        match: { ...m.match, ...contextRelativeSpan(m, h.filename, contextLength, query) },
+      })),
+    }));
   }
 
   async searchJsonLogic(
@@ -769,15 +804,49 @@ export class ObsidianService {
     });
   }
 
+  /**
+   * Classify an upstream error response and throw.
+   *
+   * **Containment invariant.** Four things leave this method on the wire and
+   * nothing else: a message authored in this file, the request path the caller
+   * supplied (`data.path`), the HTTP status (`data.status`, default branch),
+   * and the calling tool's own contract `reason` + `recovery`. The upstream's
+   * response body never crosses, in any branch, under any key.
+   *
+   * That is stricter than redaction, deliberately. The Local REST API
+   * interleaves genuine diagnostics with vault data in one string: a rejected
+   * JSONLogic tree names the note the plugin was evaluating when it gave up
+   * (`(while processing <path>)`) and, when `regexp`'s operands are reversed,
+   * quotes that note's body back as the pattern it failed to compile; 5xx
+   * bodies relay Node `fs` errors carrying the vault's absolute on-disk
+   * location. `PathPolicy` gates the success path only, so none of that is
+   * scoped to what the caller may read. The two halves cannot be separated
+   * reliably — the pattern echo is delimited by characters the note body may
+   * itself contain, so any parse that keeps "the diagnostic half" fails open
+   * on exactly the input a caller controls, and failing open is the wrong
+   * direction for a containment control. So containment wins: the upstream
+   * text is read here only to *classify*, and what the caller receives is this
+   * file's own account of the failure. A misclassification therefore costs
+   * accuracy, never containment.
+   *
+   * The body is not discarded. It rides as `cause`, which the framework's
+   * error handler walks into the log record and neither client surface
+   * serializes — `ErrorOptions` makes `cause` non-enumerable, the tool error
+   * envelope is built from `code`/`message`/`data` alone, and so is the
+   * JSON-RPC error object the SDK emits for resources.
+   *
+   * Issues #104 and #116.
+   */
   async #throwForStatus(res: UndiciResponse, path: string, ctx: Context): Promise<never> {
     const text = await this.#readBodySafe(res);
     const body = parseJsonObject(text);
     const display = displayPath(path);
-    const upstream = safeUpstream(body, text);
+    /** Classification input and log payload only — never a wire value. */
+    const upstreamMsg = typeof body?.message === 'string' ? body.message : text.trim();
+    const cause = new UpstreamErrorText(upstreamMsg);
     const data = (reason?: string) => ({
       path: display,
       ...(reason !== undefined ? { reason, ...ctx.recoveryFor(reason) } : {}),
-      ...(upstream ? { upstream } : {}),
     });
 
     switch (res.status) {
@@ -785,44 +854,70 @@ export class ObsidianService {
         throw unauthorized(
           'Obsidian Local REST API rejected the API key. Verify OBSIDIAN_API_KEY matches the value in Obsidian → Settings → Local REST API.',
           data(),
+          { cause },
         );
       case 403:
         throw forbidden(
           'Obsidian Local REST API forbids this request. Check the plugin permissions.',
           data(),
+          { cause },
         );
       case 404: {
         if (path.startsWith('/active/')) {
           throw notFound(
             'No file is currently active in Obsidian — open a file in the app first.',
             data('no_active_file'),
+            { cause },
           );
         }
         if (path.startsWith('/periodic/')) {
-          const periodMatch = /^\/periodic\/(daily|weekly|monthly|quarterly|yearly)\//.exec(path);
-          const period = periodMatch?.[1] ?? 'periodic';
           const dateMatch = /\/(\d{4})\/(\d{2})\/(\d{2})\/?$/.exec(path);
           const suffix = dateMatch ? ` for ${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : '';
           throw notFound(
-            `No ${period} note found${suffix}. Check that the Periodic Notes plugin is enabled and the note exists.`,
+            `No ${periodOf(path)} note found${suffix}. Check that the Periodic Notes plugin is enabled and the note exists.`,
             data('periodic_not_found'),
+            { cause },
           );
         }
         if (path.startsWith('/commands/')) {
           throw notFound(
             `Unknown Obsidian command: ${display}. Use \`obsidian_list_commands\` to discover valid command IDs.`,
             data('command_unknown'),
+            { cause },
           );
         }
-        throw notFound(`Not found: ${display}`, data('note_missing'));
+        throw notFound(`Not found: ${display}`, data('note_missing'), { cause });
       }
       case 405:
         throw validationError(
           `${display} cannot accept this method (often: the path is a directory, not a file).`,
           data('path_is_directory'),
+          { cause },
         );
       case 400: {
-        const upstreamMsg = body?.message ?? `Bad request to ${display}`;
+        /**
+         * A malformed JSONLogic tree is rejected by the plugin's query parser
+         * with a bare 400. Keyed on the exact route rather than the message,
+         * because the upstream wording varies with which parse stage failed
+         * and `/search/simple/` (text mode) shares the `/search/` prefix
+         * without sharing the cause.
+         *
+         * The uncompilable-`regexp` case is named separately: it is the
+         * ordinary failure of a hand-written backlink query, and it is also
+         * the one whose upstream text quotes a note body. Classifying it here
+         * keeps the diagnostic a caller needs without relaying the pattern
+         * that carries it. The `logic_invalid` contract recovery supplies the
+         * operand order, and the framework mirrors it onto both surfaces.
+         */
+        if (routeOf(path) === '/search/') {
+          throw validationError(
+            /invalid regular expression/i.test(upstreamMsg)
+              ? 'The Local REST API could not compile a `regexp` operand in the JSONLogic tree. `regexp` takes `[PATTERN, VALUE]` — with the operands reversed, the note field is compiled as the pattern.'
+              : 'The Local REST API could not evaluate the JSONLogic tree.',
+            data('logic_invalid'),
+            { cause },
+          );
+        }
         // Content-preexists is a more specific case nested inside the broader
         // "could not be applied" family — branch on it first so retries with
         // identical content surface the right reason and recovery (toggle
@@ -831,6 +926,7 @@ export class ObsidianService {
           throw validationError(
             `The supplied content already appears at the target in ${display}. Pass \`applyIfContentPreexists: true\` to force-apply, or change the content.`,
             data('content_preexists'),
+            { cause },
           );
         }
         // The Local REST API returns a "could not be applied to the target
@@ -841,6 +937,7 @@ export class ObsidianService {
           throw validationError(
             `Section target not found in ${display}. Use \`obsidian_get_note\` with \`format: "document-map"\` to list available headings, blocks, and frontmatter fields, then retry with one of those locators.`,
             data('section_target_missing'),
+            { cause },
           );
         }
         // Periodic Notes plugin returns 400 with "Specified period is not enabled"
@@ -848,27 +945,42 @@ export class ObsidianService {
         // user's plugin settings. Distinct from periodic_not_found (404) — caller
         // can enable it or fall back to an explicit path target.
         if (path.startsWith('/periodic/') && /\bnot enabled\b/i.test(upstreamMsg)) {
-          throw validationError(upstreamMsg, data('periodic_disabled'));
+          throw validationError(
+            `The ${periodOf(path)} period is not enabled in Obsidian's Periodic Notes plugin settings. Enable it there, or address the note by an explicit vault path instead.`,
+            data('periodic_disabled'),
+            { cause },
+          );
         }
-        throw validationError(upstreamMsg, data());
+        throw validationError(
+          `Obsidian Local REST API rejected the request to ${display} as malformed (HTTP 400).`,
+          data(),
+          { cause },
+        );
       }
       default: {
         /**
-         * Unhandled 4xx and all 5xx — route through the framework helper so we
-         * get the canonical status→code mapping (500/501→InternalError,
-         * 502/503→ServiceUnavailable, 504→Timeout) and Retry-After capture.
-         * Body has already been consumed above, so disable the helper's read
-         * and pass the truncated body in via `data`.
+         * Unhandled 4xx and all 5xx. `httpStatusToErrorCode` supplies the same
+         * canonical mapping `httpErrorFromResponse` would (500/501 →
+         * InternalError, 502/503 → ServiceUnavailable, 504 → Timeout) without
+         * that helper's response-derived extras: it builds its message from
+         * the upstream's reason phrase and mirrors the body onto
+         * `data.body`/`data.responseBody`, which is the #104 leak.
+         *
+         * `Retry-After` is re-attached by hand: it is a duration, never vault
+         * data, and `withRetry` reads `data.retryAfter` to pace its backoff, so
+         * dropping it with the rest would quietly change retry timing.
          */
-        const truncated = text ? (text.length > 500 ? `${text.slice(0, 500)}…` : text) : undefined;
-        throw await httpErrorFromResponse(res, {
-          service: 'Obsidian Local REST API',
-          captureBody: false,
-          data: {
+        const retryAfter = res.headers.get('retry-after');
+        throw new McpError(
+          httpStatusToErrorCode(res.status) ?? JsonRpcErrorCode.InternalError,
+          `Obsidian Local REST API returned HTTP ${res.status}.`,
+          {
             ...data(),
-            ...(truncated !== undefined ? { body: truncated } : {}),
+            status: res.status,
+            ...(retryAfter !== null ? { retryAfter } : {}),
           },
-        });
+          { cause },
+        );
       }
     }
   }
@@ -918,13 +1030,110 @@ export function encodeVaultPath(path: string): string {
 }
 
 /**
+ * Locate the match span inside the `context` window the upstream ships with it.
+ *
+ * `start`/`end` are offsets into whichever subject the plugin matched, and
+ * there are two. For a **body match** the subject is the note text and the
+ * window is `body.slice(max(0, start - contextLength), min(len, end + contextLength))`,
+ * so the span sits `min(start, contextLength)` characters into `context`. For a
+ * **filename match** the subject is the note's basename and the plugin returns
+ * that basename whole as `context`, so the span sits at `start` — which runs
+ * past `min(start, contextLength)` as soon as the name is longer than the
+ * window. A single hit's `matches[]` can carry both kinds. Verified against
+ * Local REST API v5.0.3.
+ *
+ * `context === basename` is the cheap separator, but it is not decisive: a body
+ * window whose left edge is trimmed can coincide with the basename (a note whose
+ * own name is quoted in its body, matched so the window lands on that quote),
+ * and then the two readings disagree and the filename one slices the wrong text
+ * — often past the end of `context` entirely. Where they disagree, settle it on
+ * the text rather than the coincidence: the plugin matches whole query tokens,
+ * so the correct reading reproduces one. An inconclusive check keeps the
+ * filename reading, which is what the coincidence test alone would have picked.
+ */
+function contextRelativeSpan(
+  m: { context: string; match: { start: number; end: number } },
+  filename: string,
+  contextLength: number,
+  query: string,
+): { contextStart: number; contextEnd: number } {
+  const span = m.match.end - m.match.start;
+  const bodyStart = Math.min(m.match.start, contextLength);
+  const basename = (filename.split('/').pop() ?? filename).replace(/\.[^./]+$/, '');
+
+  const at = (i: number) => ({ contextStart: i, contextEnd: i + span });
+  if (m.context !== basename || m.match.start === bodyStart) return at(bodyStart);
+
+  const reproducesToken = (i: number) => {
+    const slice = m.context.slice(i, i + span);
+    return slice.length === span && query.toLowerCase().includes(slice.toLowerCase());
+  };
+  return reproducesToken(m.match.start) || !reproducesToken(bodyStart)
+    ? at(m.match.start)
+    : at(bodyStart);
+}
+
+/**
+ * The upstream error body, carried as the `cause` of everything
+ * `#throwForStatus` throws.
+ *
+ * `cause` is the one channel that reaches the server's logs without reaching
+ * the client, which is what lets the containment invariant hold while the
+ * text stays available for debugging and for the classifiers below. The body
+ * is the `Error` message so the framework's cause-chain extractor records it.
+ */
+class UpstreamErrorText extends Error {
+  constructor(text: string) {
+    super(text);
+    this.name = 'UpstreamErrorText';
+  }
+}
+
+/**
+ * The upstream body behind an error, when `#throwForStatus` raised it. Walks
+ * the `cause` chain rather than reading one level: `withRetry` re-wraps an
+ * exhausted error, so on a retry-safe method the carrier sits a level deeper
+ * than the throw site left it.
+ */
+function upstreamTextOf(err: unknown): string | undefined {
+  let current: unknown = err;
+  for (let depth = 0; depth < 4; depth++) {
+    if (current instanceof UpstreamErrorText) return current.message;
+    if (!(current instanceof Error)) return;
+    current = current.cause;
+  }
+  return;
+}
+
+/**
+ * True for the V8 `RangeError: Invalid string length` the Local REST API
+ * surfaces (as an opaque HTTP 500) when it cannot concatenate the response.
+ * Read off the `cause` carrier: since the containment invariant on
+ * `#throwForStatus`, the upstream text appears on neither the message nor
+ * `data`, and this is the only place it survives.
+ */
+function isStringCapacityOverflow(err: unknown): boolean {
+  return /invalid string length/i.test(upstreamTextOf(err) ?? '');
+}
+
+/** The period segment of a `/periodic/…` request path, for message copy. */
+function periodOf(urlPath: string): string {
+  return /^\/periodic\/(daily|weekly|monthly|quarterly|yearly)\//.exec(urlPath)?.[1] ?? 'periodic';
+}
+
+/** The request path with its query string dropped — the route alone. */
+function routeOf(urlPath: string): string {
+  return urlPath.split('?')[0] ?? urlPath;
+}
+
+/**
  * Convert an internal URL path (e.g. `/vault/Projects/My%20Note.md`) to the
  * vault-relative form a caller would recognize. Used in error messages so the
  * user sees the same path they sent in.
  */
 function displayPath(urlPath: string): string {
   if (urlPath.startsWith('/active/')) return '(active file)';
-  const noQuery = urlPath.split('?')[0] ?? urlPath;
+  const noQuery = routeOf(urlPath);
   let decoded: string;
   try {
     decoded = decodeURIComponent(noQuery);
@@ -947,21 +1156,6 @@ function displayPath(urlPath: string): string {
     }
   }
   return decoded;
-}
-
-/**
- * Trim the upstream error body down to a safe, user-presentable shape — drops
- * `errorCode` and any other plugin-internal fields that would otherwise leak
- * into JSON-RPC `error.data`.
- */
-function safeUpstream(
-  body: UpstreamErrorBody | undefined,
-  text: string,
-): { message: string } | undefined {
-  if (body?.message) return { message: body.message };
-  const trimmed = text.trim();
-  if (trimmed) return { message: trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed };
-  return;
 }
 
 /**

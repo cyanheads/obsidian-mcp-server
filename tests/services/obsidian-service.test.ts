@@ -6,7 +6,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { encodeVaultPath, ObsidianService } from '@/services/obsidian/obsidian-service.js';
@@ -452,15 +452,20 @@ describe('ObsidianService error classification', () => {
     });
   });
 
-  it('classifies 400 as ValidationError and preserves the upstream message', async () => {
-    pool.intercept({ path: '/vault/x.md', method: 'GET' }).reply(400, { message: 'malformed' });
+  it('classifies an unrecognized 400 as ValidationError without relaying the upstream text', async () => {
+    pool
+      .intercept({ path: '/vault/x.md', method: 'GET' })
+      .reply(400, { message: 'plugin-said-gk29xb' });
 
-    await expect(service.getNoteContent(ctx, { type: 'path', path: 'x.md' })).rejects.toMatchObject(
-      {
-        code: JsonRpcErrorCode.ValidationError,
-        message: expect.stringContaining('malformed'),
-      },
-    );
+    const err = await service
+      .getNoteContent(ctx, { type: 'path', path: 'x.md' })
+      .then(() => undefined)
+      .catch((e: McpError) => e);
+
+    expect(err?.code).toBe(JsonRpcErrorCode.ValidationError);
+    // The path is the caller's own and stays; the plugin's wording does not.
+    expect(err?.message).toContain('x.md');
+    expect(err?.message).not.toContain('plugin-said-gk29xb');
   });
 
   it('classifies 400 with "could not be applied" body as section_target_missing', async () => {

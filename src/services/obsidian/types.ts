@@ -67,7 +67,13 @@ export interface TextSearchHit {
   filename: string;
   matches: Array<{
     context: string;
-    match: { start: number; end: number };
+    /**
+     * `start`/`end` are upstream's own offsets into the subject it matched —
+     * the note body, or the note basename for a filename match.
+     * `contextStart`/`contextEnd` are derived by the service and index
+     * `context` directly.
+     */
+    match: { start: number; end: number; contextStart: number; contextEnd: number };
   }>;
 }
 
