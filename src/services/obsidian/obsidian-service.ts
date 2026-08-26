@@ -130,6 +130,19 @@ const HEADING_DELIMITER = '::';
  */
 const RETRY_SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'PUT', 'DELETE']);
 
+const CSS_HEX_COLOR_TAG_RE = /^(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+
+/**
+ * Obsidian's tag tokenizer surfaces CSS color literals (`#rrggbb` / `#rrggbbaa`)
+ * from prose and code as tags. Filter only the unambiguous 6- and 8-hex form:
+ * 3-hex and pure-numeric names are deliberately NOT filtered because they collide
+ * with legitimate short tags (`ace`, `bad`, `fed`) and year tags (`2024`, `1984`).
+ */
+export function isObsidianPseudoTag(name: string): boolean {
+  const bare = name.startsWith('#') ? name.slice(1) : name;
+  return CSS_HEX_COLOR_TAG_RE.test(bare);
+}
+
 export class ObsidianService {
   readonly #config: ServerConfig;
   readonly #dispatcher: Dispatcher;
@@ -412,7 +425,7 @@ export class ObsidianService {
   async listTags(ctx: Context): Promise<ObsidianTag[]> {
     const res = await this.#request(ctx, '/tags/', { method: 'GET' });
     const body = (await res.json()) as RawTagsListing;
-    return body.tags ?? [];
+    return (body.tags ?? []).filter((tag) => !isObsidianPseudoTag(tag.name));
   }
 
   async listCommands(ctx: Context): Promise<ObsidianCommand[]> {
