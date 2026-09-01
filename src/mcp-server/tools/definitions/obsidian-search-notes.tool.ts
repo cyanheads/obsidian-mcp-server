@@ -329,14 +329,16 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
         const prefix = input.pathPrefix;
         const prefixed = prefix ? raw.filter((h) => h.filename.startsWith(prefix)) : raw;
         const allowed = policy.filterReadable(prefixed);
-        const clipped = allowed.map((h) => clipMatches(h, input.maxMatchesPerHit));
-        const page = paginate(clipped, input.cursor, ctx);
-        if (page.hits.length === 0) {
+        const page = paginate(allowed, input.cursor, ctx);
+        // Clip only this page's hits — clipping before pagination would map over
+        // every match (thousands on a large vault) just to discard all but the page.
+        const hits = page.hits.map((h) => clipMatches(h, input.maxMatchesPerHit));
+        if (hits.length === 0) {
           ctx.enrich.notice(
             `No matches for "${input.query}"${prefix ? ` under prefix "${prefix}"` : ''}. Try broader terms, a different mode, or check that the path/filter is correct.`,
           );
         }
-        return { result: { mode: 'text' as const, ...page } };
+        return { result: { mode: 'text' as const, ...page, hits } };
       }
 
       if (input.mode === 'jsonlogic') {
