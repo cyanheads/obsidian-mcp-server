@@ -1244,7 +1244,7 @@ describe('obsidian_search_notes / context_length_too_large', () => {
     const err = await captureError(() =>
       replyWith(500, { errorCode: 50000, message: 'Something else broke.' }),
     );
-    expect(err?.code).toBe(JsonRpcErrorCode.InternalError);
+    expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(err?.data?.reason).toBeUndefined();
   });
 });

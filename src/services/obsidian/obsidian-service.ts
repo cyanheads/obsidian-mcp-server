@@ -960,15 +960,21 @@ export class ObsidianService {
       default: {
         /**
          * Unhandled 4xx and all 5xx. `httpStatusToErrorCode` supplies the same
-         * canonical mapping `httpErrorFromResponse` would (500/501 →
-         * InternalError, 502/503 → ServiceUnavailable, 504 → Timeout) without
-         * that helper's response-derived extras: it builds its message from
-         * the upstream's reason phrase and mirrors the body onto
+         * canonical mapping `httpErrorFromResponse` would (the whole 5xx range
+         * except 504 → ServiceUnavailable, 504 → Timeout) without that
+         * helper's response-derived extras: it builds its message from the
+         * upstream's reason phrase and mirrors the body onto
          * `data.body`/`data.responseBody`, which is the #104 leak.
          *
-         * `Retry-After` is re-attached by hand: it is a duration, never vault
-         * data, and `withRetry` reads `data.retryAfter` to pace its backoff, so
-         * dropping it with the rest would quietly change retry timing.
+         * Two `data` fields are re-attached by hand because both steer
+         * `withRetry` and neither carries vault content:
+         *
+         * - `retryAfter` is a duration the backoff paces itself against, so
+         *   dropping it with the rest would quietly change retry timing.
+         * - `retryable: false` on a 501 is the in-band opt-out. 501 shares
+         *   ServiceUnavailable's transient code, so without the flag a method
+         *   the plugin does not implement would burn the full retry budget on
+         *   a result that cannot change.
          */
         const retryAfter = res.headers.get('retry-after');
         throw new McpError(
@@ -978,6 +984,7 @@ export class ObsidianService {
             ...data(),
             status: res.status,
             ...(retryAfter !== null ? { retryAfter } : {}),
+            ...(res.status === 501 ? { retryable: false } : {}),
           },
           { cause },
         );

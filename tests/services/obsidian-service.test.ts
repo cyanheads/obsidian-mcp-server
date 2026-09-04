@@ -488,13 +488,29 @@ describe('ObsidianService error classification', () => {
     });
   });
 
-  it('routes 500 through the framework helper as InternalError (not retried)', async () => {
-    pool.intercept({ path: '/vault/x.md', method: 'GET' }).reply(500, { message: 'kaboom' });
+  it('routes 500 through the framework helper as ServiceUnavailable', async () => {
+    // GET is retry-safe and ServiceUnavailable is transient, so the call
+    // exhausts its budget — queue one reply per attempt rather than a single
+    // intercept, which would surface a "no intercept" error instead.
+    for (let i = 0; i < 4; i++) {
+      pool.intercept({ path: '/vault/x.md', method: 'GET' }).reply(500, { message: 'kaboom' });
+    }
 
     await expect(service.getNoteContent(ctx, { type: 'path', path: 'x.md' })).rejects.toMatchObject(
       {
-        code: JsonRpcErrorCode.InternalError,
+        code: JsonRpcErrorCode.ServiceUnavailable,
         message: expect.stringContaining('Obsidian Local REST API'),
+      },
+    );
+  });
+
+  it('routes 501 as ServiceUnavailable carrying the retryable opt-out', async () => {
+    pool.intercept({ path: '/vault/x.md', method: 'GET' }).reply(501, { message: 'nope' });
+
+    await expect(service.getNoteContent(ctx, { type: 'path', path: 'x.md' })).rejects.toMatchObject(
+      {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { status: 501, retryable: false },
       },
     );
   });
@@ -1277,6 +1293,22 @@ describe('ObsidianService retry policy', () => {
       await service.deleteNote(ctx, { type: 'path', path: 'N.md' });
       expect(attempts).toBe(2);
     });
+
+    it('getNoteContent (GET): retries on 500 then succeeds', async () => {
+      let attempts = 0;
+      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
+        attempts++;
+        return { statusCode: 500, data: { message: 'kaboom' } };
+      });
+      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
+        attempts++;
+        return { statusCode: 200, data: '# hello' };
+      });
+
+      const out = await service.getNoteContent(ctx, { type: 'path', path: 'N.md' });
+      expect(out).toBe('# hello');
+      expect(attempts).toBe(2);
+    });
   });
 
   describe('non-transient errors do not retry, regardless of method', () => {
@@ -1306,16 +1338,24 @@ describe('ObsidianService retry policy', () => {
       expect(attempts).toBe(1);
     });
 
-    it('GET 500 (InternalError) is not retried', async () => {
+    /**
+     * 501 shares ServiceUnavailable's transient code, so the `retryable:
+     * false` the service attaches by hand is the only thing keeping a method
+     * the plugin does not implement out of the retry loop.
+     */
+    it('GET 501 (ServiceUnavailable, retryable: false) is not retried', async () => {
       let attempts = 0;
-      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
+      queueReplies('/vault/N.md', 'GET', 4, () => {
         attempts++;
-        return { statusCode: 500, data: { message: 'kaboom' } };
+        return { statusCode: 501, data: { message: 'not implemented' } };
       });
 
       await expect(
         service.getNoteContent(ctx, { type: 'path', path: 'N.md' }),
-      ).rejects.toMatchObject({ code: JsonRpcErrorCode.InternalError });
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { retryable: false },
+      });
       expect(attempts).toBe(1);
     });
   });
