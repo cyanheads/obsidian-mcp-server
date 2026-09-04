@@ -4,7 +4,7 @@ description: >
   Post-init orientation for an MCP server built on @cyanheads/mcp-ts-core. Use after running `@cyanheads/mcp-ts-core init` to understand the project structure, conventions, and skill sync model. Also use when onboarding to an existing project for the first time.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: workflow
 ---
@@ -130,7 +130,18 @@ Complete these one-time setup tasks:
 2. **Update dependencies to latest** — `bun update --latest`. The scaffolded `package.json` pins minimum versions from when the framework was published; updating ensures you start with the latest compatible releases.
 3. **Initialize git** — use your git tools: init the repo, stage all files, and commit with message `chore: scaffold from @cyanheads/mcp-ts-core`
 4. **Verify the substituted server name** — when `init` runs without a `[name]` argument, the package name defaults to the cwd directory name. If that's not what you want as the published server name, update `package.json`, `CLAUDE.md`/`AGENTS.md`, and `server.json` to your actual server name.
-5. **Verify the scaffold builds clean** — `bun run devcheck`. Fix any issues before starting real work.
+5. **Populate the publishing identity** — the scaffold ships identity fields empty on purpose, so the first `devcheck` run is a to-do list rather than a green light. These fail the gate until they are set:
+
+   | File | Gated fields | Gate |
+   |:--|:--|:--|
+   | `server.json` | `name` (reverse-DNS, e.g. `io.github.<owner>/<server>`), `description`, `repository.url` | `lint:mcp` |
+   | `.claude-plugin/plugin.json` | `description` | `lint:packaging` |
+   | `.codex-plugin/plugin.json` | `description`, `interface.shortDescription`, `interface.longDescription` | `lint:packaging` |
+
+   Fill the rest of the same blocks while you are in them — `package.json` `description` and `repository.url`, both plugin manifests' `author` / `homepage` / `repository`, the Codex manifest's `interface.developerName` / `category` / `websiteURL`, and `manifest.json` `description` / `author.name`. Nothing gates them, and every install surface reads them.
+
+   A server that will never be published or installed as a plugin can drop the plugin-manifest gate instead — set `"packaging": { "pluginManifests": false }` in `devcheck.config.json`.
+6. **Verify the scaffold builds clean** — `bun run devcheck`. Fix any issues before starting real work.
 
 ## Changelog Convention
 
@@ -158,6 +169,7 @@ Skip or reorder as the project calls for it. The agent protocol's "What's Next?"
 - [ ] Dependencies updated (`bun update --latest`)
 - [ ] Git repo initialized and initial commit made (`chore: scaffold from @cyanheads/mcp-ts-core`)
 - [ ] Substituted server name verified in `package.json`, agent protocol file, and `server.json`
+- [ ] Publishing identity populated (`server.json`, `package.json`, plugin manifests, `manifest.json`) — or the plugin-manifest gate opted out
 - [ ] Framework docs read (`node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` or `AGENTS.md`)
 - [ ] Unused echo definitions cleaned up (and unregistered from `src/index.ts`)
 - [ ] Skills copied to agent directory (`cp -R skills/* .claude/skills/` or equivalent)

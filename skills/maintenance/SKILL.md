@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "2.5"
+  version: "2.6"
   audience: external
   type: workflow
 ---
@@ -103,6 +103,7 @@ Procedure:
    - If missing in project `skills/`, copy the full directory
    - If present, compare `metadata.version` — replace if the package version is newer
    - If the local version is equal or newer, skip (local override)
+   - **Report every skip.** List each skipped skill with both versions in the pass output. The rule trusts a downstream stamp it cannot verify, so a stamp that ever moves backwards upstream makes the skip permanent and silent — the local copy outranks the package copy forever and no future edit reaches it. A skip you can see is a skip you can question; compare the two bodies whenever one looks unexpected.
 3. Leave skills in `skills/` that lack `metadata.audience: external` untouched — they're server-specific or sourced elsewhere, not framework-managed.
 4. **Prune framework skills deleted upstream.** A skill in `skills/` that *carries* `metadata.audience: external` but is **absent** from the package was removed upstream (e.g. `migrate-mcp-ts-template`, removed in 0.9.12) and lingers because sync was previously add/update-only. Delete it from `skills/` (and from the agent mirrors in Phase B). The `audience: external` marker is the provenance: it scopes the prune to framework-managed skills, so a server's own skills — which never carry it — are never touched. Before deleting, scan the skill for local edits worth keeping; if any exist, reconcile or surface them rather than discarding silently.
 

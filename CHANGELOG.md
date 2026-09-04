@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.5.1](changelog/3.5.x/3.5.1.md) — 2026-09-04 · ⚠️ Breaking
+
+Upstream 500/501 now classify as ServiceUnavailable instead of InternalError, so a 500 on a retry-safe call is retried automatically; MCP_SESSION_MODE is pinned to stateful so obsidian_delete_note's confirmation round-trip actually works under Docker.
+
 ## [3.5.0](changelog/3.5.x/3.5.0.md) — 2026-08-22 · ⚠️ Breaking
 
 obsidian_manage_tags inline removal and obsidian_replace_in_note no longer corrupt notes — whitespace collapse and frontmatter overwrite are both fixed.

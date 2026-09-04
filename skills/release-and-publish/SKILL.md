@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit, annotated tag) is already complete — this skill is the post-wrapup publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "1.11"
+  version: "2.13"
   audience: external
   type: workflow
 ---
@@ -188,6 +188,8 @@ docker buildx build --platform linux/amd64,linux/arm64 \
   --push .
 ```
 
+The build stage in `Dockerfile` must carry `FROM --platform=$BUILDPLATFORM` (the templates ship it). Without it the non-native leg of the multi-arch build runs under QEMU, where bun >= 1.4 aborts inside `bun run build` with a JavaScriptCore allocator assertion (`qemu: uncaught target signal 6`, exit 134) and no image publishes for either architecture. npm, the MCP Registry, and the GitHub Release have all published by this step, so the recovery is a follow-up patch release rather than a retry — check the flag before building, not after.
+
 If the project uses a non-GHCR registry or a custom image name, respect the project's convention. If push fails with a 401/403, prompt the user to authenticate (`echo $GITHUB_TOKEN | docker login ghcr.io -u <OWNER> --password-stdin`) and retry. Halt on build failure or non-auth push failure.
 
 ### 8. Report the deployed artifacts
@@ -211,6 +213,7 @@ Confirm each published artifact is actually live — don't rely on a successful 
 - **MCP Registry**: `curl -s "https://registry.modelcontextprotocol.io/v0.1/servers/<mcpName>/versions/<version>"` — must return HTTP 200 with `server.version` matching `<version>` (`mcpName` is the `name` field from `server.json`; URL-encode `/` as `%2F`). The search endpoint (`/v0.1/servers?search=`) paginates and may not include the latest version for packages with many releases — always use the direct version lookup.
 - **GitHub Release**: `gh release view v<VERSION> -R <OWNER>/<REPO> --json assets --jq '.assets[].name'` — must list the `.mcpb` file
 - **GHCR**: `docker manifest inspect ghcr.io/<OWNER>/<REPO>:<VERSION>` — must exit 0 (resolves multi-arch OCI indexes directly with the correct media types; exits non-zero when the tag is genuinely absent)
+  - The manifest check is the whole verification available on a single-arch host. Running the published image for a foreign architecture (`docker run --platform linux/amd64` on an arm64 host) is emulation and hits the same bun/QEMU assertion the build stage avoids, so a failure there says nothing about the image. Verifying a foreign-arch image by running it requires a native host of that architecture.
 
 If any check fails, halt and report which destination is unreachable. A successful `docker push` or `bun publish` exit code does not guarantee the artifact is queryable — registry propagation delays, auth scoping, and partial failures all exist.
 

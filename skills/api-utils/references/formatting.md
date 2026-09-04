@@ -21,7 +21,7 @@ import { markdown, MarkdownBuilder, diffFormatter, tableFormatter, treeFormatter
 | `keyValue` | `(key, value) -> this` | `**key:** value` |
 | `keyValuePlain` | `(key, value) -> this` | `key: value` (no bold) |
 | `list` | `(items, ordered?) -> this` | `ordered` defaults to `false`; empty arrays silently ignored |
-| `codeBlock` | `(content, language?) -> this` | Fenced block; `language` defaults to `''` |
+| `codeBlock` | `(content, language?) -> this` | Fenced block; `language` defaults to `''`. The fence outgrows the longest backtick run in `content`, so a payload the tool did not author (upstream text, a file excerpt) cannot break out of the block; content is emitted byte-for-byte |
 | `inlineCode` | `(code) -> this` | Backtick-wrapped; no trailing newline |
 | `paragraph` | `(text) -> this` | Text + `\n\n` |
 | `blockquote` | `(text) -> this` | Each line prefixed with `>` + space |

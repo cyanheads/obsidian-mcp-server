@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.20"
+  version: "2.21"
   audience: external
   type: reference
 ---
@@ -131,7 +131,7 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
 
 ### Multi-round-trip variant
 
-A handler that needs something the caller didn't supply returns `ctx.requestInput(...)` and is re-entered with the answers on `ctx.inputs`. There is no mid-handler `await` for user input, and no capability check — the surface is always present, on every transport and both protocol eras.
+A handler that needs something the caller didn't supply returns `ctx.requestInput(...)` and is re-entered with the answers on `ctx.inputs`. There is no mid-handler `await` for user input, and no capability check — the surface is always present, on every transport and both protocol eras. Whether the caller can *answer* is a separate question — a 2025-era HTTP client cannot when the server runs `MCP_SESSION_MODE=stateless` (`api-context` § `ctx.requestInput`). Treat an unanswered round as terminal, never as consent.
 
 ```typescript
 import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';

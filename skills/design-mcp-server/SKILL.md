@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.22"
+  version: "2.23"
   audience: external
   type: workflow
 ---
@@ -271,7 +271,7 @@ Tools that perform multi-step mutations (the Workflow shape) have two safety con
 
 **Confirmation-gated destructive modes, with an annotation fallback.** When a workflow's `mode` parameter switches between safe and destructive arms (`draft` vs `send`, `plan` vs `apply`), gate the destructive arm on a confirmation the handler asks for via `ctx.requestInput(...)`, so a human approves before the irreversible step fires. The handler is re-entered with the answer on `ctx.inputs`; it does not `await` mid-call.
 
-The gate is always *reachable* — `ctx.requestInput` is present on every transport and both protocol eras — but it is not always *answerable*: a client that never fulfils the `input_required` result simply doesn't retry, and the destructive step never runs. Keep `destructiveHint: true` in annotations so those clients' own approval flows still surface the risk.
+The gate is always *reachable* — `ctx.requestInput` is present on every transport and both protocol eras — but it is not always *answerable*: a client that never fulfils the `input_required` result simply doesn't retry, and the destructive step never runs. The same holds for a 2025-era HTTP client when the server runs `MCP_SESSION_MODE=stateless`, which disables the legacy round-trip shim — the gate refuses and the destructive step never fires. That is the safe outcome, but it makes the tool unusable for those clients, so weigh it before defaulting such a server to `stateless` (`api-context` § `ctx.requestInput`). Keep `destructiveHint: true` in annotations so those clients' own approval flows still surface the risk.
 
 ```ts
 annotations: { destructiveHint: true },        // client-side approval flows still see the risk

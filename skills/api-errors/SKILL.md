@@ -4,7 +4,7 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -198,6 +198,7 @@ throw serviceUnavailable('API call failed', { url }, { cause: error });
 | `internalError(msg, data?, options?)` | InternalError (-32603) |
 | `serializationError(msg, data?, options?)` | SerializationError (-32070) — JSON/XML/parser failures |
 | `databaseError(msg, data?, options?)` | DatabaseError (-32010) |
+| `requestCancelled(msg, data?, options?)` | RequestCancelled (-32011) — caller went away |
 
 `options` is `{ cause?: unknown }` — the standard ES2022 `ErrorOptions` type.
 
@@ -255,6 +256,7 @@ throw new McpError(JsonRpcErrorCode.DatabaseError, 'Connection pool exhausted', 
 | `ConfigurationError` | -32008 | Missing env var, invalid config |
 | `InitializationFailed` | -32009 | Server/component startup failure |
 | `DatabaseError` | -32010 | Storage/persistence layer failure |
+| `RequestCancelled` | -32011 | Caller abandoned the request — client disconnect, external abort signal. Framework-raised; never retried, logged at `info` |
 | `SerializationError` | -32070 | Data serialization/deserialization failed |
 | `UnknownError` | -32099 | Generic fallback when no other code fits |
 
@@ -271,11 +273,12 @@ Use factories or `McpError` directly when the code must be exact — auto-classi
 The framework applies these steps in order — first match wins:
 
 1. **`McpError` instance** — `error.code` is preserved as-is; no classification needed.
-2. **JS constructor name** — matched against a fixed table (e.g. `ZodError` → `ValidationError`, `SyntaxError` → `ValidationError`). Note: `TypeError` is intentionally excluded — runtime TypeErrors are programmer errors, not validation failures.
-3. **Provider-specific patterns** — HTTP status codes, AWS exception names, Supabase, OpenRouter. Checked before common patterns because they are more specific (e.g. `status code 429` beats the generic `rate limit` pattern).
-4. **Common message/name patterns** — broad keyword patterns covering auth, not-found, validation, etc. First match wins; order matters.
-5. **`AbortError` name** — `error.name === 'AbortError'` → `Timeout`.
-6. **Fallback** — `InternalError`.
+2. **SDK transport-closed rejection** — an `SdkError` carrying `SdkErrorCode.ConnectionClosed` → `RequestCancelled`. The SDK rejects every in-flight request when the transport closes, which is what a client disconnect looks like from inside a handler. Matched on the code, not the message: one of its wordings says "aborted" and would otherwise be caught by the generic abort pattern in step 5 and read as a `Timeout`.
+3. **JS constructor name** — matched against a fixed table (e.g. `ZodError` → `ValidationError`, `SyntaxError` → `ValidationError`). Note: `TypeError` is intentionally excluded — runtime TypeErrors are programmer errors, not validation failures.
+4. **Provider-specific patterns** — HTTP status codes, AWS exception names, Supabase, OpenRouter. Checked before common patterns because they are more specific (e.g. `status code 429` beats the generic `rate limit` pattern).
+5. **Common message/name patterns** — broad keyword patterns covering auth, not-found, validation, etc. First match wins; order matters.
+6. **`AbortError` name** — `error.name === 'AbortError'` → `Timeout`.
+7. **Fallback** — `InternalError`.
 
 ### JS Constructor Name Mappings
 
@@ -455,8 +458,7 @@ Full status table:
 | 422 | `ValidationError` |
 | 429 | `RateLimited` |
 | 405, 406, 410, 412, 415, 416, 417, 428, 431, 451, 4xx (other) | `InvalidRequest` |
-| 500, 501 | `InternalError` |
-| 502, 503, 5xx (other) | `ServiceUnavailable` |
+| 500, 501, 502, 503, 5xx (other) | `ServiceUnavailable` |
 
 Also exports `httpStatusToErrorCode(status)` for sync mapping when you don't have a Response object.
 
@@ -514,6 +516,7 @@ These codes bubble up from anywhere — services, framework utilities, the auto-
 - `Timeout` — request deadline exceeded, abort
 - `ValidationError` — schema violations, malformed input
 - `SerializationError` — JSON/XML parse failures
+- `RequestCancelled` — the caller disconnected or aborted mid-call
 
 If you *want* to declare one of these as a domain-specific failure (e.g., a tool that intentionally times out under defined conditions), put it in `errors[]` anyway — the contract still binds `ctx.fail(reason)` and the conformance lint will catch undeclared throws. The lint just doesn't *require* you to enumerate baselines.
 

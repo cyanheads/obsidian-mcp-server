@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.1"
+  version: "2.2"
   audience: external
   type: reference
 ---
@@ -325,6 +325,8 @@ Always present, on every transport and both protocol eras. A handler that needs 
 `ctx.requestInput(spec)` never returns: it throws an `InputRequiredSignal` that the tool, resource, and prompt handler factories catch and convert into the protocol's [`input_required`](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr) result. It bypasses the error classifier entirely — no span, no log, no `isError`.
 
 One code path serves both eras. A 2026-07-28 client fulfils the embedded requests and retries the call; for a 2025-era session the SDK's legacy shim fulfils the same returns by issuing real `elicitation/create` / `sampling/createMessage` / `roots/list` round trips and re-entering the handler itself.
+
+**`MCP_SESSION_MODE` decides whether that second leg exists.** Under `stateful` / `auto` the shim has the session it needs. Under `stateless` each 2025-era request is served by a fresh instance that never saw `initialize`, so its client-capability view is empty and the round trip is refused rather than attempted — fail-closed, but the handler never gets its answer. Ship `stateless` on a server whose destructive tools gate on `ctx.requestInput` and those tools become unusable for v1 HTTP clients. 2026-07-28 clients are unaffected in either mode: that revision has no server→client request channel at all, which is precisely why `input_required` exists. stdio is unaffected in either mode.
 
 ### The shape of a multi-round-trip handler
 
