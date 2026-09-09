@@ -249,3 +249,107 @@ describe('obsidian_manage_tags / remove inline — byte fidelity through the han
     expect(out.result.tags.frontmatter).toEqual(['keepme']);
   });
 });
+
+/**
+ * A heading anchor is a link, not a tag. `remove` used to rewrite the link and
+ * report the anchor as applied, leaving nothing in the file to reconstruct the
+ * target from.
+ */
+describe('obsidian_manage_tags / link spans are not inline tags', () => {
+  const LINKED = 'see [[#Overview & Notes]] here\nand [Chat #support](https://example.dev)\n';
+
+  it('reports no inline tag for a heading anchor or markdown link text', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(LINKED, { tags: ['keepme'] }, ['keepme']), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const out = await obsidianManageTags.handler(
+      obsidianManageTags.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        operation: 'list',
+      }),
+      createMockContext({ errors: obsidianManageTags.errors }),
+    );
+
+    if (out.result.operation !== 'list') throw new Error('expected list branch');
+    expect(out.result.tags.inline).toEqual([]);
+    expect(out.result.tags.all).toEqual(['keepme']);
+
+    const render = obsidianManageTags.format;
+    if (!render) throw new Error('obsidian_manage_tags declares no format()');
+    const text = render(out)
+      .map((c) => (c.type === 'text' ? c.text : ''))
+      .join('\n');
+    expect(text).toContain('*Inline (0):* _(none)_');
+    expect(text).toContain('`#keepme`');
+  });
+
+  it('skips the removal and issues no write when the only match is inside a link', async () => {
+    let putCalls = 0;
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(LINKED, { tags: ['keepme'] }, ['keepme']), {
+        headers: { 'content-type': 'application/json' },
+      });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
+      .reply(() => {
+        putCalls++;
+        return { statusCode: 200, data: '' };
+      });
+
+    const out = await obsidianManageTags.handler(
+      obsidianManageTags.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        operation: 'remove',
+        location: 'inline',
+        tags: ['Overview'],
+      }),
+      createMockContext({ errors: obsidianManageTags.errors }),
+    );
+
+    expect(putCalls).toBe(0);
+    if (out.result.operation !== 'remove') throw new Error('expected remove branch');
+    expect(out.result.applied).toEqual([]);
+    expect(out.result.skipped).toEqual(['Overview']);
+    expect(out.result.currentSizeInBytes).toBe(out.result.previousSizeInBytes);
+  });
+
+  it('still removes a real tag sitting immediately beside a link', async () => {
+    const before = '#work [[Note#Heading]] end\n';
+    const after = '[[Note#Heading]] end\n';
+    let putBody = '';
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(before, {}, ['work']), {
+        headers: { 'content-type': 'application/json' },
+      });
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply((opts) => {
+      putBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(after, {}, []), { headers: { 'content-type': 'application/json' } });
+
+    const out = await obsidianManageTags.handler(
+      obsidianManageTags.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        operation: 'remove',
+        location: 'inline',
+        tags: ['work'],
+      }),
+      createMockContext({ errors: obsidianManageTags.errors }),
+    );
+
+    expect(putBody).toBe(after);
+    if (out.result.operation !== 'remove') throw new Error('expected remove branch');
+    expect(out.result.applied).toEqual(['work']);
+  });
+});

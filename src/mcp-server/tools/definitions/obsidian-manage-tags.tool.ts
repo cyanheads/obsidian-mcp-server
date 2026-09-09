@@ -1,8 +1,8 @@
 /**
  * @fileoverview obsidian_manage_tags — add/remove/list tags across both
  * frontmatter (`tags:` array) and inline (`#tag`) syntax. The service layer
- * reconciles both representations; inline matches inside fenced code blocks
- * are left alone.
+ * reconciles both representations; inline detection skips code spans, link
+ * spans, and a hash escaped as `\#`.
  * @module mcp-server/tools/definitions/obsidian-manage-tags.tool
  */
 
@@ -21,7 +21,7 @@ const LocationSchema = z
 
 export const obsidianManageTags = tool('obsidian_manage_tags', {
   description:
-    "Add, remove, or list a note's tags. Defaults to the frontmatter `tags:` array — set `location` to `inline` or `both` to mutate the note body. `add` ensures the tag is present in the requested location(s); `remove` strips it; `both` reconciles across both representations. Inline `#tag` occurrences inside fenced code blocks are intentionally left alone, and inline-location additions append the new tag at end-of-file. `list` ignores the input `tags` array.",
+    "Add, remove, or list a note's tags. Defaults to the frontmatter `tags:` array — set `location` to `inline` or `both` to mutate the note body. `add` ensures the tag is present in the requested location(s); `remove` strips it; `both` reconciles across both representations. Inline `#tag` detection skips code spans (fenced and inline), link spans (`[[...]]`, `[text](...)`, `[text][ref]`) so a heading anchor, block anchor, or wikilink alias is never read as a tag or rewritten by a removal, and a hash escaped as `\\#`; a `#` inside an HTML comment or a math span is still counted. Inline-location additions append the new tag at end-of-file. `list` ignores the input `tags` array.",
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -116,9 +116,16 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
         'Call obsidian_open_in_ui to focus a file, or pass an explicit path target instead.',
     },
     {
+      reason: 'periodic_unsupported',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `periodic` and this vault runs Local REST API v5.0.2 or later without the companion periodic-notes extension, so the `/periodic/` routes are not served at all.',
+      recovery:
+        'Install the periodic-notes extension from https://github.com/coddingtonbear/obsidian-local-rest-api-periodic-notes, or address the note by an explicit vault path.',
+    },
+    {
       reason: 'periodic_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Target was `periodic` but no matching periodic note exists.',
+      when: 'Target was `periodic`, the `/periodic/` routes are served on this vault, and no note exists for the requested period.',
       recovery: 'Create the periodic note first or pass an explicit path target.',
     },
     {

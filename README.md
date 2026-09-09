@@ -49,7 +49,7 @@ Read a note in one of four projections, addressed by vault path, the active file
 - `format: "content"` — raw markdown body
 - `format: "full"` — content, frontmatter, tags, and file metadata; pass `includeLinks: true` to also parse outgoing wiki and markdown link references from the body (vault-internal only — external URLs are filtered)
 - `format: "document-map"` — catalog of headings, block references, and frontmatter fields
-- `format: "section"` — single heading/block/frontmatter section value (requires `section`); heading sections include the full subtree under that heading
+- `format: "section"` — single heading/block/frontmatter section value (requires `section`); heading sections include the full subtree under that heading. The response echoes the locator the read resolved to in `sectionTarget` as a full `Parent::Child` path, and when a bare leaf name matches several headings it lists every colliding path in `candidates` — the read still returns the first match
 
 Pair the document-map projection with `obsidian_patch_note` to discover edit targets before patching.
 
@@ -136,7 +136,9 @@ Add, remove, or list tags on a note. Operates on one of two representations, def
 - `location: 'inline'` — only inline `#tag` syntax in the body; `add` appends `#tag` at end-of-file
 - `location: 'both'` — opt-in reconciliation across both representations
 
-`add` ensures the tag is present in the requested location(s); `remove` strips it; `list` ignores the input `tags` array. Inline `#tag` occurrences inside fenced code blocks are intentionally left alone.
+`add` ensures the tag is present in the requested location(s); `remove` strips it; `list` ignores the input `tags` array.
+
+Inline `#tag` detection skips code spans (fenced and inline), link spans (`[[...]]`, `[text](...)`, `[text][ref]`) — so a heading anchor, block anchor, or wikilink alias is never read as a tag or rewritten by a removal — and a hash escaped as `\#`. A `#` inside an HTML comment or a math span is still counted. `list` and `remove` run the same detection, so what `list` reports is what `remove` can reach.
 
 Inline mode reads and writes the note body only — a `#` inside a YAML scalar is frontmatter, so it is neither listed as an inline tag nor rewritten by a removal. Removing an inline tag takes exactly one adjacent horizontal space with it — the one before the tag, or the one after when no space precedes it; every other byte survives, including nested list indentation, four-space indented code blocks, trailing two-space hard line breaks, and table cell padding.
 
@@ -210,7 +212,7 @@ Obsidian-specific:
 
 - Wraps the [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin — typed client, deterministic error mapping
 - Section-aware editing across headings, block references, and frontmatter fields via `PATCH`-with-target operations
-- Tag reconciliation across both representations: frontmatter `tags:` array and inline `#tag` syntax (skipping fenced code blocks)
+- Tag reconciliation across both representations: frontmatter `tags:` array and inline `#tag` syntax (skipping code spans, link spans, and hashes escaped as `\#`)
 - Search across up to three modes: text, JSONLogic, and (when the plugin is reachable) BM25-ranked Omnisearch — cursor-paginated per the MCP 2025-11-25 spec, with per-file match clipping in text mode
 - Required human-in-the-loop confirmation for destructive deletes — a multi-round-trip `input_required` round served on both protocol revisions, with no unconfirmed path through the tool
 - Folder-scoped read/write permissions via `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` and a global `OBSIDIAN_READ_ONLY` kill switch — denies are typed `path_forbidden` with the active scope echoed back in the error data
@@ -268,7 +270,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 
 - [Bun v1.3.0](https://bun.sh/) or higher (or Node.js v24+).
 - The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin, **v4.0.0 through v5.x**, installed and enabled in your vault. Generate an API key in **Settings → Community Plugins → Local REST API** and copy it into `OBSIDIAN_API_KEY`. Plugin v6.0 removes the markdown-patch 1.x wire format this server pins for section-targeted writes and the document map.
-- Periodic-note targets (`target: { "type": "periodic" }`) additionally need plugin **v5.0.1 or earlier** — v5.0.2 removed the built-in `/periodic/` routes. Every other target type is unaffected.
+- Periodic-note targets (`target: { "type": "periodic" }`) work across that whole range: natively on plugin **v5.0.1 and earlier**, and on **v5.0.2 and later** — which moved the `/periodic/` routes out of the plugin — once the companion [periodic-notes API extension](https://github.com/coddingtonbear/obsidian-local-rest-api-periodic-notes) is installed. Without that extension on v5.0.2+, periodic targets fail with a `periodic_unsupported` error naming it; `obsidian://status` lists the registered extensions if you want to check first. Every other target type is unaffected.
 - An MCP client that can answer an input request (elicitation). `obsidian_delete_note` always asks for confirmation before deleting, so a client without that support can read and write notes but cannot delete one.
 - This server defaults to `http://127.0.0.1:27123` for simplicity. Enable **"Non-encrypted (HTTP) Server"** in the plugin settings to use it. To use the always-on HTTPS port instead, set `OBSIDIAN_BASE_URL=https://127.0.0.1:27124`; the plugin's self-signed cert is handled by `OBSIDIAN_VERIFY_SSL=false` (the default).
 

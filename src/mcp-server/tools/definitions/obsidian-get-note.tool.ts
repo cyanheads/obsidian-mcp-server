@@ -7,7 +7,11 @@
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
-import { computeFenceMask, extractSection } from '@/services/obsidian/section-extractor.js';
+import {
+  computeFenceMask,
+  extractSection,
+  type SectionExtraction,
+} from '@/services/obsidian/section-extractor.js';
 import type { NoteJson, SectionTarget } from '@/services/obsidian/types.js';
 import { SectionSchema, TargetSchema } from './_shared/schemas.js';
 import { withCaseFallback } from './_shared/suggest-paths.js';
@@ -94,6 +98,18 @@ export const obsidianGetNote = tool('obsidian_get_note', {
             format: z.literal('section').describe('Echoed format discriminator.'),
             path: z.string().describe('Resolved vault-relative path of the note.'),
             section: SectionSchema.describe('Echoed section locator.'),
+            sectionTarget: z
+              .string()
+              .optional()
+              .describe(
+                'Section locator the read was resolved against. For headings this is the resolved locator — a bare leaf name is reported back as its full `Parent::Child` path.',
+              ),
+            candidates: z
+              .array(z.string())
+              .optional()
+              .describe(
+                'Every full heading path sharing the bare leaf name in `section.target`, in document order. Present only when more than one heading matched; the read still returns the first. Same field the write tools carry as `ambiguous_section` error data — re-issue with one of these to pin the section.',
+              ),
             valueText: z
               .string()
               .optional()
@@ -109,6 +125,14 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       ])
       .describe('Mode-discriminated projection of the requested note.'),
   }),
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when a bare heading leaf matched several headings — names the path that was read and points at `candidates` for the rest.',
+      ),
+  },
   auth: ['tool:obsidian_get_note:read'],
   errors: [
     {
@@ -146,9 +170,16 @@ export const obsidianGetNote = tool('obsidian_get_note', {
         'Call obsidian_open_in_ui to focus a file, or pass an explicit path target instead.',
     },
     {
+      reason: 'periodic_unsupported',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `periodic` and this vault runs Local REST API v5.0.2 or later without the companion periodic-notes extension, so the `/periodic/` routes are not served at all.',
+      recovery:
+        'Install the periodic-notes extension from https://github.com/coddingtonbear/obsidian-local-rest-api-periodic-notes, or address the note by an explicit vault path.',
+    },
+    {
       reason: 'periodic_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Target was `periodic` but no matching periodic note exists.',
+      when: 'Target was `periodic`, the `/periodic/` routes are served on this vault, and no note exists for the requested period.',
       recovery: 'Create the periodic note first or pass an explicit path target.',
     },
     {
@@ -257,17 +288,25 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     // `extractSection` throws `NotFound` for missing heading/block/frontmatter
     // targets — `reclassifyAsSectionMiss` routes those through the contract;
     // anything else bubbles up to the framework's default classifier.
-    let value: unknown;
+    let extracted: SectionExtraction;
     try {
-      value = extractSection(note, input.section);
+      extracted = extractSection(note, input.section);
     } catch (err) {
       reclassifyAsSectionMiss(ctx, note, input.section, err);
+    }
+    const { candidates, sectionTarget, value } = extracted;
+    if (candidates) {
+      ctx.enrich.notice(
+        `Heading \`${input.section.target}\` is ambiguous — ${candidates.length} headings share that name; read \`${sectionTarget}\`. See \`candidates\` for the rest.`,
+      );
     }
     return {
       result: {
         format: 'section' as const,
         path: note.path,
         section: input.section,
+        ...(sectionTarget === undefined ? {} : { sectionTarget }),
+        ...(candidates ? { candidates } : {}),
         ...(input.section.type === 'frontmatter'
           ? { valueJson: value }
           : { valueText: typeof value === 'string' ? value : String(value) }),
@@ -328,18 +367,18 @@ export const obsidianGetNote = tool('obsidian_get_note', {
         : result.valueJson !== undefined
           ? stringifyValue(result.valueJson)
           : '_(empty)_';
-    return [
-      {
-        type: 'text',
-        text: [
-          `**${result.path}** (format: ${result.format})`,
-          `*Section:* ${result.section.type} → ${result.section.target}`,
-          '',
-          '**Value:**',
-          value,
-        ].join('\n'),
-      },
+    const lines = [
+      `**${result.path}** (format: ${result.format})`,
+      `*Section:* ${result.section.type} → ${result.section.target}`,
     ];
+    if (result.sectionTarget !== undefined) {
+      lines.push(`*Resolved:* ${result.sectionTarget}`);
+    }
+    if (result.candidates && result.candidates.length > 0) {
+      lines.push(`*Candidates:* ${result.candidates.join(', ')}`);
+    }
+    lines.push('', '**Value:**', value);
+    return [{ type: 'text', text: lines.join('\n') }];
   },
 });
 

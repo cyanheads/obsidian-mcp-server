@@ -43,7 +43,25 @@ export interface FileListing {
   files: string[];
 }
 
+/**
+ * A Local REST API extension registered against the plugin. Reported only on
+ * an authenticated `GET /`, and trimmed here to the identity trio — upstream
+ * sends the extension's whole plugin manifest plus its `routes` and
+ * `mcpTools`, none of which a capability check or a calling agent reads.
+ */
+export interface ApiExtension {
+  id: string;
+  name?: string | undefined;
+  version?: string | undefined;
+}
+
 export interface VaultStatus {
+  /**
+   * Registered API extensions. Absent when the plugin did not report them —
+   * an unauthenticated read, or a build predating the extension mechanism —
+   * which is distinct from an empty array meaning "none registered".
+   */
+  apiExtensions?: ApiExtension[] | undefined;
   authenticated: boolean;
   manifest?: { id: string; name: string; version: string };
   service: string;

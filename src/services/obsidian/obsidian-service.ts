@@ -21,6 +21,7 @@ import { Agent, type Dispatcher, type RequestInit, fetch as undiciFetch } from '
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import { PathPolicy } from './path-policy.js';
 import type {
+  ApiExtension,
   DocumentMap,
   FileListing,
   NoteJson,
@@ -61,6 +62,22 @@ interface RawFileListing {
   files: string[];
 }
 
+/**
+ * Upstream `GET /` payload. `apiExtensions` is the authenticated-only list of
+ * registered API-extension manifests — each entry is a full `PluginManifest`
+ * spread plus `routes`/`mcpTools`, of which only the identity trio is kept. It
+ * is absent from the plugin's OpenAPI spec, so its entries are typed loosely
+ * and checked at runtime; the documented fields are trusted as declared.
+ */
+interface RawVaultStatus {
+  apiExtensions?: Array<{ id?: unknown; name?: unknown; version?: unknown }>;
+  authenticated?: boolean;
+  manifest?: { id: string; name: string; version: string };
+  service: string;
+  status: string;
+  versions?: { obsidian?: string; self?: string };
+}
+
 interface RawTagsListing {
   tags: ObsidianTag[];
   totalDirectTags?: number;
@@ -95,6 +112,19 @@ interface RawOmnisearchHit {
 
 /** Per-call timeout for the startup probe — covers the 4-tuple TCP handshake + a tiny GET. */
 const OMNISEARCH_PROBE_TIMEOUT_MS = 500;
+
+/**
+ * Ceiling on the capability probe. It runs only *after* an upstream error has
+ * already come back, so it delays a response the caller is waiting on — a
+ * diagnostic is not worth another full request timeout.
+ */
+const CAPABILITY_PROBE_TIMEOUT_MS = 2_000;
+
+/** Manifest id of the extension that re-adds `/periodic/` on plugin v5.0.2+. */
+const PERIODIC_EXTENSION_ID = 'local-rest-api-periodic-notes';
+
+/** First Local REST API version that ships without the built-in `/periodic/` routes. */
+const PERIODIC_ROUTES_REMOVED_IN = [5, 0, 2] as const;
 
 const OMNISEARCH_DEFAULT_PORT = '51361';
 
@@ -138,6 +168,14 @@ export class ObsidianService {
   readonly #omnisearchUrl: string;
 
   /**
+   * Memoized capability probe, consulted only when an error response is
+   * ambiguous without it. Holds the in-flight promise so concurrent failures
+   * share one request; a failed probe is evicted so a later failure can try
+   * again rather than inheriting a transient outage forever.
+   */
+  #capabilities: Promise<VaultStatus | undefined> | undefined;
+
+  /**
    * @param config - Validated server config (api key, base URL, TLS, timeouts).
    * @param fetchImpl - Optional fetch override for tests. Defaults to undici's
    *   `fetch`, which honors the constructed TLS dispatcher in production.
@@ -177,31 +215,20 @@ export class ObsidianService {
 
   // ── Status ───────────────────────────────────────────────────────────────
 
-  async getStatus(ctx: Context): Promise<VaultStatus> {
-    const res = await this.#request(ctx, '/', { method: 'GET', skipAuth: true });
-    return (await res.json()) as VaultStatus;
-  }
-
   /**
-   * Probe whether the configured `OBSIDIAN_API_KEY` is accepted. Hits the
-   * authenticated `/vault/` listing endpoint and reports `true` only on a 2xx
-   * response. Network/auth errors yield `false` — the resource caller wants a
-   * boolean, not an exception. Aborts are re-thrown so cancellation/timeout
-   * doesn't masquerade as an auth failure.
+   * The plugin's root capability report: reachability, versions, manifest, and
+   * the registered API extensions.
+   *
+   * Sent authenticated. `GET /` never 401s — it answers `200` either way and
+   * self-reports `authenticated`, which is a direct string comparison against
+   * the configured key upstream — so the misconfigured-key case still returns
+   * the full reachability payload with `authenticated: false` rather than
+   * throwing. `apiExtensions` appears only on the authenticated response,
+   * which is why the request carries the key at all.
    */
-  async probeAuthenticated(ctx: Context): Promise<boolean> {
-    try {
-      const res = await this.#fetch(`${this.#config.baseUrl}/vault/`, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${this.#config.apiKey}` },
-        dispatcher: this.#dispatcher,
-        signal: ctx.signal,
-      });
-      return res.ok;
-    } catch (err) {
-      if (ctx.signal?.aborted) throw err;
-      return false;
-    }
+  async getStatus(ctx: Context): Promise<VaultStatus> {
+    const res = await this.#request(ctx, '/', { method: 'GET' });
+    return normalizeVaultStatus((await res.json()) as RawVaultStatus);
   }
 
   // ── Notes ────────────────────────────────────────────────────────────────
@@ -405,7 +432,7 @@ export class ObsidianService {
     if (normalized) {
       this.#policy.assertReadable(normalized);
     }
-    const res = await this.#request(ctx, url, { method: 'GET' });
+    const res = await this.#request(ctx, url, { method: 'GET', listRead: true });
     return (await res.json()) as RawFileListing;
   }
 
@@ -727,16 +754,23 @@ export class ObsidianService {
       method: string;
       headers?: Record<string, string>;
       body?: string;
-      skipAuth?: boolean;
       /** Set on requests that expect a single note back — enables the directory guard. */
       noteRead?: boolean;
+      /**
+       * Set on requests that expect a folder listing back — enables the file
+       * guard, and picks the folder-oriented 404 reason. Carried as an explicit
+       * flag rather than sniffed from the URL's trailing slash: which builder
+       * issued the request is a fact this file already has, and inferring it
+       * from the wire shape would re-derive it one layer too late.
+       */
+      listRead?: boolean;
     },
   ): Promise<UndiciResponse> {
     const url = `${this.#config.baseUrl}${pathAndQuery}`;
-    const headers: Record<string, string> = { ...(init.headers ?? {}) };
-    if (!init.skipAuth) {
-      headers.Authorization = `Bearer ${this.#config.apiKey}`;
-    }
+    const headers: Record<string, string> = {
+      ...(init.headers ?? {}),
+      Authorization: `Bearer ${this.#config.apiKey}`,
+    };
 
     const exec = async (): Promise<UndiciResponse> => {
       const res = await this.#fetch(url, {
@@ -747,10 +781,13 @@ export class ObsidianService {
         signal: ctx.signal,
       });
       if (!res.ok) {
-        await this.#throwForStatus(res, pathAndQuery, ctx);
+        await this.#throwForStatus(res, pathAndQuery, ctx, { listRead: init.listRead });
       }
       if (init.noteRead) {
         this.#assertNotDirectory(res, pathAndQuery, ctx);
+      }
+      if (init.listRead) {
+        this.#assertNotFile(res, pathAndQuery, ctx);
       }
       return res;
     };
@@ -805,6 +842,63 @@ export class ObsidianService {
   }
 
   /**
+   * Reject a `2xx` folder listing that actually served a file. The inverse of
+   * `#assertNotDirectory`, read off the same header: a trailing slash is a
+   * no-op upstream, so `GET /vault/<file>/` answers `200`
+   * with the file's own body and `Content-Disposition: attachment`. Without
+   * this guard the body reaches `res.json()`, which throws an untyped
+   * `SyntaxError` on markdown and — worse — succeeds on a vault `.json` file,
+   * handing the walk a listing with no `files` array.
+   */
+  #assertNotFile(res: UndiciResponse, path: string, ctx: Context): void {
+    if (!path.startsWith('/vault/')) return;
+    if (res.headers.get('content-disposition') === null) return;
+    const display = displayPath(path);
+    throw validationError(`${display} is a file, not a directory.`, {
+      path: display,
+      reason: 'path_is_file',
+      ...ctx.recoveryFor('path_is_file'),
+    });
+  }
+
+  /**
+   * The plugin's capability report, fetched at most once per service instance
+   * and only when a failure is ambiguous without it — never as a startup probe.
+   *
+   * Deliberately not routed through `#request`: this runs while a caller is
+   * already waiting on a failed request, so it takes neither the retry budget
+   * nor the full request timeout. Every failure resolves to `undefined`, which
+   * callers must read as "unknown" and fall back on — a diagnostic must never
+   * sink the response it was issued to diagnose.
+   *
+   * The cache never expires, and does not need to: it is read only to word an
+   * error on a call that already failed. Installing the missing extension
+   * mid-session makes the route resolve, so no 404 arrives to be classified.
+   */
+  async #vaultCapabilities(ctx: Context): Promise<VaultStatus | undefined> {
+    this.#capabilities ??= this.#probeCapabilities(ctx);
+    const capabilities = await this.#capabilities;
+    if (!capabilities) this.#capabilities = undefined;
+    return capabilities;
+  }
+
+  async #probeCapabilities(ctx: Context): Promise<VaultStatus | undefined> {
+    const deadline = AbortSignal.timeout(CAPABILITY_PROBE_TIMEOUT_MS);
+    try {
+      const res = await this.#fetch(`${this.#config.baseUrl}/`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${this.#config.apiKey}` },
+        dispatcher: this.#dispatcher,
+        signal: ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline,
+      });
+      if (!res.ok) return;
+      return normalizeVaultStatus((await res.json()) as RawVaultStatus);
+    } catch {
+      return;
+    }
+  }
+
+  /**
    * Classify an upstream error response and throw.
    *
    * **Containment invariant.** Four things leave this method on the wire and
@@ -837,7 +931,12 @@ export class ObsidianService {
    *
    * Issues #104 and #116.
    */
-  async #throwForStatus(res: UndiciResponse, path: string, ctx: Context): Promise<never> {
+  async #throwForStatus(
+    res: UndiciResponse,
+    path: string,
+    ctx: Context,
+    opts: { listRead?: boolean | undefined } = {},
+  ): Promise<never> {
     const text = await this.#readBodySafe(res);
     const body = parseJsonObject(text);
     const display = displayPath(path);
@@ -871,6 +970,22 @@ export class ObsidianService {
           );
         }
         if (path.startsWith('/periodic/')) {
+          /**
+           * Two different failures answer identically here. Local REST API
+           * v5.0.2 removed the built-in `/periodic/` routes — a request against
+           * a version past that, with no companion extension registered to
+           * re-add them, gets Express's route-miss 404, byte-identical to the
+           * plugin's own "that note does not exist". Only the capability report
+           * separates them, and an unreadable one keeps the older, weaker
+           * reading rather than asserting a cause it cannot see.
+           */
+          if (periodicRoutesAbsent(await this.#vaultCapabilities(ctx))) {
+            throw notFound(
+              `This vault's Local REST API serves no /periodic/ routes: plugin v5.0.2 removed them, and the companion extension that restores them (${PERIODIC_EXTENSION_ID}) is not registered here.`,
+              data('periodic_unsupported'),
+              { cause },
+            );
+          }
           const dateMatch = /\/(\d{4})\/(\d{2})\/(\d{2})\/?$/.exec(path);
           const suffix = dateMatch ? ` for ${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : '';
           throw notFound(
@@ -885,6 +1000,17 @@ export class ObsidianService {
             data('command_unknown'),
             { cause },
           );
+        }
+        /**
+         * A folder listing 404s for two reasons the upstream does not
+         * separate: the folder is not there, or it is there and holds no
+         * files — the plugin computes the listing from loaded vault files, so
+         * an empty folder never reports. The recovery names both; the reason
+         * at least keeps the object right, where `note_missing` sent a caller
+         * who just listed a folder off to look for a note.
+         */
+        if (opts.listRead) {
+          throw notFound(`Directory not found: ${display}`, data('directory_missing'), { cause });
         }
         throw notFound(`Not found: ${display}`, data('note_missing'), { cause });
       }
@@ -1121,6 +1247,64 @@ function upstreamTextOf(err: unknown): string | undefined {
  */
 function isStringCapacityOverflow(err: unknown): boolean {
   return /invalid string length/i.test(upstreamTextOf(err) ?? '');
+}
+
+/**
+ * Normalize the upstream `GET /` payload. `apiExtensions` entries arrive as a
+ * whole `PluginManifest` spread plus the extension's `routes` and `mcpTools`;
+ * only the identity trio is kept, since that is all either the capability
+ * check or a calling agent reads.
+ */
+function normalizeVaultStatus(raw: RawVaultStatus): VaultStatus {
+  const extensions = raw.apiExtensions?.flatMap((e): ApiExtension[] =>
+    typeof e.id === 'string'
+      ? [
+          {
+            id: e.id,
+            ...(typeof e.name === 'string' ? { name: e.name } : {}),
+            ...(typeof e.version === 'string' ? { version: e.version } : {}),
+          },
+        ]
+      : [],
+  );
+  return {
+    /** Absent means the plugin did not accept the key, which is not authenticated. */
+    authenticated: raw.authenticated === true,
+    service: raw.service,
+    status: raw.status,
+    ...(raw.versions ? { versions: raw.versions } : {}),
+    ...(raw.manifest ? { manifest: raw.manifest } : {}),
+    ...(extensions ? { apiExtensions: extensions } : {}),
+  };
+}
+
+/**
+ * True when this plugin build cannot serve `/periodic/` at all: version past
+ * the removal, and the companion extension absent from a capability report
+ * that actually listed its extensions.
+ *
+ * The version is the deciding factor, not extension presence — `apiExtensions`
+ * predates the removal and reads empty on older builds that still route
+ * `/periodic/` natively. A missing `apiExtensions` key means the report was
+ * unauthenticated (the plugin omits it there) and so says nothing either way.
+ */
+function periodicRoutesAbsent(capabilities: VaultStatus | undefined): boolean {
+  const extensions = capabilities?.apiExtensions;
+  if (!extensions) return false;
+  if (!atLeastVersion(capabilities.versions?.self, PERIODIC_ROUTES_REMOVED_IN)) return false;
+  return !extensions.some((e) => e.id === PERIODIC_EXTENSION_ID);
+}
+
+/** Dotted-version comparison against a numeric floor. Unparseable reads as "below". */
+function atLeastVersion(version: string | undefined, floor: readonly number[]): boolean {
+  if (!version) return false;
+  const parts = version.split('.').map((p) => Number.parseInt(p, 10));
+  for (const [i, bound] of floor.entries()) {
+    const part = parts[i];
+    if (part === undefined || Number.isNaN(part)) return false;
+    if (part !== bound) return part > bound;
+  }
+  return true;
 }
 
 /** The period segment of a `/periodic/…` request path, for message copy. */

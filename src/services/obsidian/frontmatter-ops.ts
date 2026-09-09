@@ -7,7 +7,15 @@
 
 import { type Document, isMap, parseDocument } from 'yaml';
 
-const FM_RE = /^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n?)/;
+/**
+ * The one frontmatter boundary: an opening `---` alone on the first line, YAML,
+ * then a `---` that starts its own line. The YAML span and the newline that
+ * separates it from the closing fence are one atomic optional unit, so an empty
+ * block (`---` immediately followed by `---`) matches while a `---` sitting
+ * mid-scalar still cannot close the block — making the separator newline
+ * independently optional would close `key: a---b` at the `---` inside it.
+ */
+const FM_RE = /^(---\r?\n)(?:([\s\S]*?)\r?\n)?(?:---\r?\n?)/;
 
 /** The two halves of a note: its raw frontmatter prefix and everything after it. */
 export interface Splice {
@@ -33,20 +41,31 @@ export interface Splice {
  *
  * A file whose fence is never closed, whose `---` sits below the first line, or
  * whose opening `---` carries trailing whitespace has no frontmatter — the whole
- * thing is body, which is also how Obsidian reads each of those shapes.
+ * thing is body, which is also how Obsidian reads each of those shapes. An empty
+ * block is a block: `---` immediately followed by `---` splits with an empty
+ * `yamlText`, matching the properties block Obsidian reads there.
  */
 export function splice(content: string): Splice {
   const m = FM_RE.exec(content);
   if (!m) {
     return { hasFrontmatter: false, raw: '', open: '', yamlText: '', close: '', body: content };
   }
+  const raw = m[0];
+  const open = m[1] ?? '';
+  const yamlText = m[2] ?? '';
   return {
     hasFrontmatter: true,
-    raw: m[0],
-    open: m[1] ?? '',
-    yamlText: m[2] ?? '',
-    close: m[3] ?? '',
-    body: content.slice(m[0].length),
+    raw,
+    open,
+    yamlText,
+    /**
+     * Sliced rather than taken from the closing-fence capture: the separator
+     * newline belongs to `close` when there is YAML and does not exist at all
+     * for an empty block, and slicing keeps `open + yamlText + close === raw`
+     * in both shapes.
+     */
+    close: raw.slice(open.length + yamlText.length),
+    body: content.slice(raw.length),
   };
 }
 
@@ -121,8 +140,8 @@ export type TagLocation = 'frontmatter' | 'inline' | 'both';
 
 /**
  * Add or remove tags across frontmatter (`tags:` array) and inline `#tag`
- * syntax. Inline occurrences inside fenced code blocks are left alone — they
- * are code, not tags.
+ * syntax. Inline detection skips code spans, link spans, and a hash escaped as
+ * `\#` — see `splitProtectedSegments` and `TAG_LEFT_BOUNDARY`.
  */
 export function reconcileTags(
   content: string,
@@ -214,8 +233,33 @@ function normalizeTagList(value: unknown): string[] {
   return [];
 }
 
-const FENCED_CODE_BLOCK = /(```[\s\S]*?```|~~~[\s\S]*?~~~)/g;
-const INLINE_CODE = /(`[^`\n]+`)/g;
+const FENCED_CODE_BLOCK = /```[\s\S]*?```|~~~[\s\S]*?~~~/;
+const INLINE_CODE = /`[^`\n]+`/;
+/**
+ * `[[Target#Heading|Alias]]`. The `#` in a wikilink opens a heading anchor and
+ * the text after `|` is display text — neither is a tag. Protecting the whole
+ * span rather than tightening the tag's left boundary is what makes the result
+ * independent of what the linked note is named: `[[Note#Overview]]` only escapes
+ * a boundary rule because the name happens to end in a word character, while
+ * `[[Note (Draft)#Overview]]` does not. Obsidian rejects `[` and `]` inside a
+ * link target, so a span never nests.
+ */
+const WIKILINK = /\[\[[^[\]\n]*\]\]/;
+/** `[text](destination)` — a `#` in the link text or in a URL fragment is link syntax. */
+const MARKDOWN_LINK = /\[[^[\]\n]*\]\([^()\n]*\)/;
+/**
+ * `[text][label]` and `[text][]` — the reference-style forms of the same link.
+ * The label must follow the text immediately; a bracketed phrase on its own
+ * (`[note #work]`) is not a link and its `#` stays a tag.
+ */
+const REFERENCE_LINK = /\[[^[\]\n]+\]\[[^[\]\n]*\]/;
+
+/**
+ * A tag's left boundary: the start of a segment, or a character that is neither
+ * part of a tag nor the `\` that escapes one. Obsidian documents `\#` as an
+ * escaped hashtag — a literal `#` carrying no formatting.
+ */
+const TAG_LEFT_BOUNDARY = '(^|[^\\w/\\\\])';
 
 /**
  * Inline `#tag` syntax lives in the body. The frontmatter block is spliced off
@@ -327,10 +371,21 @@ interface Segment {
   text: string;
 }
 
+/**
+ * Split the body into stretches a tag may live in and stretches it may not:
+ * code, where a `#` is code, and link syntax, where a `#` is a heading anchor
+ * or link text. Both the read and the write path run over the result, so
+ * `list` and `remove` agree on what counts as a tag.
+ */
 function splitProtectedSegments(content: string): Segment[] {
   const segments: Segment[] = [];
   let cursor = 0;
-  const re = new RegExp(`${FENCED_CODE_BLOCK.source}|${INLINE_CODE.source}`, 'g');
+  const re = new RegExp(
+    [FENCED_CODE_BLOCK, INLINE_CODE, WIKILINK, MARKDOWN_LINK, REFERENCE_LINK]
+      .map((r) => r.source)
+      .join('|'),
+    'g',
+  );
   for (;;) {
     const m = re.exec(content);
     if (!m) break;
@@ -350,13 +405,15 @@ function splitProtectedSegments(content: string): Segment[] {
 /** Captures the character before the tag and the single horizontal space after it, if any. */
 function makeInlineTagRegex(tag: string): RegExp {
   const escaped = tag.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
-  return new RegExp(`(^|[^\\w/])#${escaped}(?![\\w/-])([ \\t]?)`, 'g');
+  return new RegExp(`${TAG_LEFT_BOUNDARY}#${escaped}(?![\\w/-])([ \\t]?)`, 'g');
 }
 
 /**
  * Read-only helpers for `obsidian_manage_tags list`. Inline tags are read from
- * the body only, matching where a removal can actually reach — a `#` inside a
- * YAML scalar is frontmatter, not a tag.
+ * the body only, and through the same protected-segment split and left boundary
+ * a removal uses, so what `list` reports is exactly what `remove` can reach — a
+ * `#` inside a YAML scalar, a code span, a link span, or escaped as `\#` is
+ * none of them.
  */
 export function listTagsFromContent(
   content: string,
@@ -368,9 +425,10 @@ export function listTagsFromContent(
   const fmTags = normalizeTagList(frontmatter.tags);
   const inline: string[] = [];
   const seen = new Set<string>();
+  /** Each segment is scanned to exhaustion, which resets `lastIndex` between them. */
+  const re = new RegExp(`${TAG_LEFT_BOUNDARY}#([a-zA-Z][\\w/-]*)`, 'g');
   for (const seg of splitProtectedSegments(splice(content).body)) {
     if (seg.protected) continue;
-    const re = /(^|[^\w/])#([a-zA-Z][\w/-]*)/g;
     for (;;) {
       const m = re.exec(seg.text);
       if (!m) break;

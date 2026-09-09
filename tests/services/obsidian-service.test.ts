@@ -31,18 +31,69 @@ beforeEach(() => {
 });
 
 describe('ObsidianService.getStatus', () => {
-  it('hits GET / without an Authorization header', async () => {
-    pool
-      .intercept({ path: '/', method: 'GET' })
-      .reply(
-        200,
-        { status: 'OK', service: 'Obsidian Local REST API', authenticated: true },
-        { headers: { 'content-type': 'application/json' } },
-      );
+  it('sends the API key so the authenticated-only fields come back', async () => {
+    let seenAuth: string | undefined;
+    pool.intercept({ path: '/', method: 'GET' }).reply((opts) => {
+      const headers = opts.headers as Record<string, string>;
+      seenAuth = headers.authorization ?? headers.Authorization;
+      return {
+        statusCode: 200,
+        data: {
+          status: 'OK',
+          service: 'Obsidian Local REST API',
+          authenticated: true,
+          versions: { obsidian: '1.13.7', self: '5.0.3' },
+          apiExtensions: [],
+        },
+      };
+    });
 
     const status = await service.getStatus(ctx);
+    expect(seenAuth).toBe('Bearer test-api-key');
     expect(status.status).toBe('OK');
     expect(status.authenticated).toBe(true);
+    expect(status.apiExtensions).toEqual([]);
+  });
+
+  /**
+   * `GET /` answers 200 for a wrong key and self-reports the rejection, so the
+   * reachability payload still comes back — the misconfigured-key case reads
+   * `authenticated: false` instead of throwing.
+   */
+  it('reports authenticated: false without throwing when the key is not accepted', async () => {
+    pool.intercept({ path: '/', method: 'GET' }).reply(200, {
+      status: 'OK',
+      service: 'Obsidian Local REST API',
+      authenticated: false,
+      versions: { obsidian: '1.13.7', self: '5.0.3' },
+    });
+
+    const status = await service.getStatus(ctx);
+    expect(status.authenticated).toBe(false);
+    expect(status.apiExtensions).toBeUndefined();
+  });
+
+  it('trims extension manifests to the identity trio', async () => {
+    pool.intercept({ path: '/', method: 'GET' }).reply(200, {
+      status: 'OK',
+      service: 'Obsidian Local REST API',
+      authenticated: true,
+      apiExtensions: [
+        {
+          id: 'local-rest-api-periodic-notes',
+          name: 'Periodic Notes',
+          version: '1.0.2',
+          author: 'Adam Coddington',
+          routes: ['/periodic/:period/*'],
+          mcpTools: [{ name: 'periodic_note_get_path' }],
+        },
+      ],
+    });
+
+    const status = await service.getStatus(ctx);
+    expect(status.apiExtensions).toEqual([
+      { id: 'local-rest-api-periodic-notes', name: 'Periodic Notes', version: '1.0.2' },
+    ]);
   });
 });
 
@@ -409,6 +460,19 @@ describe('ObsidianService error classification', () => {
     pool
       .intercept({ path: '/periodic/daily/2026/04/28/', method: 'GET' })
       .reply(404, { message: 'no daily' });
+    /**
+     * The 404 is ambiguous without the plugin's capability report, so the
+     * service reads one before classifying. This fixture is the install where
+     * the periodic routes do exist — an extension-backed v5.0.3 — which is the
+     * case that keeps the plain "note does not exist" reason.
+     */
+    pool.intercept({ path: '/', method: 'GET' }).reply(200, {
+      status: 'OK',
+      service: 'Obsidian Local REST API',
+      authenticated: true,
+      versions: { obsidian: '1.13.7', self: '5.0.3' },
+      apiExtensions: [{ id: 'local-rest-api-periodic-notes' }],
+    });
 
     await expect(
       service.getNoteJson(ctx, { type: 'periodic', period: 'daily', date: '2026-04-28' }),
@@ -513,33 +577,6 @@ describe('ObsidianService error classification', () => {
         data: { status: 501, retryable: false },
       },
     );
-  });
-});
-
-describe('ObsidianService.probeAuthenticated', () => {
-  it('returns false on a non-2xx response', async () => {
-    pool.intercept({ path: '/vault/', method: 'GET' }).reply(401, {});
-    expect(await service.probeAuthenticated(ctx)).toBe(false);
-  });
-
-  it('returns false on a network error', async () => {
-    pool.intercept({ path: '/vault/', method: 'GET' }).reply(() => {
-      throw new TypeError('network kaboom');
-    });
-    expect(await service.probeAuthenticated(ctx)).toBe(false);
-  });
-
-  it('re-throws when the request was aborted', async () => {
-    const abortCtx = createMockContext();
-    const controller = new AbortController();
-    Object.defineProperty(abortCtx, 'signal', { value: controller.signal });
-    controller.abort(new Error('cancelled'));
-
-    pool.intercept({ path: '/vault/', method: 'GET' }).reply(() => {
-      throw new Error('cancelled');
-    });
-
-    await expect(service.probeAuthenticated(abortCtx)).rejects.toThrow(/cancelled/);
   });
 });
 
@@ -843,6 +880,244 @@ describe('ObsidianService directory guard on note reads', () => {
     await expect(service.getNoteJson(ctx, { type: 'active' })).resolves.toMatchObject({
       path: 'today.md',
     });
+  });
+});
+
+/**
+ * The mirror of the directory guard: a listing URL that names a file. Local
+ * REST API answers `GET /vault/<file>/` with `200` and the file's own body
+ * (trailing slash is a no-op upstream, verified against v5.0.3), so the
+ * listing route needs the same `Content-Disposition` discriminator read the
+ * other way round.
+ */
+describe('ObsidianService file guard on directory listings', () => {
+  const fileHeaders = {
+    'content-type': 'text/markdown; charset=utf-8',
+    'content-disposition': 'attachment; filename="Note.md"',
+  };
+
+  it('listFiles rejects a file path instead of parsing its body as a listing', async () => {
+    pool.intercept({ path: '/vault/Note.md/', method: 'GET' }).reply(200, '# hello', {
+      headers: fileHeaders,
+    });
+
+    await expect(service.listFiles(ctx, 'Note.md')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_is_file', path: 'Note.md' },
+    });
+  });
+
+  /**
+   * The case the body-shape test cannot reach: a vault `.json` file parses
+   * cleanly, so nothing downstream notices until `files` turns out to be
+   * `undefined` mid-walk. Only the header discriminator catches it.
+   */
+  it('listFiles rejects a vault .json file whose body happens to parse', async () => {
+    pool.intercept({ path: '/vault/data.json/', method: 'GET' }).reply(200, '{"a":1}', {
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'content-disposition': 'attachment; filename="data.json"',
+      },
+    });
+
+    await expect(service.listFiles(ctx, 'data.json')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'path_is_file' },
+    });
+  });
+
+  it('carries the calling tool contract recovery for path_is_file', async () => {
+    pool
+      .intercept({ path: '/vault/Note.md/', method: 'GET' })
+      .reply(200, '# hello', { headers: fileHeaders });
+    const contractCtx = createMockContext({
+      errors: [
+        {
+          reason: 'path_is_file',
+          code: JsonRpcErrorCode.ValidationError,
+          when: 'file',
+          recovery: 'Read it with obsidian_get_note, or list the parent folder instead.',
+        },
+      ],
+    });
+
+    await expect(service.listFiles(contractCtx, 'Note.md')).rejects.toMatchObject({
+      data: {
+        recovery: { hint: 'Read it with obsidian_get_note, or list the parent folder instead.' },
+      },
+    });
+  });
+
+  it('classifies a listing 404 as directory_missing, not note_missing', async () => {
+    pool
+      .intercept({ path: '/vault/Missing/', method: 'GET' })
+      .reply(404, { message: 'Not Found', errorCode: 40400 });
+
+    await expect(service.listFiles(ctx, 'Missing')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'directory_missing', path: 'Missing' },
+    });
+  });
+});
+
+/**
+ * Local REST API v5.0.2 removed the built-in `/periodic/` routes; the
+ * companion API extension re-adds them as same-origin 307 aliases. A periodic
+ * 404 therefore means two different things depending on the plugin version and
+ * whether that extension is registered, which the service settles with one
+ * cached authenticated `GET /`.
+ */
+describe('ObsidianService periodic capability probe', () => {
+  const PERIODIC_EXTENSION_ID = 'local-rest-api-periodic-notes';
+
+  function capabilityBody(self: string, extensions?: Array<{ id: string }>): unknown {
+    return {
+      status: 'OK',
+      service: 'Obsidian Local REST API',
+      authenticated: true,
+      versions: { obsidian: '1.13.7', self },
+      ...(extensions ? { apiExtensions: extensions } : {}),
+    };
+  }
+
+  /** Queue `n` `GET /` replies with the same body, counting how many are consumed. */
+  function queueProbe(body: unknown, n = 1): { calls: () => number } {
+    let calls = 0;
+    for (let i = 0; i < n; i++) {
+      pool.intercept({ path: '/', method: 'GET' }).reply(() => {
+        calls++;
+        return {
+          statusCode: 200,
+          data: body,
+          responseOptions: { headers: { 'content-type': 'application/json' } },
+        };
+      });
+    }
+    return { calls: () => calls };
+  }
+
+  function queuePeriodic404(n = 1): void {
+    for (let i = 0; i < n; i++) {
+      pool
+        .intercept({ path: '/periodic/daily/', method: 'GET' })
+        .reply(404, { message: 'Not Found', errorCode: 40400 });
+    }
+  }
+
+  const readDaily = (c: Context = ctx) =>
+    service.getNoteJson(c, { type: 'periodic', period: 'daily' });
+
+  it('throws periodic_unsupported on 5.0.2+ with the extension absent', async () => {
+    queuePeriodic404();
+    queueProbe(capabilityBody('5.0.3', []));
+
+    await expect(readDaily()).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'periodic_unsupported' },
+    });
+  });
+
+  it('keeps periodic_not_found on 5.0.2+ with the extension registered', async () => {
+    queuePeriodic404();
+    queueProbe(capabilityBody('5.0.3', [{ id: PERIODIC_EXTENSION_ID }]));
+
+    await expect(readDaily()).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'periodic_not_found' },
+    });
+  });
+
+  it('keeps periodic_not_found on a pre-5.0.2 plugin reporting no apiExtensions key', async () => {
+    queuePeriodic404();
+    queueProbe(capabilityBody('5.0.1'));
+
+    await expect(readDaily()).rejects.toMatchObject({
+      data: { reason: 'periodic_not_found' },
+    });
+  });
+
+  it('keeps periodic_not_found on a pre-5.0.2 plugin that does report an empty apiExtensions', async () => {
+    queuePeriodic404();
+    queueProbe(capabilityBody('5.0.1', []));
+
+    await expect(readDaily()).rejects.toMatchObject({
+      data: { reason: 'periodic_not_found' },
+    });
+  });
+
+  it('keeps periodic_not_found when the version is unreadable', async () => {
+    queuePeriodic404();
+    queueProbe({ status: 'OK', service: 'Obsidian Local REST API', apiExtensions: [] });
+
+    await expect(readDaily()).rejects.toMatchObject({
+      data: { reason: 'periodic_not_found' },
+    });
+  });
+
+  /** A diagnostic request must never sink the response it was issued to diagnose. */
+  it('keeps periodic_not_found when the probe itself fails', async () => {
+    queuePeriodic404();
+    pool.intercept({ path: '/', method: 'GET' }).reply(() => {
+      throw new TypeError('probe kaboom');
+    });
+
+    await expect(readDaily()).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'periodic_not_found' },
+    });
+  });
+
+  it('probes once across two periodic 404s', async () => {
+    queuePeriodic404(2);
+    const probe = queueProbe(capabilityBody('5.0.3', []), 3);
+
+    await expect(readDaily()).rejects.toMatchObject({
+      data: { reason: 'periodic_unsupported' },
+    });
+    await expect(readDaily()).rejects.toMatchObject({
+      data: { reason: 'periodic_unsupported' },
+    });
+    expect(probe.calls()).toBe(1);
+  });
+
+  /**
+   * `periodic_disabled` is a 400 from the native route on a pre-5.0.2 install —
+   * a different status entirely, so it must not consult the probe at all. No
+   * `GET /` intercept is registered: one would surface as a failed probe rather
+   * than a hard error, so the count assertion is what pins it.
+   */
+  it('leaves the periodic_disabled 400 branch alone, without probing', async () => {
+    let probeCalls = 0;
+    pool.intercept({ path: '/', method: 'GET' }).reply(() => {
+      probeCalls++;
+      return { statusCode: 200, data: capabilityBody('5.0.1') };
+    });
+    pool
+      .intercept({ path: '/periodic/quarterly/', method: 'POST' })
+      .reply(400, { message: 'Specified period is not enabled', errorCode: 40000 });
+
+    await expect(
+      service.appendToNote(ctx, { type: 'periodic', period: 'quarterly' }, 'x'),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'periodic_disabled' },
+    });
+    expect(probeCalls).toBe(0);
+  });
+
+  it('sends the API key on the capability probe', async () => {
+    queuePeriodic404();
+    let seenAuth: string | undefined;
+    pool.intercept({ path: '/', method: 'GET' }).reply((opts) => {
+      const headers = opts.headers as Record<string, string>;
+      seenAuth = headers.authorization ?? headers.Authorization;
+      return { statusCode: 200, data: capabilityBody('5.0.3', []) };
+    });
+
+    await expect(readDaily()).rejects.toMatchObject({
+      data: { reason: 'periodic_unsupported' },
+    });
+    expect(seenAuth).toBe('Bearer test-api-key');
   });
 });
 

@@ -5,12 +5,19 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianListNotes } from '@/mcp-server/tools/definitions/obsidian-list-notes.tool.js';
 import { setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
+
+/** The recovery sentence the tool's own contract advertises for `reason`. */
+function declaredRecovery(reason: string): string {
+  const entry = obsidianListNotes.errors?.find((e) => e.reason === reason);
+  if (!entry) throw new Error(`obsidian_list_notes declares no '${reason}' contract entry`);
+  return entry.recovery;
+}
 
 describe('obsidian_list_notes / non-recursive (depth: 1)', () => {
   it('lists vault root as a flat single-level tree', async () => {
@@ -212,6 +219,97 @@ describe('obsidian_list_notes / caps and errors', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'regex_unsafe' },
     });
+  });
+});
+
+/**
+ * The two ways a `path` can be wrong for a listing. Both used to surface
+ * untyped: a file path threw a raw JSON parse failure (or, for a vault `.json`
+ * file, no failure at all), and a missing folder borrowed the note-read 404's
+ * reason and its "locate the note" hint.
+ */
+describe('obsidian_list_notes / bad paths', () => {
+  const fileHeaders = {
+    'content-type': 'text/markdown; charset=utf-8',
+    'content-disposition': 'attachment; filename="Note.md"',
+  };
+
+  it('throws path_is_file with the contract recovery when `path` names a file', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Note.md/', method: 'GET' })
+      .reply(200, '# hello', { headers: fileHeaders });
+
+    await expect(
+      obsidianListNotes.handler(
+        obsidianListNotes.input.parse({ path: 'Note.md' }),
+        createMockContext({ errors: obsidianListNotes.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'path_is_file',
+        path: 'Note.md',
+        recovery: { hint: declaredRecovery('path_is_file') },
+      },
+    });
+  });
+
+  it('throws directory_missing with the contract recovery when the folder does not list', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Inbox/scratch-dir/', method: 'GET' })
+      .reply(404, { message: 'Not Found', errorCode: 40400 });
+
+    await expect(
+      obsidianListNotes.handler(
+        obsidianListNotes.input.parse({ path: 'Inbox/scratch-dir', depth: 3 }),
+        createMockContext({ errors: obsidianListNotes.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'directory_missing',
+        path: 'Inbox/scratch-dir',
+        recovery: { hint: declaredRecovery('directory_missing') },
+      },
+    });
+  });
+
+  it('carries path_is_file to both wire surfaces', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Note.md/', method: 'GET' })
+      .reply(200, '# hello', { headers: fileHeaders });
+
+    const res = await runToolContract(obsidianListNotes, { path: 'Note.md' });
+
+    expect(res.isError).toBe(true);
+    const error = (res.structuredContent as { error: { code: number; data: { reason: string } } })
+      .error;
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data.reason).toBe('path_is_file');
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('is a file, not a directory');
+    expect(text).toContain(declaredRecovery('path_is_file'));
+  });
+
+  it('carries directory_missing to both wire surfaces', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Ghost/', method: 'GET' })
+      .reply(404, { message: 'Not Found', errorCode: 40400 });
+
+    const res = await runToolContract(obsidianListNotes, { path: 'Ghost' });
+
+    expect(res.isError).toBe(true);
+    const error = (res.structuredContent as { error: { code: number; data: { reason: string } } })
+      .error;
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data.reason).toBe('directory_missing');
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('Directory not found');
+    expect(text).toContain(declaredRecovery('directory_missing'));
   });
 });
 

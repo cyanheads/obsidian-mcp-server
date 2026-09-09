@@ -81,9 +81,16 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
         'Call obsidian_open_in_ui to focus a file, or pass an explicit path target instead.',
     },
     {
+      reason: 'periodic_unsupported',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Target was `periodic` and this vault runs Local REST API v5.0.2 or later without the companion periodic-notes extension, so the `/periodic/` routes are not served at all.',
+      recovery:
+        'Install the periodic-notes extension from https://github.com/coddingtonbear/obsidian-local-rest-api-periodic-notes, or address the note by an explicit vault path.',
+    },
+    {
       reason: 'periodic_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Target was `periodic` but no matching periodic note exists.',
+      when: 'Target was `periodic`, the `/periodic/` routes are served on this vault, and no note exists for the requested period.',
       recovery: 'Create the periodic note first or pass an explicit path target.',
     },
     {

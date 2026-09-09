@@ -577,3 +577,91 @@ describe('obsidian_replace_in_note / replaceAll false across scopes', () => {
     ]);
   });
 });
+
+/**
+ * An empty properties block is a block. Reading its fences as body text put
+ * them back in scope for the default `body` scope, where a replacement could
+ * rewrite them and cost the note its block entirely.
+ */
+describe('obsidian_replace_in_note / empty properties block', () => {
+  const EMPTY_BLOCK = '---\n---\n# Heading\n\nDraft text.\n';
+
+  it('keeps the fences of an empty block out of the default body scope', async () => {
+    let putCalls = 0;
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(EMPTY_BLOCK), { headers: { 'content-type': 'application/json' } });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
+      .reply(() => {
+        putCalls++;
+        return { statusCode: 200, data: '' };
+      });
+    // Stubbed so a write that shouldn't happen fails the assertions, not the transport.
+    harness.current().pool.intercept({ path: '/vault/N.md', method: 'HEAD' }).reply(200, '', cl(0));
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        replacements: [{ search: '---', replace: '===' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(putCalls).toBe(0);
+    expect(out.totalReplacements).toBe(0);
+    expect(out.perReplacement).toEqual([
+      { search: '---', count: 0, bodyCount: 0, frontmatterCount: 0 },
+    ]);
+  });
+
+  it('reports 0 frontmatter matches for an empty block rather than reaching the body', async () => {
+    let putCalls = 0;
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(EMPTY_BLOCK), { headers: { 'content-type': 'application/json' } });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'PUT' })
+      .reply(() => {
+        putCalls++;
+        return { statusCode: 200, data: '' };
+      });
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        scope: 'frontmatter',
+        replacements: [{ search: 'Draft', replace: 'Final' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(putCalls).toBe(0);
+    expect(out.perReplacement).toEqual([
+      { search: 'Draft', count: 0, bodyCount: 0, frontmatterCount: 0 },
+    ]);
+  });
+
+  it('reassembles an empty block byte-identically around a body edit', async () => {
+    const after = EMPTY_BLOCK.replace('Draft text.', 'Final text.');
+    const getBody = stubReplaceFlow(EMPTY_BLOCK, Buffer.byteLength(after, 'utf8'));
+
+    const out = await obsidianReplaceInNote.handler(
+      obsidianReplaceInNote.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        scope: 'both',
+        replacements: [{ search: 'Draft', replace: 'Final' }],
+      }),
+      createMockContext({ errors: obsidianReplaceInNote.errors }),
+    );
+
+    expect(getBody()).toBe(after);
+    expect(out.perReplacement).toEqual([
+      { search: 'Draft', count: 1, bodyCount: 1, frontmatterCount: 0 },
+    ]);
+  });
+});

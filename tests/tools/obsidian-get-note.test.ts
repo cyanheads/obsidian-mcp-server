@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianGetNote } from '@/mcp-server/tools/definitions/obsidian-get-note.tool.js';
 import { setupHarness } from '../helpers.js';
@@ -247,6 +247,65 @@ describe('obsidian_get_note / format: section', () => {
     expect(out.result.valueText).toBeUndefined();
   });
 
+  it('reaches a heading above the second fence when the opening fence has trailing whitespace', async () => {
+    const md = '--- \n# Real Heading\n\nBody text.\n---\n';
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(
+        200,
+        {
+          path: 'Note.md',
+          content: md,
+          frontmatter: {},
+          tags: [],
+          stat: { ctime: 0, mtime: 0, size: 0 },
+        },
+        { headers: { 'content-type': 'application/json' } },
+      );
+
+    const input = obsidianGetNote.input.parse({
+      format: 'section',
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Real Heading' },
+    });
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
+    if (out.result.format !== 'section') throw new Error('expected section branch');
+    expect(out.result.valueText).toBe('# Real Heading\n\nBody text.\n---');
+  });
+
+  it('skips an empty properties block when extracting a heading', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(
+        200,
+        {
+          path: 'Note.md',
+          content: '---\n---\n# Heading\nbody ^blk',
+          frontmatter: {},
+          tags: [],
+          stat: { ctime: 0, mtime: 0, size: 0 },
+        },
+        { headers: { 'content-type': 'application/json' } },
+      );
+
+    const input = obsidianGetNote.input.parse({
+      format: 'section',
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Heading' },
+    });
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
+    if (out.result.format !== 'section') throw new Error('expected section branch');
+    expect(out.result.valueText).toBe('# Heading\nbody ^blk');
+  });
+
   it('throws section_required (ValidationError) when section is omitted', async () => {
     // No upstream interception — handler should fail before any HTTP call.
     const input = obsidianGetNote.input.parse({
@@ -259,6 +318,161 @@ describe('obsidian_get_note / format: section', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'section_required' },
     });
+  });
+});
+
+describe('obsidian_get_note / section heading resolution', () => {
+  const AMBIGUOUS = [
+    '# Overview',
+    '## Alpha',
+    '### Shared',
+    '',
+    'Nested under Alpha.',
+    '',
+    '## Beta',
+    '### Shared',
+    '',
+    'Nested under Beta.',
+  ].join('\n');
+
+  function mockNote(content: string): void {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(
+        200,
+        {
+          path: 'Note.md',
+          content,
+          frontmatter: {},
+          tags: [],
+          stat: { ctime: 0, mtime: 0, size: 0 },
+        },
+        { headers: { 'content-type': 'application/json' } },
+      );
+  }
+
+  async function readSection(
+    target: string,
+    ctx = createMockContext({ errors: obsidianGetNote.errors }),
+  ) {
+    const input = obsidianGetNote.input.parse({
+      format: 'section',
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target },
+    });
+    const out = await obsidianGetNote.handler(input, ctx);
+    if (out.result.format !== 'section') throw new Error('expected section branch');
+    return out.result;
+  }
+
+  it('reports the resolved full path for a single bare-leaf match', async () => {
+    mockNote(['# Root', 'root body', '## Nested', 'nested body'].join('\n'));
+    const result = await readSection('Nested');
+    expect(result.sectionTarget).toBe('Root::Nested');
+    expect(result.candidates).toBeUndefined();
+  });
+
+  it('reports every colliding path and a notice on an ambiguous leaf', async () => {
+    mockNote(AMBIGUOUS);
+    const ctx = createMockContext({ errors: obsidianGetNote.errors });
+    const result = await readSection('Shared', ctx);
+    expect(result.valueText).toBe('### Shared\n\nNested under Alpha.');
+    expect(result.sectionTarget).toBe('Overview::Alpha::Shared');
+    expect(result.candidates).toEqual(['Overview::Alpha::Shared', 'Overview::Beta::Shared']);
+    expect(getEnrichment(ctx).notice).toContain('Overview::Alpha::Shared');
+    expect(getEnrichment(ctx).notice).toContain('2 headings');
+  });
+
+  it('echoes a fully-qualified target without candidates', async () => {
+    mockNote(['# Root', '## Child', 'body'].join('\n'));
+    const result = await readSection('Root::Child');
+    expect(result.sectionTarget).toBe('Root::Child');
+    expect(result.candidates).toBeUndefined();
+  });
+
+  it('leaves a "::"-qualified target unflagged when its parent name repeats elsewhere', async () => {
+    mockNote(['# A', '## B', 'b body', '# A', '## C', 'c body'].join('\n'));
+    const result = await readSection('A::B');
+    expect(result.valueText).toBe(['## B', 'b body'].join('\n'));
+    expect(result.sectionTarget).toBe('A::B');
+    expect(result.candidates).toBeUndefined();
+  });
+
+  it('repeats identical strings in candidates for same-level duplicates', async () => {
+    mockNote(['# Dup', 'first body', '# Dup', 'second body'].join('\n'));
+    const result = await readSection('Dup');
+    expect(result.valueText).toBe(['# Dup', 'first body'].join('\n'));
+    expect(result.sectionTarget).toBe('Dup');
+    expect(result.candidates).toEqual(['Dup', 'Dup']);
+  });
+
+  it('resolves the path below a frontmatter block', async () => {
+    mockNote(['---', 'title: Foo', '---', '', '# Root', '## Nested', 'nested body'].join('\n'));
+    const result = await readSection('Nested');
+    expect(result.valueText).toBe(['## Nested', 'nested body'].join('\n'));
+    expect(result.sectionTarget).toBe('Root::Nested');
+  });
+
+  it('trims trailing whitespace from heading text in the resolved path', async () => {
+    mockNote(['# Root  ', '## Child  ', 'body'].join('\n'));
+    const result = await readSection('Child');
+    expect(result.sectionTarget).toBe('Root::Child');
+  });
+
+  it('omits both fields for a frontmatter section', async () => {
+    mockNote('body');
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Other.md', method: 'GET' })
+      .reply(
+        200,
+        {
+          path: 'Other.md',
+          content: 'body',
+          frontmatter: { priority: 7 },
+          tags: [],
+          stat: { ctime: 0, mtime: 0, size: 0 },
+        },
+        { headers: { 'content-type': 'application/json' } },
+      );
+    const input = obsidianGetNote.input.parse({
+      format: 'section',
+      target: { type: 'path', path: 'Other.md' },
+      section: { type: 'frontmatter', target: 'priority' },
+    });
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
+    if (out.result.format !== 'section') throw new Error('expected section branch');
+    expect(out.result.sectionTarget).toBeUndefined();
+    expect(out.result.candidates).toBeUndefined();
+  });
+
+  it('validates the new fields through the tool contract and renders them in content[]', async () => {
+    mockNote(AMBIGUOUS);
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'section',
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Shared' },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const structured = res.structuredContent as {
+      notice?: string;
+      result: { candidates?: string[]; sectionTarget?: string };
+    };
+    expect(structured.result.sectionTarget).toBe('Overview::Alpha::Shared');
+    expect(structured.result.candidates).toEqual([
+      'Overview::Alpha::Shared',
+      'Overview::Beta::Shared',
+    ]);
+    expect(structured.notice).toContain('Overview::Alpha::Shared');
+
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('Overview::Alpha::Shared');
+    expect(text).toContain('Overview::Beta::Shared');
   });
 });
 
@@ -623,6 +837,78 @@ describe('obsidian_get_note / format()', () => {
     const absent = obsidianGetNote.format!({ result: baseResult });
     expect((empty[0] as { text: string }).text).not.toContain('Outgoing links');
     expect((absent[0] as { text: string }).text).not.toContain('Outgoing links');
+  });
+
+  it('renders a section without resolution metadata unchanged', () => {
+    const blocks = obsidianGetNote.format!({
+      result: {
+        format: 'section',
+        path: 'A.md',
+        section: { type: 'block', target: 'abc' },
+        valueText: 'a claim ^abc',
+      },
+    });
+    expect((blocks[0] as { text: string }).text).toBe(
+      [
+        '**A.md** (format: section)',
+        '*Section:* block → abc',
+        '',
+        '**Value:**',
+        'a claim ^abc',
+      ].join('\n'),
+    );
+  });
+
+  /**
+   * Asserted as the whole rendered block rather than by substring: the
+   * resolved locator is also one of the candidates, so a `toContain` on it
+   * passes whether or not the `*Resolved:*` line is rendered at all.
+   */
+  it('renders the resolved locator and every colliding path for a section', () => {
+    const blocks = obsidianGetNote.format!({
+      result: {
+        format: 'section',
+        path: 'A.md',
+        section: { type: 'heading', target: 'Shared' },
+        sectionTarget: 'Overview::Alpha::Shared',
+        candidates: ['Overview::Alpha::Shared', 'Overview::Beta::Shared'],
+        valueText: '### Shared',
+      },
+    });
+    expect((blocks[0] as { text: string }).text).toBe(
+      [
+        '**A.md** (format: section)',
+        '*Section:* heading → Shared',
+        '*Resolved:* Overview::Alpha::Shared',
+        '*Candidates:* Overview::Alpha::Shared, Overview::Beta::Shared',
+        '',
+        '**Value:**',
+        '### Shared',
+      ].join('\n'),
+    );
+  });
+
+  /** A heading section carries the resolved locator even with nothing to disambiguate. */
+  it('renders the resolved locator for a heading section with no collision', () => {
+    const blocks = obsidianGetNote.format!({
+      result: {
+        format: 'section',
+        path: 'A.md',
+        section: { type: 'heading', target: 'Nested' },
+        sectionTarget: 'Root::Nested',
+        valueText: '## Nested',
+      },
+    });
+    expect((blocks[0] as { text: string }).text).toBe(
+      [
+        '**A.md** (format: section)',
+        '*Section:* heading → Nested',
+        '*Resolved:* Root::Nested',
+        '',
+        '**Value:**',
+        '## Nested',
+      ].join('\n'),
+    );
   });
 
   it('renders document-map listing', () => {

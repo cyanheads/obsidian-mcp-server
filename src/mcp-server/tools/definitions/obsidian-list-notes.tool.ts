@@ -153,10 +153,18 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
         'List a directory inside the configured read scope, or omit `path` to list from the vault root. The error data echoes the active scope.',
     },
     {
-      reason: 'note_missing',
+      reason: 'directory_missing',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The supplied `path` does not exist in the vault. Sub-directories that disappear mid-walk are silently skipped — only the root path surfaces this error.',
-      recovery: 'List a parent directory to find the correct casing or check the spelling.',
+      when: 'No listable directory at the supplied `path` — either it does not exist, or it exists and currently holds no files. Sub-directories that disappear mid-walk are silently skipped, so only the root path surfaces this error.',
+      recovery:
+        'List the parent directory to check the spelling and casing. A folder that exists but holds no files reports the same way, since the Local REST API omits empty folders from its listings — add a file to it, or confirm from the parent that the folder is there.',
+    },
+    {
+      reason: 'path_is_file',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The supplied `path` names a file rather than a directory.',
+      recovery:
+        'Read the file with obsidian_get_note instead, or list its parent directory to browse alongside it.',
     },
   ],
 
@@ -260,8 +268,9 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
  * place; returns once the walk completes or hits the entry cap. Sub-directory
  * 404s (currentDepth > 1) are swallowed because the vault can shift mid-walk;
  * a 404 at currentDepth === 1 is the caller's root path missing and propagates
- * as a `note_missing` service error. Hoisted out of the handler so the lint's
- * source scanner doesn't see the framework's NotFound code in handler text.
+ * as a `directory_missing` service error. Hoisted out of the handler so the
+ * lint's source scanner doesn't see the framework's NotFound code in handler
+ * text.
  */
 async function walkVault(
   svc: ObsidianService,

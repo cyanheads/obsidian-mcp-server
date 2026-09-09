@@ -311,6 +311,74 @@ describe('#throwForStatus / jsonlogic 400 (issue #116)', () => {
   });
 });
 
+describe('#throwForStatus / periodic capability probe (issue #103)', () => {
+  /**
+   * The probe reads a second upstream response to classify the first. Its
+   * payload is plugin metadata rather than vault content, but it is still
+   * upstream-authored text, so this fixture plants a marker in it and asserts
+   * the new branch relays neither that nor the 404's own body.
+   */
+  const probeWithMarker = {
+    status: 'OK',
+    service: 'Obsidian Local REST API',
+    authenticated: true,
+    versions: { obsidian: '1.13.7', self: '5.0.3' },
+    apiExtensions: [{ id: 'some-other-extension', name: LEAK.notePath, version: '1.0.0' }],
+  };
+
+  it('names the missing extension without relaying either upstream body', async () => {
+    pool
+      .intercept({ path: '/periodic/daily/', method: 'POST' })
+      .reply(404, POISONED_400, { headers: { 'content-type': 'application/json' } });
+    pool
+      .intercept({ path: '/', method: 'GET' })
+      .reply(200, probeWithMarker, { headers: { 'content-type': 'application/json' } });
+
+    const err = await throwsMcpError(() =>
+      service.appendToNote(ctx, { type: 'periodic', period: 'daily' }, 'content'),
+    );
+
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect((err.data as { reason?: string }).reason).toBe('periodic_unsupported');
+    expectContained(err, /local-rest-api-periodic-notes/);
+  });
+});
+
+/**
+ * The listing guards throw outside `#throwForStatus` — one on a `2xx` whose
+ * body is the served file's own content. Same invariant, different entry
+ * point: a server-authored message, `path`, `reason`, and the contract
+ * recovery, and nothing the upstream wrote.
+ */
+describe('listing guards / upstream text never reaches the client (issue #105)', () => {
+  it('contains the folder 404 body on the directory_missing branch', async () => {
+    pool
+      .intercept({ path: '/vault/Missing/', method: 'GET' })
+      .reply(404, POISONED_400, { headers: { 'content-type': 'application/json' } });
+
+    const err = await throwsMcpError(() => service.listFiles(ctx, 'Missing'));
+
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect((err.data as { reason?: string }).reason).toBe('directory_missing');
+    expectContained(err, /directory not found/i);
+  });
+
+  it('contains the served note body on the path_is_file branch', async () => {
+    pool.intercept({ path: '/vault/Note.md/', method: 'GET' }).reply(200, LEAK.noteBody, {
+      headers: {
+        'content-type': 'text/markdown; charset=utf-8',
+        'content-disposition': 'attachment; filename="Note.md"',
+      },
+    });
+
+    const err = await throwsMcpError(() => service.listFiles(ctx, 'Note.md'));
+
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect((err.data as { reason?: string }).reason).toBe('path_is_file');
+    expectContained(err, /file, not a directory/i);
+  });
+});
+
 describe('#throwForStatus / no upstream-authored keys survive on data', () => {
   it('carries neither data.body nor data.upstream on a 5xx', async () => {
     const err = await throwsMcpError(() => replyToAppend(500, POISONED_500));

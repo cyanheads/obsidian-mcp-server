@@ -16,7 +16,7 @@ import {
 
 const FM_BLOCK_RE = /^---\n([\s\S]*?)\n---\n?/;
 /** Mirrors `FM_RE` in the module under test — consumes the block and its fence terminator, nothing more. */
-const FM_SPLICE_RE = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/;
+const FM_SPLICE_RE = /^---\r?\n(?:[\s\S]*?\r?\n)?---\r?\n?/;
 
 function readFrontmatter(content: string): Record<string, unknown> {
   const m = FM_BLOCK_RE.exec(content);
@@ -316,6 +316,101 @@ describe('splice', () => {
     expect(s.body).toBe('');
     expect(s.raw + s.body).toBe(input);
   });
+
+  it('spans the separator newline with the closing fence', () => {
+    const s = splice('---\ntitle: Foo\n---\n# Heading Right After\nbody');
+    expect(s.open).toBe('---\n');
+    expect(s.yamlText).toBe('title: Foo');
+    expect(s.close).toBe('\n---\n');
+    expect(s.body).toBe('# Heading Right After\nbody');
+  });
+
+  it('spans the CRLF separator with the closing fence', () => {
+    const s = splice('---\r\ntitle: a\r\n---\r\n\r\nBody.\r\n');
+    expect(s.open).toBe('---\r\n');
+    expect(s.yamlText).toBe('title: a');
+    expect(s.close).toBe('\r\n---\r\n');
+  });
+});
+
+/**
+ * One boundary, shared with the read path in `section-extractor.ts`, matching
+ * what Obsidian parses: an opening `---` alone on the first line, a closing
+ * `---` starting its own line, and an empty block recognized as a block.
+ */
+describe('splice / frontmatter boundary', () => {
+  it('treats an opening fence carrying trailing whitespace as body', () => {
+    const input = '--- \n# Real Heading\n\nBody text.\n---\n';
+    const s = splice(input);
+    expect(s.hasFrontmatter).toBe(false);
+    expect(s.body).toBe(input);
+  });
+
+  it('treats a CRLF opening fence carrying trailing whitespace as body', () => {
+    const input = '--- \r\n# Real Heading\r\n\r\nBody text.\r\n---\r\n';
+    const s = splice(input);
+    expect(s.hasFrontmatter).toBe(false);
+    expect(s.body).toBe(input);
+  });
+
+  it('recognizes an empty properties block', () => {
+    const input = '---\n---\n# Heading\nbody ^blk';
+    const s = splice(input);
+    expect(s.hasFrontmatter).toBe(true);
+    expect(s.open).toBe('---\n');
+    expect(s.yamlText).toBe('');
+    expect(s.close).toBe('---\n');
+    expect(s.raw).toBe('---\n---\n');
+    expect(s.body).toBe('# Heading\nbody ^blk');
+    expect(s.open + s.yamlText + s.close).toBe(s.raw);
+    expect(s.raw + s.body).toBe(input);
+  });
+
+  it('recognizes an empty properties block with CRLF line endings', () => {
+    const input = '---\r\n---\r\n# Heading\r\nbody ^blk';
+    const s = splice(input);
+    expect(s.hasFrontmatter).toBe(true);
+    expect(s.yamlText).toBe('');
+    expect(s.raw).toBe('---\r\n---\r\n');
+    expect(s.body).toBe('# Heading\r\nbody ^blk');
+    expect(s.open + s.yamlText + s.close).toBe(s.raw);
+    expect(s.raw + s.body).toBe(input);
+  });
+
+  it('yields an empty body for a note that is nothing but an empty block', () => {
+    const input = '---\n---\n';
+    const s = splice(input);
+    expect(s.hasFrontmatter).toBe(true);
+    expect(s.yamlText).toBe('');
+    expect(s.body).toBe('');
+    expect(s.raw + s.body).toBe(input);
+  });
+
+  /**
+   * Admitting a zero-length YAML span must not make the closing fence's own
+   * newline optional — that would let a `---` inside a scalar close the block.
+   */
+  it('does not close the block at a `---` inside a scalar', () => {
+    const input = '---\nkey: a---b\nmore\n---\nbody';
+    const s = splice(input);
+    expect(s.hasFrontmatter).toBe(true);
+    expect(s.yamlText).toBe('key: a---b\nmore');
+    expect(s.body).toBe('body');
+    expect(s.open + s.yamlText + s.close).toBe(s.raw);
+  });
+
+  it('keeps a blank first YAML line inside the block rather than closing on it', () => {
+    const input = '---\n\ntitle: a\n---\nbody';
+    const s = splice(input);
+    expect(s.hasFrontmatter).toBe(true);
+    expect(s.yamlText).toBe('\ntitle: a');
+    expect(s.body).toBe('body');
+  });
+
+  it('still treats an unclosed fence as body text', () => {
+    const input = '---\n# Heading\nno closing fence here\nbody';
+    expect(splice(input).hasFrontmatter).toBe(false);
+  });
 });
 
 describe('frontmatterParseError', () => {
@@ -528,11 +623,173 @@ describe('reconcileTags / add inline — separator placement', () => {
   });
 });
 
+/**
+ * An empty properties block is a block. Reading it as body text made a
+ * frontmatter tag add prepend a second block in front of the orphaned fences.
+ */
+describe('reconcileTags / empty properties block', () => {
+  it('adds the tag inside the existing empty block instead of prepending a second one', () => {
+    const input = '---\n---\n# Heading\nBody with #atag here.';
+    const r = reconcileTags(input, ['newtag'], 'add', 'frontmatter');
+    expect(r.applied).toEqual(['newtag']);
+    expect(r.content).toBe('---\ntags:\n  - newtag\n---\n# Heading\nBody with #atag here.');
+  });
+
+  it('does not read the fences of an empty block as inline body text', () => {
+    const r = listTagsFromContent('---\n---\n# Heading\nBody with #atag here.', {});
+    expect(r.inline).toEqual(['atag']);
+  });
+
+  it('leaves an empty block alone when an inline tag is removed', () => {
+    const input = '---\n---\n# Heading\nBody with #atag here.';
+    const r = reconcileTags(input, ['atag'], 'remove', 'inline');
+    expect(r.content).toBe('---\n---\n# Heading\nBody with here.');
+  });
+});
+
 describe('listTagsFromContent / frontmatter is not body', () => {
   it('does not report a #token inside a frontmatter scalar as an inline tag', () => {
     const content = '---\ntitle: Q3 #wip planning\ntags:\n  - keepme\n---\n\nBody #real here.\n';
     const r = listTagsFromContent(content, { tags: ['keepme'] });
     expect(r.frontmatter).toEqual(['keepme']);
     expect(r.inline).toEqual(['real']);
+  });
+});
+
+/**
+ * `#` inside a link is link syntax, not a tag: a heading anchor, an alias, or
+ * link text. Reading one as a tag makes `list` wrong and `remove` destructive —
+ * stripping `Overview` from `[[#Overview & Notes]]` leaves `[[& Notes]]`, with
+ * nothing in the file to reconstruct the target from. The whole `[[…]]` /
+ * `[…](…)` span is protected, so the result does not depend on what the linked
+ * note happens to be named.
+ */
+describe('listTagsFromContent / link spans are not inline tags', () => {
+  it.each([
+    ['same-note heading anchor', 'see [[#Overview]] here'],
+    ['same-note heading anchor with punctuation', 'see [[#Overview & Notes]] here'],
+    ['heading anchor in another note', 'see [[Note#Overview]] here'],
+    ['note name ending in punctuation', 'see [[Note (Draft)#Overview]] here'],
+    ['note name ending in a non-ASCII character', 'see [[Note✅#Overview]] here'],
+    ['wikilink alias text', 'see [[Note#Heading|see #alias]] here'],
+    ['embedded wikilink', 'see ![[Note#Overview]] here'],
+    ['markdown link text', 'see [Chat #support](https://example.dev) here'],
+    ['markdown link text on an angle-bracketed URL', 'see [Chat #support](<a b.md>) here'],
+    ['reference-style link text', 'see [Chat #support][chat] here\n\n[chat]: https://example.dev'],
+    ['collapsed reference-style link text', 'see [Chat #support][] here'],
+    ['block anchor', 'see [[Note#^blockid]] here'],
+  ])('reports no inline tag for a %s', (_label, input) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual([]);
+  });
+
+  it.each([
+    ['a tag immediately before a link', '#work [[Note#Heading]] end', ['work']],
+    ['a tag immediately after a link', '[[Note#Heading]] #work end', ['work']],
+    ['a tag between two links', '[[A#x]] #work [B #y](u) end', ['work']],
+    ['a nested tag and a trailing comma', '#a/b and #tag, end', ['a/b', 'tag']],
+    ['an unclosed wikilink', 'see [[Note and #work here', ['work']],
+    ['a bracketed span that is not a link', 'see [note #work] (not a link)', ['work']],
+    ['a bracketed span followed by a spaced label', 'see [note #work] [ref] here', ['work']],
+    ['a task list item', '- [ ] #todo item', ['todo']],
+  ])('still reports %s', (_label, input, expected) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual(expected);
+  });
+
+  /**
+   * Obsidian documents `\#` as an escaped hashtag — a literal `#` that carries
+   * no formatting. A backslash immediately before the `#` is what marks it.
+   */
+  it.each([
+    ['mid-sentence', 'text \\#escaped here'],
+    ['at the start of a line', '\\#escaped leads the line'],
+  ])('reports no inline tag for an escaped hash %s', (_label, input) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual([]);
+  });
+
+  /**
+   * Obsidian's help documents HTML comments and math spans without claiming its
+   * tag index skips them, so a `#tag` in either is still reported. Excluding
+   * them would risk a false negative — and a `$…$` span detector would read the
+   * gap between two prices as math.
+   */
+  it.each([
+    ['an HTML comment', '<!-- #hidden -->', ['hidden']],
+    ['an inline math span', 'value $#x$ end', ['x']],
+    ['prose between two dollar amounts', 'costs $5 and $10 for #work', ['work']],
+  ])('still reports a tag inside %s', (_label, input, expected) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual(expected);
+  });
+
+  it.each([
+    ['an all-numeric token', '#123'],
+    ['a mid-word hash', 'a#b'],
+    ['an ATX heading', '# Heading'],
+    ['an angle-bracketed URL fragment', '<https://x.dev/#frag>'],
+    ['a bare URL fragment', 'see https://x.dev/#frag end'],
+  ])('still reports nothing for %s', (_label, input) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual([]);
+  });
+});
+
+describe('reconcileTags / remove inline — link spans', () => {
+  it('leaves the note byte-identical and reports the tag skipped', () => {
+    const input = 'see [[#Overview & Notes]] here';
+    const r = reconcileTags(input, ['Overview'], 'remove', 'inline');
+    expect(r.applied).toEqual([]);
+    expect(r.skipped).toEqual(['Overview']);
+    expect(r.content).toBe(input);
+  });
+
+  it.each([
+    ['[[#Overview]]', 'see [[#Overview]] here'],
+    ['[[Note (Draft)#Overview]]', 'see [[Note (Draft)#Overview]] here'],
+    ['[[Note#Heading|see #Overview]]', 'see [[Note#Heading|see #Overview]] here'],
+    ['[Chat #Overview](https://example.dev)', 'see [Chat #Overview](https://example.dev) here'],
+    ['[Chat #Overview][chat]', 'see [Chat #Overview][chat] here\n\n[chat]: https://example.dev'],
+  ])('leaves %s untouched', (_label, input) => {
+    const r = reconcileTags(input, ['Overview'], 'remove', 'inline');
+    expect(r.content).toBe(input);
+    expect(r.skipped).toEqual(['Overview']);
+  });
+
+  it('removes a real tag that sits immediately before a link', () => {
+    const r = reconcileTags('#work [[Note#Heading]] end', ['work'], 'remove', 'inline');
+    expect(r.applied).toEqual(['work']);
+    expect(r.content).toBe('[[Note#Heading]] end');
+  });
+
+  it('removes a real tag that sits immediately after a link', () => {
+    const r = reconcileTags('[[Note#Heading]] #work end', ['work'], 'remove', 'inline');
+    expect(r.applied).toEqual(['work']);
+    expect(r.content).toBe('[[Note#Heading]] end');
+  });
+
+  it('leaves an escaped hash in place and reports the tag skipped', () => {
+    const input = 'text \\#drop here';
+    const r = reconcileTags(input, ['drop'], 'remove', 'inline');
+    expect(r.applied).toEqual([]);
+    expect(r.skipped).toEqual(['drop']);
+    expect(r.content).toBe(input);
+  });
+
+  it('removes a real occurrence while leaving the linked and escaped ones alone', () => {
+    const input = 'see [[#drop]] and \\#drop and #drop end';
+    const r = reconcileTags(input, ['drop'], 'remove', 'inline');
+    expect(r.applied).toEqual(['drop']);
+    expect(r.content).toBe('see [[#drop]] and \\#drop and end');
+  });
+});
+
+describe('reconcileTags / add inline — link spans', () => {
+  it('does not treat a heading anchor as the tag already being present', () => {
+    const r = reconcileTags('see [[#Overview]] here', ['Overview'], 'add', 'inline');
+    expect(r.applied).toEqual(['Overview']);
+    expect(r.content).toBe('see [[#Overview]] here\n#Overview\n');
+  });
+
+  it('appends after a body that ends at a wikilink without gluing the tag to it', () => {
+    expect(reconcileTags('See [[Note]]', ['wip'], 'add', 'inline').content).toBe(
+      'See [[Note]]\n#wip\n',
+    );
   });
 });
