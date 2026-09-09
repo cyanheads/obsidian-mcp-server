@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-08-22 16:18:26
+Generated on: 2026-09-09 11:42:42
 
 ```text
 obsidian-mcp-server/
@@ -119,6 +119,8 @@ obsidian-mcp-server/
 │   │   └── SKILL.md
 │   ├── release-and-publish/
 │   │   └── SKILL.md
+│   ├── release-pr-review/
+│   │   └── SKILL.md
 │   ├── report-issue-framework/
 │   │   └── SKILL.md
 │   ├── report-issue-local/
@@ -205,6 +207,7 @@ obsidian-mcp-server/
 │   │   ├── obsidian-search-notes.test.ts
 │   │   ├── obsidian-write-note.test.ts
 │   │   ├── path-error-contracts.test.ts
+│   │   ├── periodic-error-contracts.test.ts
 │   │   └── suggest-paths.test.ts
 │   ├── helpers.ts
 │   └── instructions.test.ts
