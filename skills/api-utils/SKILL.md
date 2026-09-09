@@ -4,7 +4,7 @@ description: >
   API reference for all utilities exported from `@cyanheads/mcp-ts-core/utils`. Use when looking up utility method signatures, options, peer dependencies, or usage patterns.
 metadata:
   author: cyanheads
-  version: "2.8"
+  version: "2.9"
   audience: external
   type: reference
 ---
@@ -163,7 +163,7 @@ Helper API only. For the catalog of what the framework auto-emits (span names, m
 | Export | Signature | Notes |
 |:-------|:----------|:------|
 | `withSpan` | `async <T>(operationName: string, fn: (span: Span) => Promise<T>, attributes?: Record<string, string \| number \| boolean>) -> Promise<T>` | Creates an active span, calls `fn(span)`, sets `OK` on success or records exception + sets `ERROR` on throw, then ends the span. Always rethrows. |
-| `runInContext` | `(ctx: RequestContext \| undefined, fn: () => T) -> T` | Runs `fn` inside the currently active OTel context. When `ctx` has no `traceId`/`spanId`, calls `fn` directly. Does not restore a specific span — use for carrying context across async boundaries (`setTimeout`, `queueMicrotask`). |
+| `runInContext` | `(ctx: RequestContext \| undefined, fn: () => T) -> T` | Runs `fn` with the span `ctx` names (`traceId`/`spanId`) re-established as the active OTel span, so spans opened inside `fn` parent to it. When `ctx` has no `traceId`/`spanId`, calls `fn` directly. Use for carrying a request's trace across async boundaries (`setTimeout`, `queueMicrotask`). |
 | `buildTraceparent` | `(ctx?: RequestContext) -> string \| undefined` | Builds a W3C `traceparent` header (`00-<traceId>-<spanId>-01`) from `ctx` or the active span. Returns `undefined` when neither source yields both IDs. |
 | `extractTraceparent` | `(headers: Headers \| Record<string, string \| undefined>) -> TraceparentInfo \| undefined` | Parses a W3C `traceparent` header. Returns `undefined` when absent or malformed. `TraceparentInfo: { traceId, spanId, sampled }`. |
 | `createContextWithParentTrace` | `(parentHeaders: Headers \| Record<string, string \| undefined>, operation: string) -> RequestContext` | Extracts `traceparent` from headers and creates a child `RequestContext` inheriting `traceId`/`parentSpanId`. |

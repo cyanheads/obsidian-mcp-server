@@ -4,7 +4,7 @@ description: >
   Workflow: run the `maintenance` skill against one or more existing MCP server projects (dependency updates, framework adoption, skill sync), verify adoption gaps in a double-check pass, then wrap up and release via `git-wrapup` and `release-and-publish`. Read `../SKILL.md` first for the universal rules and sub-agent strategy.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: workflow
 ---
@@ -117,7 +117,9 @@ The orchestrator collects Phase 1 + Phase 2 reports and produces:
 If a target's diff suggests minor-or-above, **pause that target and surface to the user during roll-up** — unaffected targets proceed to Phase 4 at patch.
 
 ### Phase 4: Wrap-up + release
-Each sub-agent reads BOTH `skills/git-wrapup/SKILL.md` AND `skills/release-and-publish/SKILL.md`. Runs wrap-up (version bump, changelog authoring, commit, annotated tag), then release (push, npm publish, MCP Registry, GH release, Docker).
+Each sub-agent reads BOTH `skills/git-wrapup/SKILL.md` AND `skills/release-and-publish/SKILL.md`. Runs wrap-up (version bump, changelog authoring, commit stack), then release (annotated tag, push, npm publish, MCP Registry, GH release, Docker).
+
+**Release PR mode.** When the target declares it (see "Release PR mode" in `../SKILL.md`), Phase 4 runs as three serial sub-agents — wrap-up (halts at the open PR) → `release-pr-review` → release — with an orchestrator check of the PR between each. Everything below is unchanged; the PR wraps it.
 
 **Framework changelog reading.** When `mcp-ts-core` was updated, the sub-agent must read the framework's changelog files for the version delta (e.g. `node_modules/@cyanheads/mcp-ts-core/changelog/0.9.x/0.9.2.md` through `0.9.6.md`) and distill user-facing changes relevant to this server into the changelog entry; the tag annotation carries at most a one-line framework mention with the version arrow. "Picks up upstream fixes" is not acceptable in the changelog — name what changed.
 

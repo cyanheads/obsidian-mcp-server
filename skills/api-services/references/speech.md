@@ -24,7 +24,7 @@ The provider interface — implemented by ElevenLabs (TTS) and Whisper (STT):
 | `.getSTTProvider()` | `ISpeechProvider` | Throws `McpError(InvalidRequest)` if no STT provider configured |
 | `.hasTTS()` | `boolean` | Check if TTS is available |
 | `.hasSTT()` | `boolean` | Check if STT is available |
-| `.healthCheck()` | `Promise<{ tts: boolean; stt: boolean }>` | Checks both providers sequentially |
+| `.healthCheck()` | `Promise<{ tts: boolean; stt: boolean }>` | Checks both providers in parallel |
 
 ## Providers
 
@@ -52,7 +52,6 @@ const ttsProvider = speechService.getTTSProvider();
 const ttsResult = await ttsProvider.textToSpeech({
   text: 'Hello, world!',
   voice: { voiceId: 'some-voice-id' },
-  format: 'mp3',
 });
 
 // Speech-to-Text

@@ -4,7 +4,7 @@ description: >
   Workflow: scaffold one or more new MCP server projects from `bunx @cyanheads/mcp-ts-core init` through design → build → polish → first public release. Each phase invokes a foundational skill end-to-end; this file is the sequencing and gates, not the procedural detail. Read `../SKILL.md` first for the universal rules and sub-agent strategy.
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: external
   type: workflow
 ---
@@ -80,7 +80,7 @@ Phase 11 is optional. Phase 12 is the last phase that modifies source code — e
 Only phases with orchestration overrides or non-obvious instructions appear below. Other phases run their foundational skill end-to-end.
 
 ### Phase 1: Scaffold + repo
-Sub-agent runs `bunx @cyanheads/mcp-ts-core init <name>`, follows the `setup` skill, then creates a **private** GitHub repo (`gh repo create --private`). Override the `setup` skill's commit step — **do NOT commit**; Phase 2 is the commit. Copy `LICENSE` from `node_modules/@cyanheads/mcp-ts-core/LICENSE` if not already present.
+Sub-agent runs `bunx @cyanheads/mcp-ts-core init <name>`, follows the `setup` skill, then creates a **private** GitHub repo (`gh repo create --private`) and immediately runs `gh repo edit --enable-squash-merge=false --enable-rebase-merge=false` — release PRs land by local fast-forward, so the GitHub UI must not be able to squash or rewrite a stack. Override the `setup` skill's commit step — **do NOT commit**; Phase 2 is the commit. Copy `LICENSE` from `node_modules/@cyanheads/mcp-ts-core/LICENSE` if not already present.
 
 ### Phase 2: Initial commit
 Sub-agent verifies `gh repo view --json visibility` returns `PRIVATE` (or has explicit user authorization for public) before push. Tag is `v0.1.0`.

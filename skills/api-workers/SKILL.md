@@ -4,7 +4,7 @@ description: >
   Cloudflare Workers deployment using `createWorkerHandler` from `@cyanheads/mcp-ts-core/worker`. Covers the full handler signature, binding types, CloudflareBindings extensibility, runtime compatibility guards, and wrangler.toml requirements.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -224,9 +224,9 @@ The interface is the SDK's `ServerEventBus` — `publish(event)` and `subscribe(
 
 ## Testing Workers with miniflare
 
-`bun run test:worker` runs the worker suite under `vitest.worker.ts` (using `@cloudflare/vitest-pool-workers` + miniflare). Each test **file** gets its own fresh V8 isolate — module scope (including `createWorkerHandler`'s `appPromise` singleton) is reset between files.
+`bun run test:worker` runs the worker suite under `tests/config/vitest.worker.ts` (using `@cloudflare/vitest-pool-workers` + miniflare). Each test **file** gets its own fresh V8 isolate — module scope (including `createWorkerHandler`'s `appPromise` singleton) is reset between files.
 
-### vitest.worker.ts miniflare bindings
+### tests/config/vitest.worker.ts miniflare bindings
 
 Declare all storage bindings used in the suite:
 

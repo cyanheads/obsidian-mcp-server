@@ -4,7 +4,7 @@ description: >
   Workflow for landing known work (handoff document findings, tracked GH issues, observed gaps) and shipping it: fix → optional simplify and field-test verification → wrap-up → release across one or more MCP server projects. Generalizes "I have known issues to fix and ship" regardless of how the issues were surfaced. Chains the `field-test`, `report-issue-local`, `code-simplifier`, `git-wrapup`, and `release-and-publish` skills. Read `../SKILL.md` first for the universal rules and sub-agent strategy.
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: external
   type: workflow
 ---
@@ -114,16 +114,18 @@ Exit gate: `bun run devcheck && bun run rebuild && bun run test`.
 ### Phase 3: Wrap-up + release
 Each sub-agent reads BOTH `skills/git-wrapup/SKILL.md` AND `skills/release-and-publish/SKILL.md`.
 
+**Release PR mode.** When the target declares it (see "Release PR mode" in `../SKILL.md`), Phase 3 runs as three serial sub-agents — wrap-up (halts at the open PR) → `release-pr-review` → release — with an orchestrator check of the PR between each. The commit structure, version bump, and tag rules below are unchanged; the PR wraps them.
+
 **Orchestrator responsibility:** before spawning Phase 3 sub-agents, collect all open GH issue numbers per target (`gh issue list -R <owner>/<repo> --state open --json number,title`) and include them in each sub-agent's prompt. Phase 3 sub-agents have no context from prior phases — they need the explicit issue list to know what to close.
 
 **Commit structure.** Fixes are NOT collapsed into a single commit:
 1. Analyze the diff — understand which fixes touch which files
 2. Group by file boundaries — fixes sharing a file ship in the same commit
 3. Commit each group: `fix(scope): description` (Conventional Commits)
-4. Release commit on top: `chore(release): v<version>` — version bump + changelog + regenerated artifacts
-5. Tag the release commit
+4. Release commit on top: `chore(release): <version> — <theme>` — version bump + changelog + regenerated artifacts
+5. Tag the release commit (`release-and-publish` step 4 — the tag is created at release time, not at wrap-up)
 
-The changelog carries the depth; the tag annotation covers every change at headline granularity — notable ones named, minor ones in one grouped bullet (per git-wrapup step 8). The commit split is about git history, not release notes.
+The changelog carries the depth; the tag annotation covers every change at headline granularity — notable ones named, minor ones in one grouped bullet (per `release-and-publish` step 4). The commit split is about git history, not release notes.
 
 **Version bump.** Default **patch** for bug-fix releases. **Minor** when enhancements are included.
 

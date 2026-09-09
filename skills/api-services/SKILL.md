@@ -4,7 +4,7 @@ description: >
   API reference for built-in service providers (LLM, Speech, Graph). Use when looking up service interfaces, provider capabilities, or integration patterns.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: reference
 ---

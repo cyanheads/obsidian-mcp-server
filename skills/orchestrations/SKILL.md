@@ -4,7 +4,7 @@ description: >
   Pick and run a multi-phase workflow that chains foundational task skills (`git-wrapup`, `release-and-publish`, `maintenance`, `field-test`, `setup`, etc.) end-to-end. Routes user intent to a workflow file under `workflows/` — greenfield builds, maintenance + release, field-test + fix, or known-work + release. Single source for the universal rules (no commits without authorization, no destructive git, no marketing language), the orchestrator posture (own the goal, ground sub-agents in primary sources, verify against the goal), and the sub-agent strategy (orient block, parallel fanout, isolation, normalization) that apply across every workflow. Sub-agents are an optional capability — workflows run linearly when fanout isn't available.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: workflow
 ---
@@ -51,14 +51,14 @@ A workflow file is the orchestrator's playbook for one run. Read it end-to-end b
 
 These apply to every workflow. Workflow files don't restate them; the orchestrator carries them forward and restates them in sub-agent prompts where applicable.
 
-1. **No commits, pushes, tags, branch creation, or destructive ops without explicit user authorization.** Work phases leave the working tree dirty for orchestrator review. Wrap-up and release phases run only after the user authorizes — though once authorized, the authorization is durable through the workflow's end (no re-asking at each phase boundary).
+1. **No commits, pushes, tags, branch creation, or destructive ops without explicit user authorization.** Work phases leave the working tree dirty for orchestrator review. Wrap-up and release phases run only after the user authorizes — though once authorized, the authorization is durable through the workflow's end (no re-asking at each phase boundary). The `release/<version>` branch and PR that `git-wrapup` creates in release PR mode are part of the authorized release, not a separate ask.
 2. **No `git stash`, no `git reset --hard`, no `git restore .`, no `git clean -f`, no `git checkout -- .`.** These bypass safety and risk silent data loss. Read-only git (`status`, `diff`, `log`, `show`, `blame`) is always safe.
 3. **No `--no-verify`, no `--no-gpg-sign`, no bypassing commit hooks.** If a hook fails, investigate the underlying issue.
 4. **`bun run devcheck` is the handoff gate between phases.** Work phases must hand back a green devcheck. If a phase can't reach green, halt and report the failing step verbatim rather than carrying broken state forward.
 5. **No marketing adjectives** in commits, tags, READMEs, or changelog entries — no "comprehensive", "robust", "enhanced", "seamless", "improved". State the change, not its quality.
 6. **One workflow per orchestration run.** Don't interleave two workflows in the same session. If a target needs both (e.g., maintenance surfaces a bug fix that needs field-testing first), sequence them as two workflow runs with a clean handoff in between.
 7. **`gh release create --notes-from-tag` is incompatible with `--repo`.** Always `cd` into the target repo directory for `gh release` commands.
-8. **Annotated tags only** (`git tag -a`), never lightweight, created with `--cleanup=whitespace` — the default (`strip`) deletes `#`-leading lines as comments; `--cleanup=verbatim` glues the SSH signature into the message (unparseable-as-signed tag, signature block leaks into the release body). Tag annotation subject omits the version number — GitHub prepends `v<VERSION>:` to release titles when using `--notes-from-tag`, so including the version in the subject creates stutter. The tag body's final line is a Markdown link to this version's changelog file — `[CHANGELOG v<VERSION>](https://github.com/<OWNER>/<REPO>/blob/main/changelog/<major.minor>.x/<VERSION>.md)`, separated from the gates line by a blank line — giving the release a one-click jump to the full entry.
+8. **Annotated tags only** (`git tag -a`), never lightweight, created with `--cleanup=whitespace` — the default (`strip`) deletes `#`-leading lines as comments; `--cleanup=verbatim` glues the SSH signature into the message (unparseable-as-signed tag, signature block leaks into the release body). Tag annotation subject omits the version number — GitHub prepends `v<VERSION>:` to release titles when using `--notes-from-tag`, so including the version in the subject creates stutter. The tag body's final line is a Markdown link to this version's changelog file — `[CHANGELOG v<VERSION>](https://github.com/<OWNER>/<REPO>/blob/main/changelog/<major.minor>.x/<VERSION>.md)`, on its own paragraph — giving the release a one-click jump to the full entry; in release PR mode that line continues with ` · release PR #<N>` so the release also points at its audit trail.
 9. **Conventional Commits subjects** (`feat|fix|refactor|chore|docs|test|build(scope): message`). One logical concern per commit. The release commit (version bump + changelog + regenerated artifacts) lands on top of a stack of feature/fix commits, never collapsed alongside them.
 10. **Email on any artifact is the user's domain email**, never a personal address that might appear in git config.
 
@@ -161,7 +161,17 @@ For N targets in a phase:
 
 ### Editor / wrap-up separation
 
-Editing phases and wrap-up phases never go in the same sub-agent. Editing sub-agents make file changes and run devcheck — they do not commit, tag, or push. Wrap-up sub-agents read the working tree, commit, tag, and (when releasing) push and publish — they do not edit source. This separation lets the orchestrator review diffs before they become permanent and keeps the commit graph clean.
+Editing phases and wrap-up phases never go in the same sub-agent. Editing sub-agents make file changes and run devcheck — they do not commit, tag, or push. Wrap-up sub-agents read the working tree, commit, and (when releasing) tag, push and publish — they do not edit source. This separation lets the orchestrator review diffs before they become permanent and keeps the commit graph clean.
+
+### Release PR mode
+
+A target can declare that every release goes through a pull request (in its `CLAUDE.md`/`AGENTS.md`, or in the run's brief — mechanics in `git-wrapup`'s "Release PR mode"). The wrap-up + release phase then runs as **three sub-agents in sequence**, with an orchestrator check between each:
+
+1. **Wrap-up** — `git-wrapup`; halts with the stack committed on `release/<version>`, pushed, PR open.
+2. **Review** — `release-pr-review`; reads the PR range through `code-simplifier` plus a correctness review, lands fixes as fixup commits autosquashed into the stack, force-with-lease pushes the release branch, syncs the PR body, leaves one summary comment. This is the one role that both edits and commits — scoped to the release branch, never `main`, never a tag.
+3. **Release** — `release-and-publish`; `git merge --ff-only` onto `main` locally, tags `main`'s tip, pushes, publishes. Its brief must state that the review pass is finished — the skill halts without that line, and the orchestrator writes it only after confirming the review agent's report against the PR (`gh pr view --json state,headRefOid`, `git log --oneline main..HEAD`).
+
+Straight-through mode drops the review agent: one sub-agent runs wrap-up and release back to back, opening and merging the PR in the same session. Without a declaration there is no PR, and the stack lands on `main` directly.
 
 ### Normalization
 
@@ -186,10 +196,11 @@ Sub-agent self-reports describe intent, not always reality. After every phase th
 - **Files** — `ls`, `git status`, `git diff --stat`
 - **Commits** — `git log --oneline -5`
 - **Tags** — `git tag --points-at HEAD`, `git ls-remote --tags origin`
+- **Release PR** — `gh pr view <N> --json state,headRefOid` (`OPEN` with head == local HEAD between phases; `MERGED` after release), `git ls-remote --heads origin release/<VERSION>` empty after release
 - **GitHub** — `gh repo view --json visibility`, `gh release view v<VERSION>`, `gh issue list`, `gh issue view <N> --comments` to confirm the fix comment landed
 - **npm / registries** — `npm view <pkg>@<version>`, registry-specific checks
 - **Build state** — re-run `bun run devcheck` if the previous phase was supposed to land green
-- **Quality** — tag annotation is a headline digest covering every change (flat bullets — notable ones named, minor ones in one grouped bullet; no changelog section headers, deps ≤1 line, no gates line), subject omits the version number, no marketing adjectives, issue backlinks where applicable, changelog link as final line
+- **Quality** — tag annotation is a headline digest covering every change (flat bullets — notable ones named, minor ones in one grouped bullet; no changelog section headers, deps ≤1 line, no gates line), subject omits the version number, no marketing adjectives, issue backlinks where applicable, changelog link as final line (plus ` · release PR #<N>` in release PR mode)
 
 If verification disagrees with the sub-agent's report, that's the signal to re-spawn with the actual state and the unmet goal in the prompt — not to trust the report. The goal hasn't changed; only the path needs to.
 
@@ -200,7 +211,7 @@ If verification disagrees with the sub-agent's report, that's the signal to re-s
 | Reads, analysis, file edits (working tree only) | Implicit — initial workflow approval covers these |
 | Local commits, annotated tags | Explicit at workflow start; durable through workflow end |
 | Push to remote, npm / registry publish, GH release create, Docker push | Explicit at workflow start; durable through workflow end |
-| Destructive ops (force push, tag delete, remote branch delete, etc.) | Always re-confirm, never assume |
+| Destructive ops (force push, tag delete, remote branch delete, etc.) | Always re-confirm, never assume — two exceptions ride the release authorization: `release-pr-review`'s `--force-with-lease` on the run's own unmerged `release/<version>` branch, and `release-and-publish` deleting that branch once the PR reports `MERGED` |
 
 Pipeline authorization is durable through to completion. Once the user authorizes a workflow run, don't re-ask at each phase boundary — proceed automatically through gates that pass. Conditions that always require a fresh check-in: destructive ops on shared resources, external actions without sign-off, errors that need human judgment.
 

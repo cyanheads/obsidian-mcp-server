@@ -4,7 +4,7 @@ description: >
   Workflow: field-test one or more existing MCP server projects against the live upstream API, file GH issues for valid findings, deploy fix sub-agents per server, optionally loop until clean, then wrap up and release. Chains the `field-test`, `report-issue-local`, `tool-defs-analysis`, `code-simplifier`, `git-wrapup`, and `release-and-publish` skills. Read `../SKILL.md` first for the universal rules and sub-agent strategy.
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: external
   type: workflow
 ---
@@ -130,14 +130,16 @@ If looping: respawn Phase 1 + Phase 3 for targets that had fixes applied; skip t
 ### Phase 6: Wrap-up + release (optional)
 Each sub-agent reads both `skills/git-wrapup/SKILL.md` and `skills/release-and-publish/SKILL.md`.
 
+**Release PR mode.** When the target declares it (see "Release PR mode" in `../SKILL.md`), Phase 6 runs as three serial sub-agents — wrap-up (halts at the open PR) → `release-pr-review` → release — with an orchestrator check of the PR between each. Everything below is unchanged; the PR wraps it.
+
 **Commit structure.** Fixes are NOT collapsed into a single commit. Per the universal git rules:
 1. Analyze the diff (`git diff --stat`, then spot-check actual changes)
 2. Group by file boundaries — fixes sharing a file ship in the same commit
 3. Commit each group: `fix(scope): description` (Conventional Commits)
-4. Release commit on top — version bump + changelog + regenerated artifacts as `chore(release): v<version>`
-5. Tag the release commit
+4. Release commit on top — version bump + changelog + regenerated artifacts as `chore(release): <version> — <theme>`
+5. Tag the release commit (`release-and-publish` step 4 — the tag is created at release time, not at wrap-up)
 
-The changelog carries the depth; the tag annotation covers every change at headline granularity — notable ones named, minor ones in one grouped bullet (per git-wrapup step 8). The commit split is about git history, not release notes.
+The changelog carries the depth; the tag annotation covers every change at headline granularity — notable ones named, minor ones in one grouped bullet (per `release-and-publish` step 4). The commit split is about git history, not release notes.
 
 **Version bump.** Default **patch** for field-test fix releases. **Minor** when enhancements are bundled in.
 

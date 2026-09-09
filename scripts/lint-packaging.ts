@@ -38,7 +38,10 @@
  *      (`name`, server key, `interface.displayName`) carry the unscoped machine
  *      name while the `npx -y` install arg carries the full `package.json`
  *      name (scoped if scoped). An unscoped install arg for a scoped package
- *      is a guaranteed install 404. Gated by `devcheck.config.json`
+ *      is a guaranteed install 404. Each present plugin manifest's `version`
+ *      must equal `package.json`'s, so a release cannot ship stale plugin
+ *      metadata (issue #393); `.codex-plugin/mcp.json` is connection config and
+ *      carries no version. Gated by `devcheck.config.json`
  *      `packaging.pluginManifests` (default on); each manifest is skipped
  *      cleanly when absent (issue #240).
  *
@@ -424,19 +427,35 @@ function installArg(entry: Record<string, unknown>): unknown {
 /**
  * Check 10: plugin marketplace manifests. Display fields (`name`, server key,
  * `interface.displayName`) must equal the unscoped machine name; the install
- * arg must equal the full `package.json` name (the real `npx` target). Empty
- * descriptions ship blank marketplace cards. Each manifest is validated only
- * when present, so HTTP-only and non-plugin consumers are unaffected. The
- * caller gates the whole check on `packaging.pluginManifests`.
+ * arg must equal the full `package.json` name (the real `npx` target); the
+ * declared `version` must equal `package.json`'s, so a release cannot ship a
+ * manifest advertising an earlier one. Empty descriptions ship blank
+ * marketplace cards. Each manifest is validated only when present, so HTTP-only
+ * and non-plugin consumers are unaffected. The caller gates the whole check on
+ * `packaging.pluginManifests`.
+ *
+ * `.codex-plugin/mcp.json` is connection configuration and carries no version.
  */
 export function checkPluginManifests(
   inputs: PluginManifestInputs,
   unscopedName: string,
   fullName: string,
+  packageVersion?: string,
 ): string[] {
   const errors: string[] = [];
   const optOut =
     '(or set "packaging": { "pluginManifests": false } in devcheck.config.json to opt out)';
+
+  /** Version parity for one plugin manifest; skipped when package.json has none. */
+  const checkVersion = (file: string, manifest: Record<string, unknown>): void => {
+    if (!isNonEmptyString(packageVersion)) return;
+    if (manifest.version === packageVersion) return;
+    errors.push(
+      manifest.version === undefined
+        ? `${file} has no "version" — must declare the package.json version "${packageVersion}"`
+        : `${file} "version" is "${String(manifest.version)}" — must equal the package.json version "${packageVersion}"`,
+    );
+  };
 
   // ── .claude-plugin/plugin.json ──
   const claude = inputs.claudePlugin;
@@ -445,6 +464,7 @@ export function checkPluginManifests(
     if (!isNonEmptyString(claude.description)) {
       errors.push(`${f} "description" is empty — populate it ${optOut}`);
     }
+    checkVersion(f, claude);
     if (claude.name !== unscopedName) {
       errors.push(
         `${f} "name" is "${String(claude.name)}" — must equal the unscoped package name "${unscopedName}"`,
@@ -474,6 +494,7 @@ export function checkPluginManifests(
     if (!isNonEmptyString(codex.description)) {
       errors.push(`${f} "description" is empty — populate it ${optOut}`);
     }
+    checkVersion(f, codex);
     if (codex.name !== unscopedName) {
       errors.push(
         `${f} "name" is "${String(codex.name)}" — must equal the unscoped package name "${unscopedName}"`,
@@ -533,7 +554,7 @@ async function main(): Promise<void> {
   const warnings: string[] = [];
   const notes: string[] = [];
 
-  const pkg = tryReadJson<{ name?: string }>(resolve('package.json'));
+  const pkg = tryReadJson<{ name?: string; version?: string }>(resolve('package.json'));
   const unscopedName = pkg?.name?.split('/').pop();
 
   // ── Manifest-dependent checks (1–4 + manifest identity) ──
@@ -662,6 +683,7 @@ async function main(): Promise<void> {
           },
           unscopedName,
           pkg.name,
+          pkg.version,
         ),
       );
     } else {

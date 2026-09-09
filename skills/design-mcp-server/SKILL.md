@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.23"
+  version: "2.24"
   audience: external
   type: workflow
 ---
@@ -257,6 +257,8 @@ const wrapupInstructions = tool('git_wrapup_instructions', {
 
 Prior art: [`git_wrapup_instructions`](https://github.com/cyanheads/git-mcp-server) walks through staging, commit, and push with repo state inspected. If a server has recurring "how do I do X well given my state" questions, an instruction tool typically beats N topic-specific tools and duplicating guidance in tool descriptions.
 
+**Suggestions are scoped to what this deployment registers.** A `nextToolSuggestions` entry is an executable call, so it is only correct when its target is enabled under the same configuration — a tool wrapped in `disabledTool()` is absent from `tools/list`, and a suggestion naming it hands the agent a call that fails on dispatch. Build the array from the same config the registration reads, and when the target is off, drop the entry rather than the explanation: `guidance` can still say the capability is unavailable in this deployment and what to do instead. The audit and a worked example live under *Feature-flagged tools* in `add-tool/SKILL.md`.
+
 #### Reference tools
 
 **Applies when:** the domain speaks in opaque vocabulary — enum codes, classification systems, identifier formats, per-source coverage windows — that agents must supply as inputs elsewhere. Skip when inputs are self-evident (free text, ISO dates, well-known formats).
@@ -493,6 +495,8 @@ throw notFound(`Paper '${id}' not found on arXiv. Verify the ID format (e.g., '2
 
 **During design, settle the full contract for each tool** — reason, code, when-clause, *and the verbatim `recovery` string* — in the tool's section of the design doc; they become the literal `errors: [...]` entries during scaffolding. Hold every recovery string (and zero-hit notice, and resolver `guidance`) to the **no-dead-ends rule: it names the concrete next tool call**, with the reference tool as the most common routing target. Settled at design time these stay sharp; left to implementation they degrade into "check your input." Not every failure needs a contract entry; baseline infrastructure errors (5xx, timeouts, validation) are fine to let bubble.
 
+**A routing target must be callable in the deployment doing the routing.** A recovery string, notice, or `guidance` line that names a config-gated tool is a dead end wherever that gate is off — the agent is sent to a tool absent from `tools/list`, at the moment it is already recovering from a failure. Prefer routing to ungated tools (the reference tool is a good target precisely because nothing gates it). Where the target genuinely is gated, resolve the text from the same config that decides registration, and say the capability is unavailable in this deployment rather than naming a call that cannot be made. Structured follow-ups are stricter still — see *Instruction tools* above.
+
 #### Design table
 
 Summarize each tool:
@@ -701,6 +705,7 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] **If an upstream API has no native search but the relevant set is bounded:** MCP-side list filtering considered — a distinct local filter param (`filter`/`nameContains`, not `query`), filtering the full set, strict token match (fuzzy only when a caller needs typo tolerance)
 - [ ] **If the server has workflow tools:** call-flow documented (upstream sequence + mode arms) in design doc's Workflow Analysis
 - [ ] **If state-aware procedural guidance adds value:** instruction tool considered with `nextToolSuggestions` pre-filled from diagnostics
+- [ ] **If any tool is config-gated:** nothing routes to it while the gate is off — recovery strings, notices, and `guidance` name a callable target or state the capability is unavailable, and structured follow-ups naming it are emitted only under the config that registers it
 - [ ] **If workflow tools have destructive modes:** destructive arm gated on a `ctx.requestInput` confirmation read back from `ctx.inputs`, with `destructiveHint` annotation so clients that never fulfil the round still surface the risk
 - [ ] **If a parameter determines blast radius:** safe default set (e.g., `mode: 'preview'`, `dryRun: true`, `confirmCount` required)
 - [ ] **App tools default to no.** If one was proposed, verified there's a real human-in-the-loop in an MCP Apps-capable client justifying the iframe/CSP/`format()`-twin maintenance cost — otherwise dropped in favor of a standard tool

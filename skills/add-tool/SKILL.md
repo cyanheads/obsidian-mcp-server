@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.21"
+  version: "2.22"
   audience: external
   type: reference
 ---
@@ -225,6 +225,37 @@ export const submitObservations = getServerConfig().enableWrites
 | `/` (HTML landing page) | **Yes**, in a 4th muted bucket after `read \| write \| destructive` |
 
 The wrapper preserves all original definition fields (handler, schemas, auth scopes, error contracts) — when re-enabled, the tool already conforms to every lint rule.
+
+#### Audit what still names the tool
+
+Gating a tool removes it from `tools/list`, but nothing rewrites the rest of the server. Every reference that survives points a client at a name it cannot call. Sweep for the tool's name across three surfaces and fix what the gate makes wrong:
+
+| Surface | What the gate requires |
+|:---|:---|
+| **Static prose** — server `instructions`, tool descriptions, field `.describe()` text | Do not describe a disabled tool as currently callable. |
+| **Recovery text** — `errors[].recovery`, `ctx.fail` hints, `ctx.enrich` notices, service summaries | Offer an available next step, or say the capability is unavailable in this deployment. |
+| **Structured suggestions** — `nextToolSuggestions`, or any `{ toolName, args }` entry a client executes | Emit a suggestion only when its target is enabled under the same configuration. |
+
+A suggestion is executable; prose is not. When no callable alternative exists, prose may still explain the limitation — but the executable entry goes:
+
+```typescript
+const { enableWrites } = getServerConfig();
+
+// The suggestion is emitted only under the config that registers its target.
+const nextToolSuggestions = enableWrites
+  ? [{ toolName: 'brapi_submit_observations', args: { studyDbId } }]
+  : [];
+
+return {
+  observations,
+  nextToolSuggestions,
+  ...(enableWrites
+    ? {}
+    : { notice: 'Submitting observations is turned off in this deployment.' }),
+};
+```
+
+The same audit applies to a tool's own `errors[].recovery`: a hint naming a tool that this deployment gates off sends the agent to a dead end at exactly the moment it is recovering from a failure.
 
 ## Schemas: what the framework stores vs. what clients see
 
@@ -796,6 +827,7 @@ return { items: hits };
 - [ ] If tool returns unbounded arrays: pagination with total count, or `spillover()` / DataCanvas for *analytical* working sets (an agent would SQL them — not a discovery/search surface). If any tool emits a `canvas_id`, a `dataframe_query` tool is registered in the same server — a token with no query tool is dead output
 - [ ] If tool returns one large *document* (not a row set) that can overflow context: `outlineOnOverflow()` returns a `full | outline` union so the agent re-calls with `sections: [...]` — not one-sided truncation
 - [ ] If tool is feature-gated: evaluated whether `disabledTool()` wrapper is appropriate (present in manifest but uncallable)
+- [ ] If a tool is gated off: swept the server for its name — no prose calls it available, no recovery hint routes to it, and every structured suggestion naming it is emitted only under the config that registers it
 - [ ] If the tool filters a bounded list locally (no upstream search): a distinct local param (`filter`/`nameContains`, not `query`), filters the full set (not one page), strict token match by default
 - [ ] Registered in the project's existing `createApp()` tool list (directly or via barrel)
 - [ ] Test file created via `add-test` skill, or handler tested directly with `createMockContext()`
