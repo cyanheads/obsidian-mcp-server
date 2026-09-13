@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.5.3](changelog/3.5.x/3.5.3.md) — 2026-09-13
+
+Bun engines floor rises to >=1.4.0 for mcp-ts-core 0.13.0; the development skill tree moves to framework-skills/ so installing the plugin no longer loads it into the agent; empty or placeholder ${...} env values now read as unset, and plugin manifests wire OBSIDIAN_* through userConfig/env_vars instead of empty-string placeholders.
+
 ## [3.5.2](changelog/3.5.x/3.5.2.md) — 2026-09-09
 
 Frontmatter boundary, inline tag detection, and section reads now share one consistent boundary and resolution logic; list_notes reports directory_missing/path_is_file instead of a generic note_missing; periodic-note targets get a periodic_unsupported error naming the missing plugin extension instead of a bare 404.
