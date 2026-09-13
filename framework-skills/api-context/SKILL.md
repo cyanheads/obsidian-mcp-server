@@ -1,0 +1,816 @@
+---
+name: api-context
+description: >
+  Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.enrich`, `ctx.content`), and when to use each.
+metadata:
+  author: cyanheads
+  version: "2.3"
+  audience: external
+  type: reference
+---
+
+## Overview
+
+Every tool and resource handler receives a single `Context` (`ctx`) argument. It provides request identity, structured logging, tenant-scoped storage, multi-round-trip input collection, and cancellation — all auto-correlated to the current request.
+
+The framework auto-instruments every handler call (OTel span, duration, payload metrics). Use `ctx.log` for domain-specific logging and `ctx.state` for storage inside handlers. Use the global `logger` and `StorageService` directly only in lifecycle/background code (`setup()`, services).
+
+---
+
+## `Context` interface
+
+```ts
+import type { Context } from '@cyanheads/mcp-ts-core';
+
+interface Context extends RequestContext {
+  // Identity & tracing (inherited from RequestContext — see § RequestContext)
+  readonly requestId: string;       // Unique per request, auto-generated
+  readonly timestamp: string;       // ISO 8601 request start time
+  readonly tenantId?: string;       // JWT 'tid' claim; 'default' for stdio and HTTP+MCP_AUTH_MODE=none
+  readonly sessionId?: string;      // Mcp-Session-Id (HTTP stateful/auto); undefined elsewhere unless opted in
+  readonly traceId?: string;        // Trace containing this handler execution
+  readonly spanId?: string;         // The handler's own execution span
+  readonly auth?: AuthContext;      // Parsed auth claims (clientId, scopes, sub)
+  readonly operation?: string;      // Label for the operation this context belongs to
+  readonly extra?: Readonly<Record<string, unknown>>;  // Correlation bag — the one open field
+
+  // Structured logging — auto-includes requestId, traceId, tenantId.
+  // Dual-sink: Pino on the server, plus notifications/message to the client.
+  readonly log: ContextLogger;
+
+  // Tenant-scoped key-value storage
+  readonly state: ContextState;
+
+  // Multi-round-trip input — always present, both eras (see § ctx.requestInput)
+  readonly requestInput: RequestInputFn;   // (spec) => never — suspends and asks the caller
+  readonly inputs: ContextInputs;          // reader over a retried request's responses
+
+  // List-changed / resource-updated notifications — wired in every handler ctx;
+  // delivery is request-scoped (see § list-changed notifications)
+  readonly notifyResourceListChanged?: () => void;
+  readonly notifyResourceUpdated?: (uri: string) => void;
+  readonly notifyPromptListChanged?: () => void;
+  readonly notifyToolListChanged?: () => void;
+
+  // Cancellation
+  readonly signal: AbortSignal;
+
+  // Raw URI — present only for resource handlers
+  readonly uri?: URL;
+
+  // Agent-facing success-path enrichment — accumulates notices, query echo, totals
+  // onto the request; reaches structuredContent + content[]. Always present (no-op
+  // when no `enrichment` block), strictly typed on HandlerContext<R, E> against the
+  // declared fields. Kind-tagged helpers: enrich.notice / .total / .echo.
+  readonly enrich: Enrich;
+
+  // Non-text content blocks (image/audio bytes) for the calling model — prepended
+  // to content[] after format() runs, never placed in structuredContent. Always
+  // present (no-op when never called). Helpers: content.image / .audio; content(block)
+  // pushes a raw ContentBlock.
+  readonly content: ContentCollect;
+
+  // Opt-in contract resolver — always present (returns {} when no contract is attached
+  // or the reason is unknown), strictly typed on HandlerContext<R> against declared reasons.
+  recoveryFor(reason: string): { recovery: { hint: string } } | {};
+}
+```
+
+> **`ctx.fail` is on `HandlerContext<R>`, not `Context`.** When a definition declares `errors: [...]`, the handler receives `HandlerContext<R> = Context & { fail: TypedFail<R>; recoveryFor: TypedRecoveryFor<R> }` — both the typed `fail` and the strictly-typed `recoveryFor` live on the intersection. The bare `Context.recoveryFor` is the loose, always-present resolver. See [`ctx.fail`](#ctxfail) and [`ctx.recoveryFor`](#ctxrecoveryfor) below.
+
+### Identity fields
+
+| Field | Always present | Source |
+|:------|:--------------|:-------|
+| `requestId` | Yes | Auto-generated UUID per request |
+| `timestamp` | Yes | ISO 8601, request start |
+| `tenantId` | Stdio and HTTP+`MCP_AUTH_MODE=none` (as `'default'`); JWT `tid` claim in HTTP+`jwt`/`oauth` | JWT / single-tenant default |
+| `sessionId` | HTTP `stateful` / `auto` mode; undefined for stdio and stateless HTTP unless opted in | `Mcp-Session-Id` header (or server-minted) — see [§ `ctx.sessionId`](#ctxsessionid) |
+| `traceId` | When OTEL enabled | Trace containing this handler execution |
+| `spanId` | When OTEL enabled | The active `tool_execution:*` / `resource_read:*` span |
+| `auth` | When auth enabled | Parsed JWT claims |
+
+---
+
+## `RequestContext` — the one canonical request shape
+
+`Context extends RequestContext`. There is a single request-shape type; the handler-facing `Context` adds handler-only surfaces (`log`, `state`, `signal`, `requestInput`, `inputs`, `enrich`, `content`, `uri`) on top of it and redeclares none of the identity fields. A handler's `ctx` is therefore assignable anywhere a `RequestContext` is — services, storage, the framework logger — with no slice helper and no cast.
+
+```ts
+import { requestContextService, withExtra } from '@cyanheads/mcp-ts-core/utils';
+import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
+
+// A service typed against RequestContext accepts a handler ctx directly.
+async function fetchUser(id: string, ctx: RequestContext) { /* … */ }
+await fetchUser('123', ctx);   // ctx is a Context — no conversion
+```
+
+### Closed by design
+
+`RequestContext` has **no index signature**. Its fields are exactly: `auth`, `extra`, `operation`, `requestId`, `sessionId`, `spanId`, `tenantId`, `timestamp`, `traceId`. A misspelled canonical field (`tenatId`) is a compile error instead of a silently-ignored key.
+
+Operation-specific correlation data goes in **`extra`** — the one deliberate open bag (`Readonly<Record<string, unknown>>`). The logger flattens `extra` into the emitted line, so log output looks the same as a top-level spread.
+
+### Adding correlation data
+
+Three supported ways, most common first:
+
+```ts
+// 1. Per-log-call metadata — the common case. Nothing lands on the context.
+ctx.log.info('Retrying upstream call', { attempt, url });
+
+// 2. A copy of this context carrying extra fields. `withExtra` MERGES into any
+//    bag the parent already had; a hand-written `{ ...ctx, extra: {…} }` replaces it.
+logger.warning('Retrying upstream call', withExtra(ctx, { attempt, url }));
+
+// 3. A derived context for a sub-operation. `additionalContext` lands on `extra`,
+//    merged over whatever the parent already carried.
+const childCtx = requestContextService.createRequestContext({
+  parentContext: ctx,
+  operation: 'processItem',
+  additionalContext: { itemId: item.id },   // → childCtx.extra.itemId
+});
+
+// Reading an ad-hoc key back off a context:
+const itemId = childCtx.extra?.itemId;
+```
+
+`createRequestContext(params)` takes a closed parameter object — `additionalContext`, `operation`, `parentContext`, `tenantId` — and nothing else; a key it doesn't declare is a compile error rather than an arbitrary passthrough.
+
+Never re-open the shape to get past a type error: no index signature, no widening a parameter back to `Record<string, unknown>`, no `as` cast. A `{ ...ctx, someKey }` object literal that fails to compile is the signal to move `someKey` into `extra`, not to loosen the type.
+
+`ErrorContext` (the `ErrorHandler` call's `context`) is `Partial<RequestContext>` and is closed the same way — put ad-hoc keys under `extra` via `withExtra`, or pass them in the `ErrorHandler` call's own `context` field.
+
+`RequestContextLike` is a deprecated alias for `RequestContext`, kept for one minor. Replace every use with `RequestContext`, and collapse any `RequestContextLike | RequestContext` parameter union to plain `RequestContext`.
+
+---
+
+## `ctx.log`
+
+Request-scoped structured logger. Every log line is automatically annotated with `requestId`, `traceId`, and `tenantId` — no manual spreading needed.
+
+**Dual-sink.** Each call writes to Pino *and* mirrors onto the MCP wire as a `notifications/message` (the framework advertises the `logging` capability, and the SDK filters by the level the client set via `logging/setLevel`). The wire payload is `{ message, ...data }`; `ctx.log.error` adds `error: <message>`. Delivery is fire-and-forget — a client that never upgraded to SSE, set a higher level, or already disconnected drops the notification, and a failed send never fails the handler. Treat `ctx.log` as client-visible: it is no longer a server-only sink, so don't log anything there you wouldn't put in a tool result.
+
+### Methods
+
+| Method | Level |
+|:-------|:------|
+| `ctx.log.debug(msg, data?)` | Verbose debugging |
+| `ctx.log.info(msg, data?)` | Normal operational events |
+| `ctx.log.notice(msg, data?)` | Significant but non-error events |
+| `ctx.log.warning(msg, data?)` | Recoverable issues, unexpected states |
+| `ctx.log.error(msg, error?, data?)` | Errors (second arg is the Error object) |
+
+### Usage
+
+```ts
+// Basic
+ctx.log.info('Processing query', { query: input.query });
+
+// With error object (second arg)
+ctx.log.error('Failed to fetch upstream', error, { url, statusCode });
+
+// Debug detail
+ctx.log.debug('Cache miss', { key, ttl });
+```
+
+### `ctx.log` vs global `logger`
+
+| Use | Where |
+|:----|:------|
+| `ctx.log` | Inside tool/resource handlers — auto-correlated to the request |
+| `core.logger` / `logger` | In `setup()`, service constructors, background tasks — no request context available |
+
+The global `logger` is imported from `@cyanheads/mcp-ts-core/utils`. In handlers, prefer `ctx.log`.
+
+---
+
+## `ctx.state`
+
+Tenant-scoped key-value storage. Delegates to `StorageService` with automatic `tenantId` scoping — data written under tenant A is invisible to tenant B.
+
+### Interface
+
+```ts
+interface ContextState {
+  get<T = unknown>(key: string): Promise<T | null>;
+  get<T>(key: string, schema: ZodType<T>): Promise<T | null>;  // runtime-validated
+  set(key: string, value: unknown, opts?: { ttl?: number }): Promise<void>;
+  delete(key: string): Promise<void>;
+  deleteMany(keys: string[]): Promise<number>;
+  getMany<T = unknown>(keys: string[]): Promise<Map<string, T>>;
+  setMany(entries: Map<string, unknown>, opts?: { ttl?: number }): Promise<void>;
+  list(prefix?: string, opts?: { cursor?: string; limit?: number }): Promise<{
+    items: Array<{ key: string; value: unknown }>;
+    cursor?: string;  // opaque base64url; omitted on last page
+  }>;
+}
+```
+
+### Usage
+
+```ts
+// Store — accepts any serializable value, no manual JSON.stringify needed
+await ctx.state.set('item/123', { name: 'Widget', count: 42 });
+await ctx.state.set('session/xyz', token, { ttl: 3600 }); // TTL in seconds
+
+// Retrieve — generic type assertion or Zod-validated
+const item = await ctx.state.get<Item>('item/123');       // T | null (type assertion)
+const safe = await ctx.state.get('item/123', ItemSchema);  // T | null (runtime validated)
+
+// Delete
+await ctx.state.delete('item/123');
+
+// Batch operations
+const values = await ctx.state.getMany<Item>(['item/1', 'item/2']); // Map<string, T>
+await ctx.state.setMany(new Map([['a', 1], ['b', 2]]));
+const deleted = await ctx.state.deleteMany(['item/1', 'item/2']);    // number
+
+// List with prefix + pagination
+const page = await ctx.state.list('item/', { cursor, limit: 20 });
+for (const { key, value } of page.items) { /* ... */ }
+if (page.cursor) { /* more pages available */ }
+```
+
+### Behavior notes
+
+- Throws `McpError(InvalidRequest)` if `tenantId` is missing. Won't happen in stdio (any auth mode) or HTTP+`MCP_AUTH_MODE=none` — both default to `'default'`. Can happen in HTTP+`MCP_AUTH_MODE=jwt`/`oauth` when the token lacks a `tid` claim (intentional fail-closed: distinct authenticated callers must not silently share state).
+- Keys are tenant-prefixed internally; handlers never need to namespace manually.
+- **Key charset:** `^[a-zA-Z0-9_.\-/]+$`, 1024 chars max, no `..`. Slashes are the namespace separator — a colon (`item:123`) throws `McpError(ValidationError)` on every call. The rule covers `list` prefixes and every key in a batch operation. `createMockContext().state` enforces it identically, so an illegal key fails in the test rather than in a deployment.
+- **Workers persistence:** The `in-memory` provider loses data on cold starts. Use `cloudflare-kv`, `cloudflare-r2`, or `cloudflare-d1` for durable storage in Workers.
+
+---
+
+## `ctx.sessionId`
+
+Optional HTTP session identifier. Surfaced when the request carries a durable session — handlers use it as a *discovery / scoping key* on top of tenant-keyed `ctx.state`, not as an authorization principal.
+
+### When it's defined
+
+| Transport / mode | `ctx.sessionId` |
+|:-----------------|:----------------|
+| stdio (any auth) | `undefined` |
+| HTTP, `MCP_SESSION_MODE=stateless` | `undefined` (default) — see [opt-in](#stateless-mode-opt-in) |
+| HTTP, `stateful` / `auto`, `MCP_AUTH_MODE=none` | session token; possession = access (no identity binding) |
+| HTTP, `stateful` / `auto`, `MCP_AUTH_MODE=jwt` / `oauth` | session token, identity-bound — hijack mismatches are rejected by `SessionStore.isValidForIdentity` *before* the handler runs |
+
+In `stateful` / `auto` mode, the value mirrors the `Mcp-Session-Id` HTTP header (or a server-minted token for new sessions). Each subsequent request from the same client reuses it; reconnects after disconnect bind to the same session as long as it hasn't expired.
+
+The in-flight SSE stream is resumable too: stateful sessions carry a bounded event store, so a client reconnecting with `Last-Event-ID` gets the frames it missed replayed before the live stream resumes. On by default — selecting the session mode is the opt-in — with `MCP_HTTP_RESUMABILITY=false` as the kill switch and retention capped by both event count and TTL (`api-config` has the knobs). The buffer is released when its session is evicted.
+
+### Stateless-mode opt-in
+
+In stateless HTTP mode the SDK still hands the framework a freshly generated token for every request, but it has request-lifetime semantics (no `SessionStore`, no continuity). The framework hides this from handlers by default — `ctx.sessionId` is `undefined` so any handler treating it as durable fails closed.
+
+To surface the per-request token anyway, opt in via `createApp`:
+
+```ts
+import { createApp } from '@cyanheads/mcp-ts-core';
+
+await createApp({
+  tools: [...],
+  context: {
+    exposeStatelessSessionId: true,
+  },
+});
+```
+
+Use this only when downstream code is structured around `ctx.sessionId` and accepts that the value changes per-request. For generic per-request correlation, use `ctx.requestId` (always present, no opt-in).
+
+### Capability-token model
+
+Surfacing `sessionId` does not change the framework's capability-as-token rule (possession of an opaque ID grants access — see CLAUDE.md/AGENTS.md `# Core Rules`). It is an opt-in *discovery-scoping* axis, not an access boundary.
+
+- Tokens shared across sessions (e.g. `df_<uuid>` handed from Agent A to Agent B) still resolve on the receiving side. The lookup key is the token, not the session.
+- Session-scoped *enumeration* (e.g. `dataframe_describe` returning only items registered by the current session) is a per-server pattern: maintain a session-keyed lookup of known names, gate list-all on it, but route direct lookups against the shared backing store.
+
+This matches deployments like `brapi-mcp-server` under `MCP_AUTH_MODE=none`: each session gets its own `_connect` alias surface and its own `dataframe_describe` enumeration scope, while any agent holding a `df_<uuid>` token can query it directly across session boundaries.
+
+### Recipes
+
+**Strict — fail closed when no session is present:**
+
+```ts
+import { invalidRequest } from '@cyanheads/mcp-ts-core/errors';
+
+if (!ctx.sessionId) {
+  throw invalidRequest('Session required for this operation.');
+}
+await ctx.state.set(`session/${ctx.sessionId}/${baseKey}`, value);
+```
+
+**Lax — fall back to tenant-shared key:**
+
+```ts
+const sessionKey = ctx.sessionId
+  ? `session/${ctx.sessionId}/${baseKey}`
+  : baseKey;
+await ctx.state.set(sessionKey, value);
+```
+
+**Reading the matching log correlation field.** The framework's auto-instrumented logs always carry the raw SDK session token (even in stateless mode, for tracing) under the `sessionId` field. Don't read `ctx.sessionId` and pass it to `ctx.log` — the logger already has it.
+
+### Behavior notes
+
+- **Not a tenant boundary.** `ctx.state` is still tenant-scoped. Building session-scoped state is the consumer's responsibility — prefix with `session/${ctx.sessionId}/` as shown above.
+- **Protocol revision.** Sessions belong to the 2025-era arm, which negotiates its revision through `initialize` and carries `Mcp-Session-Id`. The [2026-07-28 revision](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports) has no session at all — it is per-request, selected by the request's own `_meta` envelope — so `ctx.sessionId` is `undefined` for every request served on that leg.
+- **Worker bundle.** Workers use the same HTTP transport plumbing; session behavior matches Node HTTP.
+
+---
+
+## `ctx.requestInput` / `ctx.inputs`
+
+Always present, on every transport and both protocol eras. A handler that needs something the caller didn't supply **returns** `ctx.requestInput(...)` and is re-entered with the answers on `ctx.inputs` — there is no mid-handler `await` for user input.
+
+`ctx.requestInput(spec)` never returns: it throws an `InputRequiredSignal` that the tool, resource, and prompt handler factories catch and convert into the protocol's [`input_required`](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr) result. It bypasses the error classifier entirely — no span, no log, no `isError`.
+
+One code path serves both eras. A 2026-07-28 client fulfils the embedded requests and retries the call; for a 2025-era session the SDK's legacy shim fulfils the same returns by issuing real `elicitation/create` / `sampling/createMessage` / `roots/list` round trips and re-entering the handler itself.
+
+**`MCP_SESSION_MODE` decides whether that second leg exists.** Under `stateful` / `auto` the shim has the session it needs. Under `stateless` each 2025-era request is served by a fresh instance that never saw `initialize`, so its client-capability view is empty and the round trip is refused rather than attempted — fail-closed, but the handler never gets its answer. Ship `stateless` on a server whose destructive tools gate on `ctx.requestInput` and those tools become unusable for v1 HTTP clients. 2026-07-28 clients are unaffected in either mode: that revision has no server→client request channel at all, which is precisely why `input_required` exists. stdio is unaffected in either mode.
+
+### The shape of a multi-round-trip handler
+
+Read `ctx.inputs` first, request only what is still missing, and write the call in return position so TypeScript narrows the line below it.
+
+```ts
+import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
+
+const Confirm = z.object({
+  confirm: z.boolean().describe('Whether to proceed with the deletion.'),
+});
+
+export const deletePath = tool('delete_path', {
+  description: 'Delete a path after confirming with the user.',
+  input: z.object({ path: z.string().describe('Path to delete') }),
+  output: z.object({ deleted: z.string().describe('The path that was deleted') }),
+  annotations: { destructiveHint: true },
+
+  handler(input, ctx) {
+    // A declined or cancelled prompt is a dead end, not a round to retry —
+    // re-asking loops until the round budget runs out.
+    const view = ctx.inputs.view('confirm');
+    if (view.kind === 'elicit' && view.action !== 'accept') {
+      throw validationError(`User ${view.action} the confirmation.`);
+    }
+
+    const answer = ctx.inputs.accepted('confirm', Confirm);
+    if (!answer) {
+      return ctx.requestInput({
+        inputRequests: {
+          confirm: inputRequired.elicit({
+            message: `Delete ${input.path}?`,
+            requestedSchema: Confirm,
+          }),
+        },
+      });
+    }
+    // `answer` is narrowed here.
+    if (!answer.confirm) throw validationError('Deletion not confirmed.');
+
+    return { deleted: remove(input.path) };
+  },
+});
+```
+
+`ctx.requestInput` returns `never`, so `return ctx.requestInput(...)` type-checks against any output type. Calling it as a bare statement works at runtime — and is the only option from a service-layer helper — but TypeScript will not narrow across it.
+
+### Building the embedded requests
+
+`inputRequired` is re-exported from the main entry. Its per-kind constructors build the entries of `inputRequests`:
+
+| Constructor | Wire request | Notes |
+|:---|:---|:---|
+| `inputRequired.elicit({ message, requestedSchema })` | `elicitation/create` (form) | `requestedSchema` accepts a Zod schema; shapes the restricted elicitation JSON Schema can't express throw a `TypeError` before anything is sent |
+| `inputRequired.elicitUrl({ message, url })` | `elicitation/create` (URL) | Authorization flows, hosted forms. On 2026-07-28 URL mode rides the same multi-round-trip flow; the 2025-era `elicitationId` is not part of that shape — correlate with your own identifier inside `requestState` |
+| `inputRequired.createMessage(params)` | `sampling/createMessage` | Ask the client's model |
+| `inputRequired.listRoots()` | `roots/list` | Ask for the client's filesystem roots |
+
+At least one of `inputRequests` or `requestState` must be supplied — the builder throws a `TypeError` otherwise.
+
+### `requestState` — carrying server state across rounds
+
+```ts
+return ctx.requestInput({
+  inputRequests: { confirm: inputRequired.elicit({ message, requestedSchema: Confirm }) },
+  requestState: JSON.stringify({ jobId }),
+});
+// Next round:
+const state = ctx.inputs.state<string>();
+```
+
+`requestState` round-trips **through the client** and comes back as attacker-controlled input. Integrity-protect (HMAC/AEAD) anything that influences authorization, resource access, or business logic, and reject state that fails verification — the SDK does not do this for you.
+
+### `ctx.inputs` — reading a retried request's responses
+
+Empty on the first round; populated on re-entry.
+
+| Member | Returns |
+|:---|:---|
+| `accepted(key, schema?)` | The accepted form-mode content for `key`, or `undefined` when the key is missing, the user declined or cancelled, the response was another kind, or (with a schema) validation failed |
+| `view(key)` | Discriminated view of one entry: `{ kind: 'missing' }` \| `{ kind: 'elicit', action, content? }` \| `{ kind: 'sampling', result }` \| `{ kind: 'roots', roots }` |
+| `state<T>()` | This round's `requestState` — verified value, raw wire string when no verifier is configured, or `undefined` on the first round |
+| `dropped` | Keys the SDK dropped because the client sent a wrapped rather than a bare response object. Re-issue those requests instead of hard-failing |
+| `responses` | The raw response map, for kinds the helpers don't cover |
+
+Two rules follow from what the SDK does *not* do:
+
+- **Responses are never re-validated against the schema the request advertised.** Pass the schema to `accepted(key, schema)` wherever the content matters, and treat every value as untrusted client input.
+- **`undefined` from `accepted()` collapses five different outcomes into one.** Missing, declined, cancelled, wrong response kind, and schema-invalid are indistinguishable through it. Branch on `view(key)` when decline/cancel needs different handling from "not asked yet" — as above, re-issuing a request the user already declined just burns rounds.
+
+### Testing
+
+`createMockContext({ inputResponses, requestState })` seeds `ctx.inputs`, so a handler can be driven straight into its second round:
+
+```ts
+const ctx = createMockContext({
+  inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
+});
+```
+
+**Convention:** only call `ctx.requestInput` from tool, resource, and prompt handlers — not from services.
+
+---
+
+## List-changed notifications (`ctx.notify*`)
+
+Fire-and-forget signals that the tool / resource / prompt list changed (the client should re-list), or that a specific resource was updated. The framework advertises the matching `listChanged` capabilities on every `initialize`. All four are wired in every tool and resource handler context — call with optional chaining (`?.`), the type is optional for mock / forward-compat only.
+
+```ts
+async handler(input, ctx) {
+  await enableFeatureTools();
+  ctx.notifyToolListChanged?.();   // tells the client to re-fetch tools/list
+  return { ok: true };
+}
+```
+
+### Delivery
+
+Which channel a notification takes depends on the protocol era the request is being served under, because the two eras opt a client in differently.
+
+| Era | Client opts in via | `ctx.notify*` routes to |
+|:----|:-------------------|:------------------------|
+| 2026-07-28 | a `subscriptions/listen` stream, whose filter names the types (and, for resources, the URIs) it wants | the change-event bus, where the SDK's listen router applies that filter |
+| 2025-era | `resources/subscribe`, for resource updates only | the request's own channel, stamped with `relatedRequestId` |
+
+The modern routing is not an optimization — the spec is explicit that a server MUST NOT send notification types the client has not requested, and that filter only sees what reaches the bus. A modern handler sending through its own request scope would deliver to a client that opened no stream at all.
+
+| Fired from | stdio | HTTP / Workers |
+|:-----------|:------|:---------------|
+| A tool / resource handler | ✅ delivered | ✅ delivered — on the listen stream (2026) or the request's SSE response stream (2025) |
+| A `setup()` hook, cron job, or any non-request scope | ✅ delivered | ✅ to 2026 clients, via `core.notify` — see below. ⚠️ still dropped for 2025 clients: there is no out-of-request channel on that era |
+
+### Emitting outside a request: `core.notify`
+
+Under HTTP there is no long-lived server instance a background emitter can send through, so `CoreServices.notify` publishes straight to the bus:
+
+```ts
+createApp({
+  tools,
+  setup(core) {
+    watchUpstream(() => core.notify.resourcesChanged());
+  },
+});
+```
+
+It is the same `ServerNotifier` the handler path publishes to, captured before serving starts; publishing while nothing is listening is a no-op, not an error. Delivery reaches 2026-07-28 clients with an open `subscriptions/listen` stream.
+
+**Supply your own bus on a multi-isolate runtime.** The default is in-process, which covers a single container. On Cloudflare Workers a background emission would otherwise reach only the isolate that produced it:
+
+```ts
+createApp({ tools, eventBus: myDurableObjectBackedBus });
+```
+
+### `notifyResourceUpdated` is subscription-scoped
+
+On both eras, but through different registries.
+
+On 2025-era connections the framework advertises `resources: { subscribe: true }` and backs it with real `resources/subscribe` / `resources/unsubscribe` handlers, so `notifyResourceUpdated(uri)` emits only for URIs the connected client actually subscribed to; an unsubscribed URI logs at debug and sends nothing. Both handlers are idempotent — re-subscribing is a no-op, and unsubscribing from a URI that was never subscribed succeeds.
+
+That registry's scope is the `McpServer` instance, which is also the connection: one persistent instance per session on the sessionful arm, one per request under per-request serving. On the per-request leg a subscription cannot outlive the request that created it, so a handler-time `ctx.notifyResourceUpdated(uri)` delivers only when that same exchange subscribed first.
+
+On 2026-07-28 there is no `resources/subscribe` method and no registry. The URI ships with the published event, and the listen filter's `resourceSubscriptions` field decides who receives it — upstream's job, not the framework's.
+
+---
+
+## `ctx.signal`
+
+Standard `AbortSignal`. Present on every context. Fires when the client cancels the request — and when the transport closes, which aborts every in-flight handler.
+
+```ts
+// Check before expensive operations
+if (ctx.signal.aborted) return earlyResult;
+
+// Pass through to fetch / other async APIs
+const response = await fetch(url, { signal: ctx.signal });
+
+// Loop with cancellation check
+for (const item of items) {
+  if (ctx.signal.aborted) break;
+  await processItem(item);
+}
+```
+
+---
+
+## `ctx.uri`
+
+Present only for resource handlers. The raw `URL` object for the matched resource URI.
+
+```ts
+export const myResource = resource('myscheme://{itemId}/data', {
+  async handler(params, ctx) {
+    ctx.log.debug('Resource accessed', { uri: ctx.uri?.toString() });
+    // params.itemId is extracted from the URI pattern — prefer params over ctx.uri
+    return fetchItem(params.itemId);
+  },
+});
+```
+
+Prefer `params` (the extracted URI template variables) over parsing `ctx.uri` manually. `ctx.uri` is available when the raw URL string is needed.
+
+---
+
+## `ctx.fail`
+
+Present only when the definition declares an `errors[]` contract. Builds an `McpError` keyed by the contract's `reason` union, so the resulting code is consistent with what the tool advertises in `tools/list`.
+
+```ts
+export const fetchItems = tool('fetch_items', {
+  description: 'Fetch items by ID.',
+  errors: [
+    { reason: 'no_match', code: JsonRpcErrorCode.NotFound, when: 'No items matched',
+      recovery: 'Broaden the query or check the spelling and try again.' },
+    { reason: 'queue_full', code: JsonRpcErrorCode.RateLimited, when: 'Local queue at capacity', retryable: true,
+      recovery: 'Wait a few seconds before retrying or reduce batch size.' },
+  ],
+  input: z.object({ ids: z.array(z.string()).describe('Item IDs') }),
+  output: z.object({ items: z.array(ItemSchema).describe('Resolved items') }),
+  async handler(input, ctx) {
+    if (queue.full()) throw ctx.fail('queue_full');
+    const items = await fetch(input.ids);
+    if (items.length === 0) throw ctx.fail('no_match', `No items match ${input.ids.length} IDs`, { ids: input.ids });
+    // ctx.fail('typo')   ← TypeScript error: 'typo' isn't in the contract
+    return { items };
+  },
+});
+```
+
+### Signature
+
+```ts
+// TypedFail<R> — R is the union of declared `reason` strings, derived from the
+// definition's `errors: [...]` const tuple via the framework's `ReasonOf<E>`.
+ctx.fail(
+  reason: R,                         // union of declared reason strings
+  message?: string,                  // defaults to the contract entry's `when` text
+  data?: Record<string, unknown>,    // merged into err.data; cannot override `reason`
+  options?: { cause?: unknown },     // ES2022 cause chain
+): McpError
+```
+
+### Behavior
+
+| Aspect | Detail |
+|:-------|:-------|
+| Code resolution | `code` comes from the matching contract entry — never from the caller. The thrown `McpError.code` always equals what's advertised in `tools/list`. |
+| Default message | When `message` is omitted, the contract entry's `when` text is used. |
+| `data.reason` | Auto-populated from the contract entry. Caller-supplied `data.reason` **cannot** override it — the framework spreads caller data first and writes `reason` last so observers see a stable identifier. |
+| Cause chains | Pass `{ cause: e }` to preserve the original error — `pino-pretty` and observability platforms render the chain automatically. |
+| Unknown reason | If the type-system guard is bypassed (JS caller, stale contract), `ctx.fail` returns an `McpError(InternalError)` with `data.reason` and `data.declaredReasons` set so the bug is loud rather than silent. |
+
+### Without a contract
+
+When the definition has no `errors[]` field, `ctx` is plain `Context` and `ctx.fail` is absent. Throw `McpError` directly (or via factory):
+
+```ts
+import { notFound, rateLimited } from '@cyanheads/mcp-ts-core/errors';
+
+async handler(input, ctx) {
+  if (queue.full()) throw rateLimited('Queue at capacity');
+  const items = await fetch(input.ids);
+  if (items.length === 0) throw notFound(`No items match ${input.ids.length} IDs`);
+  return { items };
+}
+```
+
+The contract is opt-in. See `framework-skills/api-errors/SKILL.md` for the full type-driven pattern, lint rules, and baseline-codes guidance.
+
+---
+
+## `ctx.recoveryFor`
+
+Always present on `Context`. Resolves the contract `recovery` for a given reason and returns the canonical wire shape `{ recovery: { hint } }`, ready to spread into `data`. The first member of a planned **family of opt-in resolution helpers** (future: `troubleshootingFor`, `userMessageFor`, …).
+
+```ts
+async handler(input, ctx) {
+  // Static recovery — pulled from the contract entry, no string duplication.
+  if (queue.full()) throw ctx.fail('queue_full', undefined, { ...ctx.recoveryFor('queue_full') });
+
+  // Dynamic recovery — interpolate runtime context, override the contract default.
+  if (!matched) throw ctx.fail('no_match', `No items for "${input.query}"`, {
+    recovery: { hint: `Try a broader query than "${input.query}", or check spelling.` },
+  });
+}
+```
+
+### Signature
+
+```ts
+// Loose (always present on Context — works without a contract attached):
+ctx.recoveryFor(reason: string): { recovery: { hint: string } } | {}
+
+// Strict (HandlerContext<R> when the definition declares errors[]):
+ctx.recoveryFor(reason: R): { recovery: { hint: string } }
+```
+
+### Behavior
+
+| Aspect | Detail |
+|:-------|:-------|
+| No contract attached | Returns `{}` — spread is a no-op. Always safe. |
+| Unknown reason | Returns `{}` (TS prevents this for typed callers; runtime is loose for JS / stale contracts). |
+| Declared reason | Returns `{ recovery: { hint: <contract.recovery> } }` — spread into `data`. |
+| Override | Caller can override by spreading `recoveryFor` first then writing `recovery: { hint: '...' }` after — last write wins. |
+| Service usage | Services that accept `ctx: Context` can spread `ctx.recoveryFor('reason')` directly; the no-op fallback means they don't need to know which tool called them. |
+
+### Why opt-in resolution, not auto-population
+
+The framework never injects `data.recovery.hint` without an explicit signal at the throw site. Authors opt in by typing `ctx.recoveryFor('reason')` — the same way `ctx.fail('reason')` opts into resolving the contract `code`. The contract is the single source of truth for the recovery hint; the resolver is a typed lookup keyed by the same reason the author already typed. No magic, no hidden transformation.
+
+The `≥5 words` lint rule on contract `recovery` (validated at lint time) makes this load-bearing — every `ctx.recoveryFor` call site benefits from the thoughtfulness the contract enforced.
+
+---
+
+## `ctx.enrich`
+
+Always present on `Context`. Accumulates agent-facing **success-path** context — empty-result notices, the query/filter as the server parsed it, pagination totals — onto the request. The framework merges it into `structuredContent`, folds the `enrichment` block into the tool's advertised `outputSchema`, and mirrors it into a `content[]` trailer. The success-path counterpart to `ctx.fail` / `ctx.recoveryFor`.
+
+```ts
+export const search = tool('search', {
+  description: 'Search the catalog.',
+  input: z.object({ query: z.string().describe('Search terms') }),
+  output: z.object({ items: z.array(z.string()).describe('Matching items') }),
+  enrichment: {
+    effectiveQuery: z.string().describe('Query as the server parsed it'),
+    totalCount: z.number().describe('Total matches before the limit'),
+    notice: z.string().optional().describe('Guidance when nothing matched'),
+  },
+  async handler(input, ctx) {
+    const res = await runSearch(input.query);
+    ctx.enrich.echo(res.parsed);              // → effectiveQuery + "Query: …" trailer
+    ctx.enrich.total(res.total);              // → totalCount + "N total" trailer
+    if (res.items.length === 0) ctx.enrich.notice(`No matches for "${input.query}".`);
+    return { items: res.items };              // enrichment never rides in the domain return
+  },
+});
+```
+
+### Signature
+
+```ts
+// Loose (always present on Context — works without a block; service-callable):
+ctx.enrich(fields: Record<string, unknown>): void
+
+// Strict (HandlerContext<R, E> when the definition declares an enrichment block):
+ctx.enrich(fields: Partial<z.infer<ZodObject<E>>>): void
+
+// Kind-tagged field-helpers (always present) — write a conventional key and tag
+// the content[] trailer rendering:
+ctx.enrich.notice(text: string): void      // writes `notice`         → blockquote
+ctx.enrich.total(count: number): void       // writes `totalCount`     → "N total"
+ctx.enrich.echo(query: string): void        // writes `effectiveQuery`  → "Query: …"
+ctx.enrich.delta({ field, before, after }): void  // writes `{before, after}` → "field: before → after"
+
+// Truncation disclosure — for capped lists:
+ctx.enrich.truncated({ shown, cap, ceiling?, guidance? }): void
+// writes: truncated=true, shown, cap, truncationCeiling? (if ceiling provided)
+// also writes notice via guidance or a generated default (last-wins with other notice calls)
+```
+
+### Behavior
+
+| Aspect | Detail |
+|:-------|:-------|
+| Accumulation | Each call merges its fields onto the request; later calls override earlier keys. |
+| Both surfaces | Merged into `structuredContent` (validated against `output.extend(enrichment)`) and appended to `content[]` as a trailer — even when the tool defines no `format()`. |
+| Domain payload untouched | `content[]` renders the handler's return via `format()` (or the JSON default); enrichment is a separate trailer, never double-rendered. The handler return must NOT carry enrichment fields. |
+| Required-field guard | A required enrichment field never populated fails the effective-output parse — the bug surfaces loudly rather than dropping silently. |
+| No block | Calling `ctx.enrich` on a tool that declared no `enrichment` is a silent no-op (values are stripped by the parse) — the price of service-layer callability. |
+| Service usage | Services accepting `ctx: Context` can call `ctx.enrich(...)`; the value reaches `structuredContent` exactly as if the handler had. |
+| `format-parity` | Enrichment lives outside `output`, so the `format-parity` lint never requires it in `format()`. |
+| Trailer rendering | Per field: kind-tag if set (notice/total/echo/delta), else the definition's `enrichmentTrailer.render`/`label`, else `**key:** value` (objects/arrays `JSON.stringify`'d). A structured field with no `render` errors under `enrichment-trailer-render` — supply one so it renders as markdown; `structuredContent` keeps the full value regardless. |
+| Trailer layout | One field per line. A field whose last line opens a block quote or a list item (`notice`, or a `render` ending in `>`, `-`, `*`, `1.`) gets a blank line after it, so the next field renders as its own block instead of being folded into that container by CommonMark lazy continuation. |
+
+### `ctx.enrich.truncated()` — capped-list disclosure
+
+For tools that cap a list (i.e. have a `limit`/`per_page`/`page_size`/`max_results`/`max_items` input), call `truncated()` when the cap was actually hit:
+
+```ts
+enrichment: {
+  truncated: z.boolean().describe('True when the list was capped.'),
+  shown: z.number().describe('Number of items returned.'),
+  cap: z.number().describe('The limit that was applied.'),
+  truncationCeiling: z.number().optional().describe('Upper bound for omitted items (threshold bound).'),
+},
+async handler(input, ctx) {
+  const items = await fetch(input.limit);
+  if (items.length >= input.limit) {
+    ctx.enrich.truncated({
+      shown: items.length,
+      cap: input.limit,
+      ceiling: items.at(-1)?.count,      // optional — only when list sorted by cap key
+      guidance: 'Narrow with filters or raise per_page (max 200).',
+    });
+  }
+  return { items };
+},
+```
+
+| Field written | Key | Notes |
+|:---|:---|:---|
+| `truncated` | `true` | Always |
+| `shown` | `number` | Always |
+| `cap` | `number` | Always |
+| `truncationCeiling` | `number` | Only when `ceiling` is passed |
+| `notice` | `string` | Via `guidance` or a generated default; **last-wins** — a handler with multiple notice sources (e.g. both truncation and empty-result) should compose them into one string passed as `guidance`, or call `truncated()` after the other notice calls. |
+
+The `capped-list-no-truncation` lint rule fires when a cap-like input + array output shape is present without any of: `truncated` or `totalCount` in the declared `enrichment`, or `truncated` or `totalCount` in `output`. Using `ctx.enrich.total(n)` (writes `totalCount`) is also recognized as honest disclosure.
+
+See `add-tool`'s **Tool Response Design** and `framework-skills/api-linter` (`enrichment-*` rules) for the full pattern. Test enrichment with `getEnrichment(ctx)` from `@cyanheads/mcp-ts-core/testing`.
+
+---
+
+## `ctx.content`
+
+Always present on `Context`. Collects **non-text content blocks** — image or audio bytes the calling model should see or hear — and prepends them to the tool's `content[]` after `format()` runs. Collected blocks **never** enter `structuredContent`, so the base64 payload is carried once (in `content[]`) instead of duplicating into the typed output field. The media counterpart to `ctx.enrich`: both ride alongside the domain result without bloating it.
+
+```ts
+export const renderChart = tool('render_chart', {
+  description: 'Render a chart from a series and return its summary.',
+  input: z.object({ series: z.array(z.number()).describe('Data points') }),
+  output: z.object({ points: z.number().describe('Number of points plotted') }),
+  async handler(input, ctx) {
+    const png = await draw(input.series);          // base64 PNG
+    ctx.content.image(png, 'image/png');           // → content[] block, NOT structuredContent
+    return { points: input.series.length };        // the typed result stays small
+  },
+});
+```
+
+Without `ctx.content`, the only way to surface bytes to the model is to declare them in `output` and emit an image block from `format()` — which ships the base64 twice (once in `structuredContent`, once in the block). `ctx.content` removes the duplication.
+
+### Signature
+
+```ts
+// Callable — push a raw ContentBlock (escape hatch for embedded resources, resource links):
+ctx.content(block: ContentBlock): void
+
+// Typed helpers for the two base64 media blocks:
+ctx.content.image(data: string, mimeType: string): void   // → { type: 'image', data, mimeType }
+ctx.content.audio(data: string, mimeType: string): void   // → { type: 'audio', data, mimeType }
+```
+
+### Behavior
+
+| Aspect | Detail |
+|:-------|:-------|
+| `content[]` only | Blocks are prepended to `content[]` and never written to `structuredContent`. Data meant for the typed result stays on the handler's return value. |
+| Order | `content[]` is `[...collected blocks, ...format()/JSON output, ...enrichment trailer]` — media first, domain content next, enrichment trailer last. |
+| Accumulation | Each call appends; blocks render in call order. |
+| No-op | A handler that never calls `ctx.content` produces a `content[]` / `structuredContent` byte-identical to before — the feature is purely additive and opt-in. |
+| Error path | If the handler throws, collected blocks are dropped — a failed call returns the error result only, never a partial image. |
+| Service usage | Services accepting `ctx: Context` can call `ctx.content(...)`; the blocks reach `content[]` exactly as if the handler had. |
+| No schema involvement | Blocks bypass `output` entirely, so no linter rule requires them in `format()` and they never appear in the advertised `outputSchema`. |
+
+Test content blocks with `getContentBlocks(ctx)` from `@cyanheads/mcp-ts-core/testing`.
+
+---
+
+## Quick reference
+
+| Property | Type | Present when |
+|:---------|:-----|:-------------|
+| `ctx.requestId` | `string` | Always |
+| `ctx.timestamp` | `string` | Always |
+| `ctx.tenantId` | `string \| undefined` | Stdio (`'default'`); HTTP+`MCP_AUTH_MODE=none` (`'default'`); HTTP+`jwt`/`oauth` (JWT `tid` claim — undefined if absent) |
+| `ctx.sessionId` | `string \| undefined` | HTTP `stateful` / `auto` mode; stateless HTTP only when `createApp({ context: { exposeStatelessSessionId: true } })`; never in stdio or on the session-less 2026-07-28 leg |
+| `ctx.traceId` | `string \| undefined` | OTEL enabled — the trace containing this handler execution |
+| `ctx.spanId` | `string \| undefined` | OTEL enabled — the handler's own execution span, not the enclosing request span |
+| `ctx.auth` | `AuthContext \| undefined` | Auth enabled |
+| `ctx.operation` | `string \| undefined` | Set by the context that created it (`'HandleToolRequest'` for tool calls) |
+| `ctx.extra` | `Readonly<Record<string, unknown>> \| undefined` | When correlation data was attached — the one open bag on the closed shape |
+| `ctx.log` | `ContextLogger` | Always |
+| `ctx.state` | `ContextState` | Always (throws if `tenantId` missing) |
+| `ctx.signal` | `AbortSignal` | Always |
+| `ctx.enrich` | `Enrich` | Always; typed on `HandlerContext<R, E>` when an `enrichment` block is declared |
+| `ctx.content` | `ContentCollect` | Always — prepends image/audio blocks to `content[]`, never `structuredContent` |
+| `ctx.requestInput` | `(spec) => never` | Always — suspends the handler and asks the caller for more input |
+| `ctx.inputs` | `ContextInputs` | Always; empty until the request is retried with responses |
+| `ctx.notifyResourceListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped (see [§ list-changed notifications](#list-changed-notifications-ctxnotify)) |
+| `ctx.notifyResourceUpdated` | `function \| undefined` | Always in handler ctx; limited to URIs the client subscribed to, through the listen filter (2026) or the subscribe registry (2025) |
+| `ctx.notifyPromptListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped |
+| `ctx.notifyToolListChanged` | `function \| undefined` | Always in handler ctx; delivered on the client's listen stream (2026) or its own request scope (2025) |
+| `ctx.uri` | `URL \| undefined` | Resource handlers only |
+| `ctx.fail` | `(reason, msg?, data?, opts?) => McpError` | Definition declares `errors[]` contract |
+| `ctx.recoveryFor` | `(reason) => { recovery: { hint } } \| {}` | Always (no-op when no contract); strictly typed on `HandlerContext<R>` |

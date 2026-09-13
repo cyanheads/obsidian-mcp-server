@@ -1,7 +1,8 @@
 name: Feature Request
 description: Suggest a new feature or improvement for obsidian-mcp-server
 labels: ["enhancement"]
-# assignees: ["your-github-username"]  # uncomment to auto-assign new issues
+assignees: ["cyanheads"]
+# The secondary labels listed below must exist in the repo — create each once: gh label create <name>
 body:
   - type: markdown
     attributes:
@@ -10,8 +11,7 @@ body:
         - `performance` — improves memory, CPU, latency, or resource usage
         - `security` — hardens the security posture
         - `breaking-change` — will break public API; requires a major bump
-
-        If a label doesn't exist in this repo yet, create it once: `gh label create <name>`.
+        - `surplus-token-idea` — worth exploring when token budget allows
 
   - type: textarea
     id: use-case

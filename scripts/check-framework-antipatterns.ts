@@ -152,6 +152,6 @@ for (const f of findings) {
   console.error('');
 }
 console.error(
-  'See skills/api-linter/SKILL.md or scripts/check-framework-antipatterns.ts for rule rationale.',
+  'See framework-skills/api-linter/SKILL.md or scripts/check-framework-antipatterns.ts for rule rationale.',
 );
 process.exit(1);

@@ -1,0 +1,983 @@
+---
+name: api-linter
+description: >
+  MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
+metadata:
+  author: cyanheads
+  version: "1.14"
+  audience: external
+  type: reference
+---
+
+## Overview
+
+The linter validates tool, resource, and prompt definitions against the MCP spec and framework conventions. **It is build-time only — not invoked at server startup.** It runs in two places:
+
+| Entry point | When | On failure |
+|:------------|:-----|:-----------|
+| `bun run lint:mcp` | Manual or CI | Prints errors + warnings, exits non-zero on errors. |
+| `bun run devcheck` | Pre-commit workflow | Wraps `lint:mcp` alongside typecheck, format, `bun audit`, `bun outdated`. |
+
+Both surface the same `LintReport` from `validateDefinitions()` (exported from `@cyanheads/mcp-ts-core/linter`). Each diagnostic has a stable `rule` ID — that's the anchor you land on via the `See: framework-skills/api-linter/SKILL.md#<rule>` breadcrumb appended to every message.
+
+**Severity:**
+- **error** — MUST-level spec violation; blocks `devcheck`.
+- **warning** — SHOULD-level or quality issue; logged but `devcheck` continues.
+
+**Imports (if you need to run the linter programmatically):**
+
+```ts
+import { validateDefinitions } from '@cyanheads/mcp-ts-core/linter';
+import type { LintReport, LintDiagnostic } from '@cyanheads/mcp-ts-core/linter';
+
+const report = validateDefinitions({ tools, resources, prompts, serverJson, packageJson });
+if (!report.passed) process.exit(1);
+```
+
+---
+
+## Rule index
+
+Grouped by family. Jump to any rule ID via its anchor.
+
+| Family | Rules | Section |
+|:-------|:------|:--------|
+| Definition | `definition-invalid` | [Definition rules](#definition-rules) |
+| Format parity | `format-parity`, `format-parity-threw`, `format-parity-walk-failed`, `format-parity-depth-limit` | [Format parity](#format-parity) |
+| Schema | `schema-is-object`, `describe-on-fields`, `schema-serializable`, `schema-unsatisfiable`, `header-param-designation` | [Schema rules](#schema-rules) |
+| Portability | `schema-format-portability`, `schema-anyof-needs-type`, `schema-no-discriminator-keyword`, `schema-no-defs`, `schema-root-oneof-portability`, `schema-dialect-tag` | [Portability rules](#portability-rules) |
+| Names | `name-required`, `name-format`, `name-unique` | [Name rules](#name-rules) |
+| Tools | `description-required`, `handler-required`, `auth-type`, `auth-scope-format`, `annotation-type`, `annotation-coherence`, `meta-ui-type`, `meta-ui-resource-uri-required`, `meta-ui-resource-uri-scheme`, `app-tool-resource-pairing`, `canvas-consumer-missing` | [Tool rules](#tool-rules) |
+| Resources | `uri-template-required`, `uri-template-valid`, `resource-name-not-uri`, `template-params-align` | [Resource rules](#resource-rules) |
+| Landing | `landing-*` (23 rules — shape, tagline, logo, links, repo, envExample, connectSnippets, theme) | [Landing config rules](#landing-config-rules) |
+| Prompts | `generate-required` | [Prompt rules](#prompt-rules) |
+| Handler body | `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error` | [Handler body rules](#handler-body-rules) |
+| Error contract (structural) | `error-contract-type`, `error-contract-empty`, `error-contract-entry-type`, `error-contract-code-type`, `error-contract-code-unknown`, `error-contract-code-unknown-error`, `error-contract-reason-required`, `error-contract-reason-format`, `error-contract-reason-unique`, `error-contract-when-required`, `error-contract-retryable-type`, `error-contract-recovery-required`, `error-contract-recovery-empty`, `error-contract-recovery-min-words` | [Error contract rules](#error-contract-rules) |
+| Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail` | [Error contract rules](#error-contract-rules) |
+| Enrichment | `enrichment-type`, `enrichment-empty`, `enrichment-field-type`, `enrichment-output-collision`, `enrichment-prefer-block`, `enrichment-trailer-render`, `enrichment-trailer-orphan`, `enrichment-trailer-unknown-field`, `capped-list-no-truncation` | [Enrichment rules](#enrichment-rules) |
+| server.json | ~40 rules prefixed `server-json-*` | [server.json rules](#server-json-rules) |
+
+---
+
+## Definition rules
+
+### definition-invalid
+
+**Severity:** error
+
+Fires when a `tools`, `resources`, or `prompts` array passed to `validateDefinitions()` contains a `null`/`undefined` entry (or any non-object value) instead of a definition object — e.g. a stray import or a conditional that yields `undefined`/`false`. The bad entry is reported as this diagnostic and skipped, rather than crashing the whole lint run.
+
+**Fix:** remove the empty slot, or ensure every element of the array is a real definition object (e.g. `[makeFooTool(), enabled ? makeBarTool() : null].filter(Boolean)`).
+
+---
+
+## Format parity
+
+Why this family exists: different MCP clients forward different surfaces of a tool response to the model. Claude Code reads `structuredContent` (from your handler's return value, typed by `output`). Claude Desktop reads `content[]` (from your `format()` function). Every field must be visible on both surfaces or one class of client sees less than another. The linter enforces this by synthesizing a sample value where every leaf is a uniquely identifiable sentinel, calling `format()` once, then verifying each sentinel (or its key name, for permissive types like booleans) appears in the rendered text.
+
+**How leaves are matched.** Two strategies, picked by leaf type:
+
+| Leaf type | Sentinel | Match |
+|:--|:--|:--|
+| string | `MCPPARITY<path>` — alphanumeric only | substring, anywhere in the rendered text |
+| number / int / bigint | a large distinctive integer | substring, retried against locale digit grouping (`900,000,001` → `900000001`) |
+| boolean, enum member, literal, unrecognized type | the value the schema dictates (`true`, the first enum member, the literal) | **delimited token** — must not be flanked by another alphanumeric or `_`; falls back to the field's key name as a whole word or camelCase segment |
+
+Two consequences worth knowing when writing a `format()`:
+
+- **The string sentinel is alphanumeric so escaping does not break it.** `content[]` is markdown carrying upstream text you do not control, so escaping `_`, `*`, `` ` ``, `[`, `<` at the render boundary is correct — and it leaves an alphanumeric probe byte-identical. Markdown escaping, HTML escaping, and URL encoding all pass. You never need to carve an exception into your escape set to keep `lint:mcp` green.
+- **Schema-dictated values must render as their own token.** A required `kind: z.enum(['full', 'outline'])` that `format()` never renders is not satisfied by the letters `full` appearing inside a longer word elsewhere in the output — `case_name_full`, `inactive`, `listing`. Render the field, or render its key name as a label.
+
+### format-parity
+
+**Severity:** error
+
+Fires when `format()` does not render a field present in `output`. Emitted once per missing field; large schemas can produce many `format-parity` diagnostics from a single tool.
+
+**Primary fix:** render the missing field in `format()`. For tools that return either a summary list or a detail view, use `z.discriminatedUnion` so each branch is walked separately:
+
+```ts
+output: z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('list'), items: z.array(ItemSchema) }),
+  z.object({ mode: z.literal('detail'), item: ItemSchema, history: z.array(HistoryEntry) }),
+]),
+
+format: (result) => {
+  if (result.mode === 'list') return renderList(result.items);
+  return renderDetail(result.item, result.history);
+}
+```
+
+**Escape hatch:** if the output schema was over-typed for a genuinely dynamic upstream API (e.g., a third-party JSON blob whose shape you can't nail down), relax it:
+
+```ts
+output: z.object({}).passthrough()
+```
+
+`passthrough()` still flows the full payload to `structuredContent` without declaring each field, so the linter has nothing to check against and you're not maintaining aspirational typing.
+
+**Anti-pattern:** summary-only `format()` like `return [{ type: 'text', text: \`Found ${n} items\` }]`. The sentinel walk will flag every field in the items array. Don't "fix" this by removing fields from `output` — that makes `structuredContent` clients blind too.
+
+### format-parity-threw
+
+**Severity:** warning
+
+Fires when `format()` throws while being called with a synthetic sample. The linter cannot verify parity because your formatter crashed before producing output.
+
+**Fix:** `format()` must be **total** — render any valid value of the output schema without throwing. Common causes:
+
+- Assuming an optional array is always present (`result.items.map(...)` when `items` could be `undefined`)
+- Dereferencing a discriminated-union branch without checking the discriminator
+- Calling `toFixed()` or `toISOString()` on a value that could legitimately be any number/string
+
+Add narrow guards. The linter feeds a synthetic but schema-valid value; if your formatter can't handle it, real inputs will eventually hit the same path.
+
+### format-parity-walk-failed
+
+**Severity:** warning
+
+Fires when the linter cannot walk the output schema to build a synthetic sample (usually because the schema uses an unusual composition the walker doesn't recognize). Parity is not verified for that tool — nothing is broken at runtime, but the check is silently disabled.
+
+**Fix:** inspect the walker error message in the diagnostic. Usually caused by custom Zod extensions or mixing Zod 3 and 4 schema internals. File an issue against `@cyanheads/mcp-ts-core` with the schema shape — this is a linter gap, not user error.
+
+### format-parity-depth-limit
+
+**Severity:** warning
+
+Fires when an output field is nested deeper than the sentinel walker's depth limit (8). Everything at and below that path was **not evaluated** — parity for the subtree is unknown, not verified. Four array hops from the output root is enough to reach the limit, so it turns up on ordinary shapes, not just pathological ones.
+
+The bound exists because every array / union / record hop multiplies the variant set, and a self-referential schema would otherwise recurse forever. What changed is the reporting: an unevaluated subtree used to be indistinguishable from a field that resolved to nothing, so it read as a pass.
+
+**Fix:** flatten the output shape so the field sits within the limit, or verify by hand that `format()` renders it (and treat the warning as the standing reminder that the linter is not covering it).
+
+---
+
+## Schema rules
+
+### schema-is-object
+
+**Severity:** error
+
+Tool `input`/`output` and prompt `args` must be `z.object({...})` at the top level (not `z.string()`, `z.array(...)`, etc.). The MCP spec requires a keyed structure at the schema root.
+
+**Fix:** wrap whatever you had in a single-key object:
+
+```ts
+// Wrong
+input: z.array(z.string())
+// Right
+input: z.object({ items: z.array(z.string()).describe('List of items') })
+```
+
+**One exception, on tool `input` only:** a `z.discriminatedUnion(...)` of object variants is accepted, for a multi-mode tool with mutually exclusive argument sets. It advertises as `{"type": "object", "oneOf": [...]}` — the object requirement holds, and each branch keeps its own `required` list and `const`-tagged discriminator. A bare `z.union(...)` is still rejected: with no discriminator the model has no key to pick a branch by. Output roots stay object-only — the 2025-era projection rewrites a non-object output root and wraps `structuredContent` to match.
+
+The other schema rules walk every variant, so a missing `.describe()`, a non-serializable type, or an unsatisfiable node inside one branch is reported at `input|<i>.<field>`.
+
+### describe-on-fields
+
+**Severity:** warning
+
+Every field in `input`, `output`, `params`, or `args` needs a `.describe('...')` call. Descriptions ship to the client and the LLM — missing ones make tools harder to use correctly.
+
+**Fix:** add `.describe('...')` to the paths the linter flags. The diagnostic names which path is missing a description (e.g., `input.filters.status`).
+
+**Recursion rules** — the linter walks selectively; primitive array elements are intentionally skipped. Knowing what's walked prevents over-application of describes that end up as noise in the generated JSON Schema.
+
+| Schema position | Walked? | Describe required on inner? |
+|:---|:---|:---|
+| `z.object({ ... })` field | Yes | Yes, on each field |
+| `z.array(compound)` element — object, array, or union | Yes | Yes, on the element |
+| `z.array(primitive)` element — string, number, enum, regex-branded primitive, etc. | **No** | No — outer array describe is sufficient |
+| `z.union([a, b, ...])` non-literal option | Yes | Yes, on each option |
+| `z.union([..., z.literal(X), ...])` literal option | **No** | No — outer union describe is sufficient |
+| A tool `input` root that is a `z.discriminatedUnion(...)` — its variant objects | Yes, their **fields** | No, not on the variant itself — it is a root, and roots carry no describe |
+
+The asymmetry that catches agents: inside `z.union([z.string(), z.array(z.string())])`, the outer `z.string()` option **does** need a describe (unions walk non-literal options), but the `z.string()` inside the inner array does **not** (arrays don't walk primitive elements). If the linter didn't flag a path, don't add a describe there — the redundant describe ships to the JSON Schema as clutter.
+
+**Literal variants are exempt** because they carry no independent semantic content — they're structural markers. The canonical case is form-client blank tolerance, where a `z.literal('')` variant is threaded into a union alongside a validated string so empty submissions from MCP Inspector / web UIs round-trip without breaking schema-level validation:
+
+```ts
+variable: z
+  .union([
+    z.literal(''),                                    // form-client sentinel — no describe needed
+    z.string().max(50).regex(/^[a-z_][a-z0-9_]*$/i)
+      .describe('Identifier matching [a-zA-Z_][a-zA-Z0-9_]*, max 50 chars'),
+  ])
+  .optional()
+  .describe('Variable name. Blank values from form-based clients are treated as omitted.'),
+```
+
+The outer describe on the union carries the semantic load; the non-literal variant still gets its own describe so the LLM sees the regex/length constraints in JSON Schema. Only the `z.literal` is skipped.
+
+### schema-serializable
+
+**Severity:** error
+
+Input/output schemas must use JSON-Schema-serializable Zod types only. The MCP SDK converts schemas to JSON Schema for `tools/list`; non-serializable types cause a hard runtime failure.
+
+**Disallowed:** `z.custom()`, `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()`, `z.function()`, `z.nan()`.
+
+**Fix:** use structural equivalents. Most common swap:
+
+```ts
+// Wrong
+z.date()
+// Right
+z.string().describe('ISO 8601 timestamp, e.g., 2026-04-20T12:00:00Z')
+```
+
+Parse the string to a `Date` inside the handler if you need one.
+
+### schema-unsatisfiable
+
+**Severity:** error
+
+Fires when a node in the emitted JSON Schema describes an **empty value set** — a field no value can ever satisfy. Nothing downstream reports this: the tool registers, the schema is forwarded to the model, and the argument simply can never be populated.
+
+Evaluated on the emitted schema rather than on the Zod schema, because the two disagree in exactly the case that matters most.
+
+| What you wrote | What is emitted |
+|:--|:--|
+| `z.enum([1, 2, 3, 4, 5])` — a numeric array handed to a string-only constructor | `{"type": "string", "enum": []}` |
+| `z.enum([])` | `{"type": "string", "enum": []}` |
+| `z.union([])` | `{"anyOf": []}` |
+| `z.never()` | `{"not": {}}` |
+
+**Fix:** for a closed set of non-string values, use a multi-value literal — `z.literal([1, 2, 3, 4, 5])` emits `{"type": "number", "enum": [1, 2, 3, 4, 5]}`. For an empty enum or union, the field has no legal values at all; drop it or give it real members.
+
+Not flagged, deliberately: `allOf: []` is vacuously true (matches everything), and empty `required` / `properties` / `prefixItems` are absent constraints rather than impossible ones.
+
+### header-param-designation
+
+**Severity:** error
+
+Fires when a tool's `input` carries an `x-mcp-header` designation — from `headerParam(schema, 'Name')` or a hand-written `.meta({ 'x-mcp-header': 'Name' })` — that violates one of the constraints protocol revision 2026-07-28 places on it.
+
+| Constraint | Example violation |
+|:--|:--|
+| Statically reachable through a chain of `properties` keys | A designation on an array element, a `z.record()` value, any field of a **discriminated-union input root** (the root advertises `oneOf`), or a schema hoisted into `$defs` by `.meta({ id })` |
+| Primitive-typed property — `string`, `integer`, `number`, `boolean` | `headerParam(z.object({ … }), 'Region')` |
+| Non-empty RFC 9110 token | `headerParam(z.string(), 'Bad Name')` — spaces, control characters, and HTTP delimiters are all rejected |
+| Case-insensitively unique across the whole input schema | `'Region'` and `'REGION'` on two sibling fields |
+
+Evaluated on the emitted JSON Schema, which is the same input the SDK's own scan reads — so a verdict here is the SDK's verdict.
+
+The message names the offending field in the linter's path vocabulary: `input.rows[].region` for an array element, `input.map.<key>` for a record value, `input|0.region` for a union branch.
+
+**Fix:** move the designation to a top-level or nested object property. For a multi-mode tool, there is no placement that works — a union input root puts every field behind `oneOf`; flatten the schema or drop the designation.
+
+**Why it is an error, not a warning:** the SDK enforces this with a `console.warn`. The tool still registers, and conforming Streamable HTTP clients then exclude it from `tools/list` — it silently disappears with nothing reporting the gap. `tool()` throws on the same condition at definition time, so this rule normally fires only for a definition assembled without the builder.
+
+Silent when the schema cannot be converted to JSON Schema at all — that is `schema-serializable`'s diagnostic.
+
+---
+
+## Portability rules
+
+MCP pins JSON Schema 2020-12 as the default dialect (SEP-1613), but LLM vendors accept different *subsets*. A schema that passes `schema-serializable` can still hard-fail at OpenAI's tool validator or silently lose fields at Gemini's API surface. These rules walk the emitted JSON Schema for patterns that break cross-vendor.
+
+Three default-on, two opt-in. Promote opt-ins via `MCP_LINT_PORTABILITY=strict` (env) or `validateDefinitions({ portability: 'strict' })` when targeting multi-vendor deployments.
+
+| Rule | Severity | Default-on? |
+|:-----|:---------|:------------|
+| `schema-format-portability` | error | yes |
+| `schema-anyof-needs-type` | warning | yes |
+| `schema-no-discriminator-keyword` | warning | yes |
+| `schema-no-defs` | warning | only when `portability: 'strict'` |
+| `schema-dialect-tag` | warning | only when `portability: 'strict'` |
+
+### schema-format-portability
+
+**Severity:** error
+
+Fires when the emitted schema contains a `format` value outside the allowlist. Default = OpenAI's nine: `date-time`, `time`, `date`, `duration`, `email`, `hostname`, `ipv4`, `ipv6`, `uuid` — the strictest commonly-used target. OpenAI's tool validator **hard-rejects** unknown formats: the tool never registers and the model never sees it. Field report: [cyanheads/git-mcp-server#47](https://github.com/cyanheads/git-mcp-server/issues/47) (`gpt-5-codex` rejecting `format: "uri"` from `z.url()`).
+
+Zod methods vs. the default allowlist:
+
+| Zod call | Emitted format | Allowed? |
+|:---------|:---------------|:---------|
+| `z.email()`, `z.uuid()`, `z.iso.datetime()`, `z.iso.date()` | `email` / `uuid` / `date-time` / `date` | yes |
+| `z.url()` | `uri` | **no — fires** |
+| `z.cuid()`, `z.cuid2()`, `z.ulid()`, `z.nanoid()`, `z.base64()`, `z.jwt()` | various | **no — fires** |
+
+**Fix:** drop the format method, move the constraint into `.describe()` text where the model reads it:
+
+```ts
+// Wrong                                  // Right
+homepage: z.url().describe('Homepage')    homepage: z.string().describe('Homepage (absolute URL)')
+```
+
+**Override:** widen the allowlist when targeting only vendors that accept the format:
+
+```ts
+validateDefinitions({ formatAllowlist: ['email', 'uuid', 'date-time', 'uri'], tools, resources, prompts });
+```
+
+### schema-anyof-needs-type
+
+**Severity:** warning
+
+Fires when an `anyOf`/`oneOf` branch lacks a top-level `type`. Gemini rejects with `400: reference to undefined schema`. Triggered by patterns like `z.union([z.object({...}).nullable(), z.object({...})])` — the inner nullable emits a typeless `anyOf`.
+
+**Fix:** prefer optionality via required-omission, or use `z.discriminatedUnion` for tagged unions — both emit branches with explicit `type: "object"`.
+
+### schema-no-discriminator-keyword
+
+**Severity:** warning
+
+Fires when a schema carries the OpenAPI `discriminator` keyword. OpenAI silently ignores it; Gemini doesn't recognize it. Zod 4's `z.discriminatedUnion` emits the portable shape (`oneOf` of typed branches with `const`-tagged literals), so this rule mainly catches hand-built schemas attached via `.meta({...})` or third-party-generated JSON Schema.
+
+**Fix:** drop the `discriminator` meta — the `const` literals on each branch are how clients tell variants apart.
+
+### schema-no-defs
+
+**Severity:** warning (only when `portability: 'strict'`)
+
+Fires when emitted output contains `$defs` or `$ref`. Gemini rejects these (`400: reference to undefined schema`). Typically caused by reused or recursive types built with `z.lazy(...)`. Opt-in because [SEP-1576](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1576) (token-bloat mitigation) is moving the community toward more `$defs`.
+
+**Fix:** inline the recursive type with bounded depth, or accept the Gemini limitation if you target only Anthropic clients.
+
+### schema-root-oneof-portability
+
+**Severity:** warning (only when `portability: 'strict'`)
+
+Fires when a tool's advertised `inputSchema` has a root-level `oneOf` — that is, when `input` is a `z.discriminatedUnion(...)`. The emitted shape is valid 2020-12, every branch is a typed object, and the bytes are identical on both MCP protocol revisions. What is unmeasured is vendor handling of a `oneOf` at the *parameter* root: a client that reads only `type` and `properties` would see a parameterless tool and drop the constraint silently rather than erroring. Opt-in, because for Anthropic clients the union is the better shape.
+
+**Fix (only if you need the widest vendor reach):** flatten to a single `z.object()` with a discriminator field and optional per-mode fields, and validate the combination in the handler.
+
+### schema-dialect-tag
+
+**Severity:** warning (only when `portability: 'strict'`)
+
+Fires when the top-level schema is missing `$schema`. SEP-1613 makes JSON Schema 2020-12 the default dialect, but explicit tagging (`"$schema": "https://json-schema.org/draft/2020-12/schema"`) is forward-compatible — older SDK clients default to draft-07. Zod 4's `toJSONSchema` always emits `$schema`, so this rule is a no-op for Zod-only servers; it exists as forward-compat for hand-built schemas (see SEP-834).
+
+---
+
+## Name rules
+
+### name-required
+
+**Severity:** error
+
+Every tool, resource, and prompt definition needs a non-empty `name` string. For resources, an empty `name` also falls back to the URI template (see `resource-name-not-uri`).
+
+### name-format
+
+**Severity:** error
+
+**Scope:** tools only — resources and prompts are checked by `name-required` only.
+
+Tool names must match `^[A-Za-z0-9._-]{1,128}$` (alphanumerics, dots, hyphens, underscores; 1–128 chars). Tools conventionally use `snake_case`.
+
+**Fix:** rename to a valid identifier. If the legacy name is user-facing, keep `title` as the display string and use a valid `name` internally.
+
+### name-unique
+
+**Severity:** error
+
+Tool names, resource names, and prompt names must each be unique within their type. Duplicates would cause the client to see only one.
+
+**Fix:** rename one, or consolidate into a single definition if they're actually the same tool.
+
+---
+
+## Tool rules
+
+### description-required
+
+**Severity:** warning
+
+Every tool, resource, and prompt needs a non-empty `description`. This is what the client shows the LLM to decide whether to call the definition. A missing description dramatically hurts selection accuracy.
+
+Also applies to resources and prompts (same rule ID, different `definitionType`).
+
+**Fix:** write a single cohesive paragraph. Prose, not bullet lists. Descriptions render inline in most clients.
+
+### handler-required
+
+**Severity:** error
+
+Every tool must have a `handler` function (or `taskHandlers` object for task tools). Every resource must have a `handler`. Definitions without handlers can't do anything at runtime.
+
+Also applies to resources (same rule ID, different `definitionType`).
+
+### auth-type
+
+**Severity:** error
+
+`auth` must be an array of strings. A single string or other shape is rejected.
+
+```ts
+// Wrong
+auth: 'tool:my_tool:read'
+// Right
+auth: ['tool:my_tool:read']
+```
+
+### auth-scope-format
+
+**Severity:** error
+
+Every element in `auth` must be a non-empty string. Empty strings in the array are rejected — they'd match anything.
+
+### annotation-type
+
+**Severity:** warning
+
+`annotations` hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) must be booleans. Strings like `'yes'` or numbers are rejected — the MCP spec defines these as booleans and clients may type-check.
+
+### annotation-coherence
+
+**Severity:** warning
+
+Catches `readOnlyHint: true` with **any** explicit `destructiveHint` value (even `false`) — the destructive hint is meaningless on a read-only tool, so its presence signals authoring confusion. Drop `destructiveHint` entirely when the tool is read-only.
+
+### meta-ui-type
+
+**Severity:** error (MCP Apps tools only)
+
+When a tool declares `_meta.ui`, that field must be an object. `null`, arrays, or primitives are rejected.
+
+### meta-ui-resource-uri-required
+
+**Severity:** error (MCP Apps tools only)
+
+`_meta.ui.resourceUri` must be a non-empty string. This is the URI the client resolves to load the app UI.
+
+### meta-ui-resource-uri-scheme
+
+**Severity:** warning (MCP Apps tools only)
+
+`_meta.ui.resourceUri` should use the `ui://` scheme. Other schemes (like `https://`) work but are discouraged — the `ui://` convention signals the resource is meant to be hosted by the MCP server, not fetched externally.
+
+### app-tool-resource-pairing
+
+**Severity:** warning (MCP Apps tools only)
+
+An app tool's `_meta.ui.resourceUri` must match the `uriTemplate` of a registered resource. This catches the common mistake of renaming one side of the pair and forgetting the other.
+
+**Fix:** either correct the `resourceUri` to match an existing resource, or register the resource it references. Use the `add-app-tool` skill's paired scaffold to avoid this.
+
+### canvas-consumer-missing
+
+**Severity:** warning
+
+Fires when the registered tool set contains at least one tool whose output schema has a depth-0 field named `canvas_id` or `canvasId`, but no consumer tool is registered — that is, no tool name ends with `_dataframe_query` and no extra names are listed in `canvasConsumers`.
+
+A canvas token with no query path is dead output: the agent receives the token but has no tool to send it to. The fix runs in either direction:
+
+- **Complete the integration** — add the standard `<prefix>_dataframe_query` and `<prefix>_dataframe_describe` consumers (see `api-canvas`).
+- **Remove the staging** — when the data isn't row-shaped (nested, heterogeneous, single-record payloads), SQL access adds nothing. Drop the DataCanvas integration rather than adding tools to justify it.
+
+**Knob:** suppress via `LintInput.canvasConsumers`:
+
+```ts
+// Accept a non-standard query tool name:
+validateDefinitions({ tools, canvasConsumers: ['my_sql_query'] });
+
+// Disable the rule entirely:
+validateDefinitions({ tools, canvasConsumers: false });
+```
+
+**Env var:** `MCP_LINT_CANVAS_CONSUMERS` — comma-separated tool names; the literal `false` disables. A programmatic `LintInput.canvasConsumers` takes precedence over the env var. Servers that need the knob set `MCP_LINT_CANVAS_CONSUMERS=my_query_tool` in their `.env` or CI environment.
+
+---
+
+## Resource rules
+
+### uri-template-required
+
+**Severity:** error
+
+Every resource needs a non-empty `uriTemplate` string. The URI template is the resource's primary identifier.
+
+### uri-template-valid
+
+**Severity:** error
+
+`uriTemplate` must be syntactically valid per RFC 6570: balanced braces, non-empty variable names. `test://{id/data` (unbalanced) and `test://{}/data` (empty variable) are rejected.
+
+### resource-name-not-uri
+
+**Severity:** warning
+
+Warns when the resource's `name` defaults to the URI template because no explicit name was provided. URIs make poor display names — clients often show them verbatim.
+
+**Fix:** add a short `name` field:
+
+```ts
+resource('myscheme://{id}/data', {
+  name: 'Item data',  // <-- add this
+  // ...
+})
+```
+
+### template-params-align
+
+**Severity:** error
+
+Every variable in the URI template must appear as a key in the `params` schema. `test://{itemId}/data` with `params: z.object({ item_id: ... })` is rejected — casing mismatches count. The check is template → schema only; extra schema keys not referenced by the template are not flagged.
+
+**Fix:** rename one side so they match exactly. The error message names which variables are on which side.
+
+---
+
+## Prompt rules
+
+### generate-required
+
+**Severity:** error
+
+Every prompt needs a `generate` function that returns the message array. Prompts without `generate` have nothing to produce.
+
+(Prompts also share `name-*` and `description-required` rules from their respective families.)
+
+---
+
+## server.json rules
+
+Validates the `server.json` manifest at project root against the [MCP server manifest spec](https://modelcontextprotocol.io/specification). Every rule below fires only when a `server.json` is present.
+
+| Rule ID | Severity | What it checks |
+|:--------|:---------|:---------------|
+| `server-json-type` | error | `server.json` must be a JSON object, not an array or primitive |
+| `server-json-name-required` | error | `name` must be present and non-empty |
+| `server-json-name-length` | error | `name` length 3–200 characters |
+| `server-json-name-format` | error | `name` must match reverse-DNS pattern `owner/project` |
+| `server-json-description-required` | error | `description` must be present and non-empty |
+| `server-json-description-length` | warning | `description` > 100 chars — some registries truncate |
+| `server-json-version-required` | error | `version` must be present |
+| `server-json-version-length` | error | `version` length ≤ 255 |
+| `server-json-version-no-range` | error | `version` must be a specific version, not a range (`^`, `~`, `>=`, etc.) |
+| `server-json-version-semver` | warning | `version` should be valid semver (`major.minor.patch`) |
+| `server-json-version-sync` | warning | `server.json` `version` should match `package.json` `version` |
+| `server-json-repository-type` | error | `repository` must be an object |
+| `server-json-repository-url` | error | `repository.url` is required when `repository` is present |
+| `server-json-repository-source` | error | `repository.source` is required when `repository` is present |
+| `server-json-packages-type` | error | `packages` must be an array |
+| `server-json-package-type` | error | Each `packages[i]` must be an object |
+| `server-json-package-registry` | error | `packages[i].registryType` is required |
+| `server-json-package-identifier` | error | `packages[i].identifier` is required |
+| `server-json-package-transport` | error | `packages[i].transport` is required |
+| `server-json-package-no-latest` | error | `packages[i].version` must not be `"latest"` — pin a specific version |
+| `server-json-package-version-sync` | warning | `packages[i].version` should match root `version` |
+| `server-json-package-args-type` | error | `packages[i].packageArguments` must be an array |
+| `server-json-runtime-args-type` | error | `packages[i].runtimeArguments` must be an array |
+| `server-json-env-vars-type` | error | `packages[i].environmentVariables` must be an array |
+| `server-json-remotes-type` | error | `remotes` must be an array |
+| `server-json-remote-type` | error | Each `remotes[i]` must be an object |
+| `server-json-remote-transport-type` | error | `remotes[i].type` is required |
+| `server-json-remote-no-stdio` | error | `remotes[i].type` must be `streamable-http` or `sse` — `stdio` is not valid for remotes |
+| `server-json-transport-type` | error | `transport` must be an object |
+| `server-json-transport-type-value` | error | `transport.type` must be one of `stdio`, `streamable-http`, `sse` |
+| `server-json-transport-url-required` | error | `transport.url` required for `streamable-http` and `sse` |
+| `server-json-transport-url-format` | warning | `transport.url` should be `http://` or `https://` |
+| `server-json-argument-type` | error | Each argument must be an object |
+| `server-json-argument-type-value` | error | `argument.type` must be `positional` or `named` |
+| `server-json-argument-name` | error | Named arguments require `name` |
+| `server-json-argument-value` | error | Positional arguments require `value` or `valueHint` |
+| `server-json-input-format` | warning | `format` should be `string`, `number`, `boolean`, or `filepath` |
+| `server-json-env-var-type` | error | Each environment variable must be an object |
+| `server-json-env-var-name` | error | Environment variable `name` is required |
+| `server-json-env-var-description` | warning | Environment variables should have a `description` |
+
+Most of these are mechanical — fix the manifest field named in the diagnostic's `message`. The registry spec is the source of truth; this linter just surfaces violations before you submit.
+
+---
+
+## Landing config rules
+
+Validate the `landing` config passed to `createApp()` (the config object that drives the framework's landing page). Run only when `input.landing` is provided to `validateDefinitions`. All errors — landing config that's structurally broken would render incorrectly on the public page.
+
+| Rule | Severity | Catches |
+|:-----|:---------|:--------|
+| `landing-shape` | error | `landing` is not a plain object |
+| `landing-tagline-type` | error | `tagline` is present but not a string |
+| `landing-tagline-length` | error | `tagline` exceeds the max length |
+| `landing-logo-type` | error | `logo` is present but not a string |
+| `landing-logo-size` | error | `logo` is too long for inline rendering |
+| `landing-links-type` | error | `links` is present but not an array |
+| `landing-links-count` | error | `links` exceeds the max count |
+| `landing-link-shape` | error | A `links[]` entry is not a plain object |
+| `landing-link-href` | error | A link entry's `href` is missing or not a non-empty string |
+| `landing-link-label` | error | A link entry's `label` is missing or not a non-empty string |
+| `landing-repo-root-type` | error | `repoRoot` is present but not a string |
+| `landing-repo-root-shape` | error | `repoRoot` is not a recognized GitHub URL shape |
+| `landing-env-example-type` | error | `envExample` is present but not a plain object |
+| `landing-env-example-count` | error | `envExample` has too many entries |
+| `landing-env-example-key` | error | An `envExample` key is empty or invalid |
+| `landing-env-example-value` | error | An `envExample` value is not a string |
+| `landing-connect-snippets-type` | error | `connectSnippets` is present but not a plain object |
+| `landing-connect-snippets-key` | error | A `connectSnippets` key is empty |
+| `landing-connect-snippets-value` | error | A `connectSnippets` value is not a string |
+| `landing-connect-snippets-empty` | error | A `connectSnippets` value is an empty string |
+| `landing-theme-type` | error | `theme` is present but not a plain object |
+| `landing-theme-accent` | error | `theme.accent` is present but not a string |
+| `landing-theme-accent-format` | error | `theme.accent` doesn't match the expected color format |
+
+Diagnostic anchors for these rules are the rule ID — e.g. `framework-skills/api-linter/SKILL.md#landing-shape`. Pass `landing` to `validateDefinitions({ landing, tools, resources, prompts })` to opt in.
+
+---
+
+## Handler body rules
+
+Heuristic source-text checks that scan `handler.toString()` for common error-handling anti-patterns. All warnings — false positives are possible because the rules can't see code reached through wrappers, factories assigned to variables, or service-layer throws. Each rule fires at most once per handler to keep reports quiet.
+
+### prefer-mcp-error-in-handler
+
+**Severity:** warning
+
+Fires when a handler contains `throw new Error(...)`. Plain `Error` doesn't carry a JSON-RPC code — the framework's auto-classifier degrades to `InternalError`, hiding the actual failure mode.
+
+Plain `Error` is acceptable for "don't care" cases where the specific code doesn't matter (per CLAUDE.md/AGENTS.md: "plain `Error` for don't-care cases"). This rule targets domain-specific failures that deserve a concrete code — upgrade those to factories or `ctx.fail`, and accept the warning for the rest.
+
+**Fix:** use `McpError` or a factory for domain-specific failures:
+
+```ts
+// instead of:
+throw new Error('Item not found');
+// use:
+throw notFound('Item not found', { itemId });
+```
+
+### prefer-error-factory
+
+**Severity:** warning
+
+Fires when a handler builds an error via `new McpError(JsonRpcErrorCode.X, ...)` and a matching factory exists (`notFound`, `rateLimited`, `serviceUnavailable`, …). The factory form is shorter, self-documenting, and consistent with the rest of the codebase.
+
+**Fix:** swap the constructor for the factory the diagnostic names:
+
+```ts
+// instead of:
+throw new McpError(JsonRpcErrorCode.NotFound, 'Item missing');
+// use:
+throw notFound('Item missing');
+```
+
+### preserve-cause-on-rethrow
+
+**Severity:** warning
+
+Fires when a `catch (e)` block throws a structured `McpError` (or factory) without passing `{ cause: e }`. Dropping the cause loses the original stack trace — observability platforms and `pino-pretty` rely on it to render error chains.
+
+**Fix:** thread the cause through the 4th `McpError` argument or factory options:
+
+```ts
+try {
+  await fetchUpstream();
+} catch (e) {
+  throw serviceUnavailable('Upstream failed', { service: 'pubmed' }, { cause: e });
+}
+```
+
+### no-stringify-upstream-error
+
+**Severity:** warning
+
+Fires when a handler throws an error message containing `JSON.stringify(...)`. Stringifying caught or upstream errors into the message risks leaking internal stack traces, AWS internal ARNs, or third-party trace IDs to clients.
+
+**Fix:** sanitize first, or attach the raw blob to the error's `data` payload — never the message.
+
+```ts
+// instead of:
+throw new Error(`Upstream failed: ${JSON.stringify(e)}`);
+// use:
+throw serviceUnavailable('Upstream failed', { upstreamError: e }, { cause: e });
+```
+
+---
+
+## Error contract rules
+
+Validate the optional `errors[]` declarative contract on tool/resource definitions. Structural rules check the shape of contract entries; conformance rules cross-check the handler body against the declared codes.
+
+When a contract is declared, the handler receives a typed `ctx.fail(reason, …)` keyed by the declared reason union. See `framework-skills/api-errors/SKILL.md` for runtime semantics.
+
+### error-contract-type
+
+**Severity:** error
+
+Fires when `errors` is present but not an array. The contract must be a tuple of `ErrorContract` entries.
+
+### error-contract-empty
+
+**Severity:** warning
+
+Fires when `errors: []` is declared. An empty contract is a no-op — nothing to surface in `tools/list`, no reason union for `ctx.fail`, no conformance to check.
+
+**Fix:** drop the field, or declare actual failure modes.
+
+### error-contract-entry-type
+
+**Severity:** error
+
+Fires when an entry in `errors[]` isn't an object. Each entry must be `{ code, reason, when, recovery }` (and optionally `retryable`).
+
+### error-contract-code-type
+
+**Severity:** error
+
+Fires when an entry's `code` is missing or not a number. Use the `JsonRpcErrorCode` enum:
+
+```ts
+errors: [{ code: JsonRpcErrorCode.NotFound, reason: 'no_match', when: 'No items matched' }]
+```
+
+### error-contract-code-unknown
+
+**Severity:** error
+
+Fires when an entry's `code` is a number but not a known `JsonRpcErrorCode` value. Likely a typo or stale magic number — import the enum and use a member.
+
+### error-contract-code-unknown-error
+
+**Severity:** warning
+
+Fires when an entry uses `JsonRpcErrorCode.UnknownError` (-32099). That code is the auto-classifier's giveup-fallback; declaring it in a contract conveys nothing useful to clients.
+
+**Fix:** pick a more specific code (`InternalError`, `ServiceUnavailable`, etc.) or drop the entry.
+
+### error-contract-reason-required
+
+**Severity:** error
+
+Fires when an entry's `reason` is missing or empty. `reason` is the stable machine-readable identifier clients switch on; it must always be present.
+
+### error-contract-reason-format
+
+**Severity:** warning
+
+Fires when `reason` isn't snake_case (matched against `^[a-z][a-z0-9_]*$`). Reasons are part of the public API — treat them like API constants. `'NotFound'`, `'no-match'`, `'1bad'` all warn.
+
+**Fix:** rename to snake_case (`'no_match'`, `'rate_limited'`, …).
+
+### error-contract-reason-unique
+
+**Severity:** error
+
+Fires when two entries in the same contract share a `reason`. Reasons must be unique within a contract — they're how `ctx.fail(reason, …)` selects the entry.
+
+### error-contract-when-required
+
+**Severity:** error
+
+Fires when an entry's `when` field is missing or empty. `when` is the human-readable explanation surfaced to LLMs and UI clients; without it, the contract is opaque.
+
+### error-contract-retryable-type
+
+**Severity:** warning
+
+Fires when an entry's optional `retryable` field is present but isn't a boolean. Only `true` or `false` is meaningful — drop the field if you can't commit to either.
+
+### error-contract-recovery-required
+
+**Severity:** error
+
+Fires when an entry's `recovery` field is missing or not a string. `recovery` is the agent's next-move guidance when this failure fires — it flows to the wire via `ctx.recoveryFor`.
+
+### error-contract-recovery-empty
+
+**Severity:** error
+
+Fires when `recovery` is an empty string. A blank recovery is worse than none — it suggests the field was considered and deliberately left empty.
+
+**Fix:** write a concrete recovery hint (≥5 words).
+
+### error-contract-recovery-min-words
+
+**Severity:** warning
+
+Fires when `recovery` has fewer than 5 words. Short recoveries like "Try again." are too vague to guide an agent's next action.
+
+**Fix:** expand with specifics — what to try, what parameter to change, which tool to call instead.
+
+### error-contract-conformance
+
+**Severity:** warning
+
+Cross-check rule. Fires when a handler throws a non-baseline code (via `new McpError(JsonRpcErrorCode.X, …)` or a factory like `notFound()`) that isn't declared in `errors[]`.
+
+Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) are auto-allowed because they bubble from anywhere — services, framework utilities, the auto-classifier — and are implicitly always-possible on any tool. Only domain-specific codes need declaring.
+
+**Fix:** add the missing code to `errors[]` with a stable reason, or route through `ctx.fail(reason, …)` if it maps to an existing entry.
+
+**Heuristic limitations:** the scan reads `handler.toString()` and only counts code *construction* sites — `new McpError(JsonRpcErrorCode.X, …)` and `throw factory(…)`. A bare `JsonRpcErrorCode.X` reference in a comparison (`err.code === JsonRpcErrorCode.X`) or a `case` label is not a throw and is correctly ignored. Indirect throws (`const e = notFound(); throw e;`), throws from called services, and throws via runtime helpers like `httpErrorFromResponse(...)` are invisible.
+
+### error-contract-prefer-fail
+
+**Severity:** warning
+
+Fires when a handler throws a code that **is** declared in the contract directly (via factory or `new McpError`) instead of routing through `ctx.fail(reason, …)`. Direct throws bypass the typed helper, leaving observers without a stable `data.reason` and disconnecting the throw site from the contract entry.
+
+**Fix:** swap the direct throw for `ctx.fail` using the reason the diagnostic suggests:
+
+```ts
+// instead of:
+throw notFound('No items match');
+// use:
+throw ctx.fail('no_match', 'No items match');
+```
+
+The diagnostic message includes the declared reason(s) for the code so you can copy-paste.
+
+---
+
+## Enrichment rules
+
+Validate the `enrichment` block — the success-path counterpart to `errors[]`. Enrichment fields are merged into `structuredContent` and folded into the advertised `outputSchema`, so the linter guards the block's shape and its disjointness from `output`. See `api-context`'s `ctx.enrich` and `add-tool`'s **Tool Response Design**.
+
+### enrichment-type
+
+**Severity:** error
+
+Fires when `enrichment` is present but isn't a plain object mapping field names to Zod schemas (a `ZodRawShape`) — e.g. an array or a primitive.
+
+**Fix:** declare `enrichment: { <name>: <ZodType>, … }`.
+
+### enrichment-empty
+
+**Severity:** warning
+
+Fires when `enrichment: {}` is declared with no fields — a no-op.
+
+**Fix:** drop the field, or declare the agent-facing fields `ctx.enrich(...)` will populate.
+
+### enrichment-field-type
+
+**Severity:** error
+
+Fires when an enrichment field's value isn't a Zod schema.
+
+**Fix:** use a Zod type (`z.string().describe(…)`, `z.number().describe(…)`, …) for every enrichment field.
+
+### enrichment-output-collision
+
+**Severity:** error
+
+Fires when an enrichment key matches an `output` key. The effective output schema is `output.extend(enrichment)`, so a collision silently overrides the `output` field.
+
+**Fix:** rename one side so enrichment keys are disjoint from output keys.
+
+### enrichment-prefer-block
+
+**Severity:** warning
+
+Advisory. Fires when a tool has **no** `enrichment` block but an `output` field whose name strongly signals agent-facing context (`notice`, `effectiveQuery`, `queryEcho`) rather than domain payload.
+
+**Fix:** move the field into an `enrichment` block and populate it via `ctx.enrich(...)` — it reaches both client surfaces without a `format()` entry. Ignore if the field is genuinely domain data. Deliberately conservative — common domain fields like `totalCount` are not flagged.
+
+### enrichment-trailer-render
+
+**Severity:** error
+
+Fires when a non-scalar (object/array) enrichment field has no `enrichmentTrailer.render`. It would `JSON.stringify` into a one-line blob in the `content[]` trailer (`structuredContent` keeps the full value either way). The `delta` shape (`z.object({ before, after })`, populated by `ctx.enrich.delta()`) is exempt — it renders natively as `field: before → after`.
+
+**Fix:** add a renderer — `enrichmentTrailer: { <field>: { render: (v) => … } }` — use `ctx.enrich.delta()` for before/after state, or opt into the JSON blob explicitly with `render: (v) => JSON.stringify(v)`.
+
+### enrichment-trailer-orphan
+
+**Severity:** error
+
+Fires when `enrichmentTrailer` is declared without an `enrichment` block — trailer config only renders enrichment fields.
+
+**Fix:** add the `enrichment` block, or drop the `enrichmentTrailer`.
+
+### enrichment-trailer-unknown-field
+
+**Severity:** error
+
+Fires when an `enrichmentTrailer` key doesn't match any declared `enrichment` field (a typo or drift the `keyof`-typed config already catches for TS authors).
+
+**Fix:** rename the trailer key to a declared enrichment field, or remove it.
+
+### capped-list-no-truncation
+
+**Severity:** warning
+
+Fires when a tool:
+1. has a depth-0 input field whose name is cap-*shaped*, AND
+2. has at least one depth-0 array-typed `output` field, AND
+3. declares no truncation disclosure.
+
+Cap-shaped means, after normalizing camelCase to snake_case (so `maxRecords` and `max_records` are one case):
+
+| Shape | Examples |
+|:--|:--|
+| `limit`, `<noun>_limit` / `<noun>Limit` | `limit`, `result_limit`, `resultLimit` |
+| `max_<noun>` / `max<Noun>` | `max_results`, `maxResults`, `max_items`, `maxRecords`, `maxRows` |
+| page-size idioms | `per_page`, `perPage`, `page_size`, `pageSize` |
+
+Matched by shape rather than an enumerated list, so a new cap noun is covered on arrival instead of silently disabling the rule for that tool. Deliberately not matched: bare `count`, `size`, `n`, `rows`, `records`, and words that merely begin with the letters (`maximum`).
+
+The shape does not distinguish a cap on *how many* from an upper bound on a *value*, so a range filter written as `max_<noun>` — `max_magnitude`, `max_depth_km`, `maxLat`, `max_date` — matches too. On a tool that also returns an array and discloses nothing, that reads as a warning about truncation the tool does not perform. Disclose `totalCount` if the array is paged at all (which silences it honestly), or exempt the tool via `truncationAllowlist` / `MCP_LINT_TRUNCATION_ALLOWLIST`.
+
+**Disclosure-present (rule silent) when** any of the following is true:
+- The declared `enrichment` shape has a `truncated` or `totalCount` key (`ctx.enrich.truncated()` and `ctx.enrich.total()` satisfy this).
+- The `output` schema has a depth-0 `truncated` or `totalCount` field.
+
+A silently capped list leaves the agent unaware that results were cut off — it may treat a partial set as complete. Use `ctx.enrich.truncated({ shown, cap })` for the one-liner:
+
+```ts
+// In the enrichment block:
+enrichment: {
+  truncated: z.boolean().describe('True when the list was capped at the limit.'),
+  shown: z.number().describe('Number of items returned.'),
+  cap: z.number().describe('The limit applied.'),
+},
+
+// In the handler:
+if (items.length >= input.limit) {
+  ctx.enrich.truncated({ shown: items.length, cap: input.limit });
+}
+```
+
+Or use `ctx.enrich.total(n)` when the upstream total is known — that writes `totalCount`, which is also recognized as honest disclosure.
+
+**Threshold bound:** when the list is sorted by the cap key and the upstream total is unknowable (e.g. an API returning only the page), the smallest shown value upper-bounds all omitted items. Pass it as `ceiling`:
+
+```ts
+ctx.enrich.truncated({ shown: items.length, cap: input.limit, ceiling: items.at(-1)?.count });
+```
+
+Declare `truncationCeiling: z.number().optional()` in the `enrichment` block to surface it.
+
+**Knob:** suppress via `LintInput.truncationAllowlist`:
+
+```ts
+// Exempt a specific tool:
+validateDefinitions({ tools, truncationAllowlist: ['my_search_tool'] });
+
+// Disable the rule entirely:
+validateDefinitions({ tools, truncationAllowlist: false });
+```
+
+**Env var:** `MCP_LINT_TRUNCATION_ALLOWLIST` — comma-separated tool names; the literal `false` disables. A programmatic `LintInput.truncationAllowlist` takes precedence.
+
+---
+
+## Escape hatches
+
+### Dynamic upstream data
+
+If `output` wraps a third-party API whose shape you can't pin down, prefer `z.object({}).passthrough()` over aspirational typing. The linter skips `format-parity` for passthrough schemas, and `structuredContent` still receives the full payload.
+
+### Temporarily suppress a warning
+
+Warnings don't block startup, so you can ship with them logged. If one is genuinely wrong (rather than the rule being wrong for your case), file an issue against `@cyanheads/mcp-ts-core` with the repro — the linter rules are still maturing.
+
+### Escape isn't "make it pass"
+
+Don't remove fields from `output` to silence `format-parity` — that makes the data invisible to `structuredContent` clients too. Don't rename `description` to something else to silence `describe-on-fields`. The right fix is either to render the field (format-parity) or accept the warning (description-required).
+
+---
+
+## Adding a new rule
+
+If you're extending `@cyanheads/mcp-ts-core` with a new lint rule:
+
+1. Add the rule to `src/linter/rules/<family>-rules.ts`. Return `LintDiagnostic` objects with a stable `rule` ID.
+2. Wire it into `validateDefinitions()` in `src/linter/validate.ts` if it's a new family.
+3. Add tests in `tests/unit/linter/`.
+4. **Document the rule in this file.** Add it to the rule index, write a section under the matching family, and bump `metadata.version` in the frontmatter.
+5. The breadcrumb mapping in `validateDefinitions()` is family-prefix-based (`server-json-*` → `#server-json-rules`, etc.), so rules in existing families pick up the right anchor automatically.

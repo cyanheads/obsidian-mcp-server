@@ -1,21 +1,23 @@
 #!/usr/bin/env node
 /**
- * @fileoverview Verifies that `skills/` (canonical) has been propagated to the
+ * @fileoverview Verifies that `framework-skills/` (canonical) has been propagated to the
  * local mirrors `.agents/skills/` and `.claude/skills/`. The maintenance skill
- * updates `skills/` for downstream servers; the mirrors are what local agent
+ * updates `framework-skills/` for downstream servers; the mirrors are what local agent
  * toolchains actually read, and silent drift means agents run on stale guidance.
  *
- * Propagation is one-way (`skills/` → mirrors), so missing or content-drifted
+ * Propagation is one-way (`framework-skills/` → mirrors), so missing or content-drifted
  * files are reported. A skill that exists *only* in a mirror is left alone when
  * it's externally sourced (globally installed, other tools), but flagged as
  * stale when its `SKILL.md` carries `metadata.audience: external` — a framework
- * skill removed from `skills/` upstream that the mirror never had pruned.
+ * skill removed from `framework-skills/` upstream that the mirror never had pruned.
  *
  * Behavior:
  *   • In sync                          → pass
  *   • Mirrors missing entirely         → skip (no mirrors to sync)
  *   • Drift (missing or changed files) → exit 1 with details (devcheck demotes to warning)
  *   • Stale framework skill in mirror  → exit 1 (mirror-only dir with audience: external)
+ *   • Unmigrated pre-0.13 `skills/`    → exit 1 with the `git mv` step
+ *   • Leftover pre-0.13 `skills/`      → exit 1 with the removal step (both trees present)
  *
  * Ignore specific skills or files via `devcheck.config.json`:
  *
@@ -25,7 +27,7 @@
  *     }
  *   }
  *
- * Patterns match relative paths under `skills/`. A bare name like `add-tool`
+ * Patterns match relative paths under `framework-skills/`. A bare name like `add-tool`
  * ignores the whole directory; `add-tool/SKILL.md` ignores a single file.
  * `.DS_Store` and other OS cruft are ignored by default.
  *
@@ -39,7 +41,13 @@ import { relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 
 const ROOT = resolve('.');
-const SKILLS_DIR = resolve(ROOT, 'skills');
+const SKILLS_DIR = resolve(ROOT, 'framework-skills');
+/**
+ * Where the tree lived before 0.13. Claude Code and Codex auto-load a plugin's
+ * root `skills/`, so a server shipping a plugin manifest handed its development
+ * skills to every installing agent — hence the move.
+ */
+const LEGACY_SKILLS_DIR = resolve(ROOT, 'skills');
 const MIRRORS: { label: string; path: string }[] = [
   { label: '.agents/skills', path: resolve(ROOT, '.agents/skills') },
   { label: '.claude/skills', path: resolve(ROOT, '.claude/skills') },
@@ -95,9 +103,49 @@ function isFrameworkManaged(skillMdPath: string): boolean {
   return /^\s*audience:\s*external\s*$/m.test(readFileSync(skillMdPath, 'utf-8'));
 }
 
+/** Skill directories under `root` whose `SKILL.md` carries `audience: external`. */
+function frameworkManagedDirs(root: string): string[] {
+  return skillDirNames(root).filter((name) => isFrameworkManaged(resolve(root, name, 'SKILL.md')));
+}
+
 if (!existsSync(SKILLS_DIR)) {
-  console.log('Skipped: no skills/ directory.');
+  const unmigrated = frameworkManagedDirs(LEGACY_SKILLS_DIR).length > 0;
+  if (unmigrated) {
+    console.log(
+      [
+        'skills/ still holds framework-managed skills and framework-skills/ is absent.',
+        'The framework moved its skill tree in 0.13.0: plugin hosts auto-load a root skills/,',
+        'which surfaced these development skills to every agent that installed the server.',
+        '',
+        'Fix: git mv skills framework-skills',
+        '     then update the path in CLAUDE.md/AGENTS.md, .mcpbignore (/framework-skills/),',
+        '     and .github/CONTRIBUTING.md, and regenerate docs/tree.md.',
+      ].join('\n'),
+    );
+    process.exit(1);
+  }
+  console.log('Skipped: no framework-skills/ directory.');
   process.exit(0);
+}
+
+// Both trees present. `init` run in place never overwrites an existing file, so an
+// upgrade creates `framework-skills/` and leaves the old copies where a plugin host
+// still auto-loads them. Only a name carried by both trees is a leftover — a `skills/`
+// name of its own is the reserved server-published kind.
+const canonicalDirs = new Set(skillDirNames(SKILLS_DIR));
+const leftover = frameworkManagedDirs(LEGACY_SKILLS_DIR).filter((name) => canonicalDirs.has(name));
+if (leftover.length > 0) {
+  console.log(
+    [
+      `skills/ still holds ${leftover.length} framework skill(s) that framework-skills/ also carries.`,
+      'Plugin hosts auto-load a root skills/, so those development skills still reach every',
+      'agent that installs the server.',
+      '',
+      `Fix: rm -rf ${leftover.map((name) => `skills/${name}`).join(' ')}`,
+      '     Keep skills/ for skills the server publishes to the agents that use it.',
+    ].join('\n'),
+  );
+  process.exit(1);
 }
 
 const presentMirrors = MIRRORS.filter((m) => existsSync(m.path));
@@ -131,10 +179,9 @@ for (const mirror of presentMirrors) {
 }
 
 // Stale framework skills: a skill dir present only in a mirror (absent from
-// canonical skills/) is fine when externally sourced, but stale when it carries
-// `audience: external` — a framework skill removed from skills/ that was never
+// canonical framework-skills/) is fine when externally sourced, but stale when it carries
+// `audience: external` — a framework skill removed from framework-skills/ that was never
 // pruned from the mirror. User/external skills (no marker) are left alone.
-const canonicalDirs = new Set(skillDirNames(SKILLS_DIR));
 const stale: Record<string, string[]> = {};
 for (const mirror of presentMirrors) {
   const staleHere = skillDirNames(mirror.path)
@@ -152,13 +199,15 @@ const totals = {
 const driftCount = totals.missing + totals.drifted + totals.stale;
 
 if (driftCount === 0) {
-  console.log(`skills/ is in sync with ${presentMirrors.map((m) => m.label).join(' and ')}.`);
+  console.log(
+    `framework-skills/ is in sync with ${presentMirrors.map((m) => m.label).join(' and ')}.`,
+  );
   process.exit(0);
 }
 
 const lines: string[] = [];
 lines.push(
-  `skills/ has drifted from ${presentMirrors.length > 1 ? 'mirrors' : 'its mirror'} ` +
+  `framework-skills/ has drifted from ${presentMirrors.length > 1 ? 'mirrors' : 'its mirror'} ` +
     `(${totals.missing} missing, ${totals.drifted} changed, ${totals.stale} stale).`,
 );
 
@@ -175,7 +224,9 @@ renderSection('Content differs in', drifted);
 renderSection('Stale framework skill (deleted upstream) in', stale);
 
 lines.push('');
-lines.push('Fix: propagate skills/ to the mirror(s) and delete stale framework skills from them,');
+lines.push(
+  'Fix: propagate framework-skills/ to the mirror(s) and delete stale framework skills from them,',
+);
 lines.push(
   '     or add entries to devcheck.config.json `skillsSync.ignore` to silence specific paths.',
 );

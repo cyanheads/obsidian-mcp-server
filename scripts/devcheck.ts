@@ -437,7 +437,8 @@ interface OutdatedRow {
   current: string;
   /** The declared key when attribution is unambiguous, else null. */
   declaredKey: string | null;
-  group: DependencyGroup | null;
+  /** The block the row belongs to; `bun outdated` leaves `prod` rows unmarked. */
+  group: DependencyGroup;
   /** The row verbatim, used to key the rendered rewrite back to its line. */
   line: string;
   /** First cell as printed, marker included. */
@@ -457,11 +458,11 @@ interface OutdatedRow {
  */
 function attributeOutdatedRow(
   target: string,
-  group: DependencyGroup | null,
+  group: DependencyGroup,
   current: string,
 ): Pick<OutdatedRow, 'candidates' | 'declaredKey'> {
   const matches = DECLARED_DEPENDENCIES.filter(
-    (declared) => declared.target === target && (group === null || declared.group === group),
+    (declared) => declared.target === target && declared.group === group,
   );
   const candidates = matches.map((declared) => declared.key);
   if (candidates.length <= 1) return { candidates, declaredKey: candidates[0] ?? null };
@@ -481,7 +482,7 @@ function parseOutdatedRows(output: string): OutdatedRow[] {
     const rawName = cells[1] ?? '';
     // Skip table chrome: header row and separator (e.g., "---")
     if (!rawName || rawName === 'Package' || /^-+$/.test(rawName)) continue;
-    const group = (OUTDATED_GROUP_MARKER.exec(rawName)?.[1] ?? null) as DependencyGroup | null;
+    const group = (OUTDATED_GROUP_MARKER.exec(rawName)?.[1] ?? 'prod') as DependencyGroup;
     const target = rawName.replace(OUTDATED_GROUP_MARKER, '');
     const current = cells[2] ?? '';
     const update = (cells[3] ?? '').replace(/\*/g, '').trim();
@@ -514,7 +515,7 @@ function renderOutdatedTable(output: string): string {
     const row = attributed.get(line);
     let display = cell.trim();
     if (row?.declaredKey && row.declaredKey !== row.target) {
-      display = row.group ? `${row.declaredKey} (${row.group})` : row.declaredKey;
+      display = row.group === 'prod' ? row.declaredKey : `${row.declaredKey} (${row.group})`;
     }
     return { line, display };
   });
@@ -552,9 +553,12 @@ function renderOutdatedTable(output: string): string {
  * Parses `bun audit` output and classifies high/critical vulnerabilities as
  * direct (in our package.json) or upstream (transitive dependency we can't fix).
  *
- * Bun audit format per vulnerability block:
- *   <package>  <version-range>        ← header (no indent, 2+ spaces before range)
- *     <parent> › <child> [› ...]      ← dependency path (indented, › = transitive)
+ * Bun audit format per vulnerability block — Bun 1.4 changed the header token
+ * and the path separator, so both shapes are accepted:
+ *   <package>  <version-range>        ← header, Bun <1.4 (no indent, 2+ spaces before range)
+ *   <package>@<version>               ← header, Bun ≥1.4
+ *     <parent> › <child> [› ...]      ← dependency path (indented; › or, Bun ≥1.4, > = transitive)
+ *     (direct dependency)             ← dependency path of a direct dependency, Bun ≥1.4
  *     <severity>: <description>       ← advisory (indented)
  *
  * Returns null if parsing yields no results (caller should fall back to default behavior).
@@ -567,8 +571,10 @@ function classifyAuditVulns(output: string): { direct: string[]; upstream: strin
     let i = 0;
 
     while (i < lines.length) {
-      // Package header: non-indented, name followed by 2+ spaces then version constraint
-      const pkgMatch = lines[i]?.match(/^([@\w][\w./-]*)\s{2,}(.+)$/);
+      // Package header: non-indented `name  range` (2+ spaces, Bun <1.4) or
+      // `name@version` (Bun ≥1.4). A scoped name leads with `@`, so only a
+      // later `@` splits the Bun 1.4 form.
+      const pkgMatch = lines[i]?.match(/^(@?\w[\w./-]*)(?:\s{2,}|@)(\S.*)$/);
       if (!pkgMatch) {
         i++;
         continue;
@@ -593,14 +599,15 @@ function classifyAuditVulns(output: string): { direct: string[]; upstream: strin
 
       if (!hasHighCritical) continue;
 
-      // Direct if: the vulnerable package is in our package.json,
-      // or any dependency path lacks › (meaning it's not pulled in transitively)
+      // Direct if: the vulnerable package is in our package.json, or any
+      // dependency path lacks a transitive separator — U+203A `›` (Bun <1.4)
+      // or `>` (Bun ≥1.4). Bun 1.4's literal `(direct dependency)` path has neither.
       const pkgName = pkg ?? '';
-      const isDirect = DIRECT_DEPS.has(pkgName) || paths.some((p) => !p.includes('\u203a'));
+      const isDirect = DIRECT_DEPS.has(pkgName) || paths.some((p) => !/[\u203a>]/.test(p));
       if (isDirect) {
         direct.push(`${pkgName} ${versionRange}`);
       } else {
-        const via = paths[0]?.split(/\s*\u203a\s*/)[0] ?? 'unknown';
+        const via = paths[0]?.split(/\s*[\u203a>]\s*/)[0] ?? 'unknown';
         upstream.push(`${pkgName} ${versionRange} (via ${via})`);
       }
     }
@@ -689,7 +696,7 @@ const ALL_CHECKS: Check[] = [
     canFix: false,
     getCommand: () => ['bun', 'run', 'scripts/lint-mcp.ts'],
     tip: (c) =>
-      `Fix definition errors above — each diagnostic links to its rule in ${c.bold('skills/api-linter/SKILL.md')}.`,
+      `Fix definition errors above — each diagnostic links to its rule in ${c.bold('framework-skills/api-linter/SKILL.md')}.`,
   },
   {
     name: 'Packaging',
@@ -764,16 +771,19 @@ const ALL_CHECKS: Check[] = [
     name: 'Skills Sync',
     flag: '--no-skills-sync',
     canFix: false,
-    // Compares canonical skills/ against local mirrors (.agents/skills, .claude/skills).
-    // Skipped when skills/ or both mirrors are absent (non-mirrored projects).
-    // Drift is demoted to a warning via isSuccess — intentional ignores live in
-    // devcheck.config.json `skillsSync.ignore`.
+    // Compares canonical framework-skills/ against local mirrors (.agents/skills, .claude/skills).
+    // Skipped when framework-skills/ or both mirrors are absent (non-mirrored projects),
+    // except that a pre-0.13 `skills/` tree always runs — absent or alongside
+    // `framework-skills/` — so the script's migration message surfaces. Drift is demoted to
+    // a warning via isSuccess — intentional ignores live in devcheck.config.json
+    // `skillsSync.ignore`.
     getCommand: () => {
-      const hasSkills = existsSync(path.join(ROOT_DIR, 'skills'));
+      const hasSkills = existsSync(path.join(ROOT_DIR, 'framework-skills'));
+      const hasLegacySkills = existsSync(path.join(ROOT_DIR, 'skills'));
       const hasMirrors =
         existsSync(path.join(ROOT_DIR, '.agents/skills')) ||
         existsSync(path.join(ROOT_DIR, '.claude/skills'));
-      if (!hasSkills || !hasMirrors) return null;
+      if (!hasLegacySkills && (!hasSkills || !hasMirrors)) return null;
       return ['bun', 'run', 'scripts/check-skills-sync.ts'];
     },
     isSuccess: (result) => {
@@ -782,18 +792,18 @@ const ALL_CHECKS: Check[] = [
       return { success: true, warning: firstLine };
     },
     tip: (c) =>
-      `Propagate ${c.bold('skills/')} to ${c.bold('.agents/skills/')} and ${c.bold('.claude/skills/')}, or add entries to ${c.bold('devcheck.config.json')} ${c.bold('skillsSync.ignore')}.`,
+      `Propagate ${c.bold('framework-skills/')} to ${c.bold('.agents/skills/')} and ${c.bold('.claude/skills/')}, or add entries to ${c.bold('devcheck.config.json')} ${c.bold('skillsSync.ignore')}.`,
   },
   {
     name: 'Skill Versions',
     flag: '--no-skill-versions',
     canFix: false,
-    // Flags skills/<name>/SKILL.md body changes (vs HEAD) that lack a metadata.version
-    // bump (#99). Skipped when skills/ is absent. Drift is demoted to a warning via
+    // Flags framework-skills/<name>/SKILL.md body changes (vs HEAD) that lack a metadata.version
+    // bump (#99). Skipped when framework-skills/ is absent. Drift is demoted to a warning via
     // isSuccess — the typo/whitespace carve-out lives in devcheck.config.json
     // `skillVersions.ignore`.
     getCommand: () => {
-      if (!existsSync(path.join(ROOT_DIR, 'skills'))) return null;
+      if (!existsSync(path.join(ROOT_DIR, 'framework-skills'))) return null;
       return ['bun', 'run', 'scripts/check-skill-versions.ts'];
     },
     isSuccess: (result) => {
@@ -896,7 +906,7 @@ const ALL_CHECKS: Check[] = [
   {
     name: 'Security Audit',
     flag: '--no-audit',
-    canFix: false, // audit --fix exists but often requires manual review.
+    canFix: false, // `audit fix` exists but often requires manual review.
     slowCheck: true,
     getCommand: () => [PM_CMD, 'audit'],
     isSuccess: (result, _mode) => {
@@ -944,7 +954,7 @@ const ALL_CHECKS: Check[] = [
       return true;
     },
     tip: (c) =>
-      `Direct dependency vulnerabilities found. Run ${c.bold(`${PM_CMD} update`)} or ${c.bold(`${PM_CMD} audit --fix`)} to resolve.`,
+      `Direct dependency vulnerabilities found. Run ${c.bold(`${PM_CMD} audit fix`)} or ${c.bold(`${PM_CMD} update <pkg>`)} to resolve.`,
   },
   {
     name: 'Dependencies (Outdated)',

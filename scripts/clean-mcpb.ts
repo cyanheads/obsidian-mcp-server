@@ -9,8 +9,8 @@
  *   2. Exact-name strip of two entry classes nested under `node_modules/`,
  *      which root-anchored `.mcpbignore` patterns cannot reach by design
  *      (issues #146/#207):
- *        a. Dependency-shipped agent docs — `skills/`, `.claude/`, `.agents/`
- *           trees and stray `SKILL.md` files (issue #230).
+ *        a. Dependency-shipped agent docs — `framework-skills/`, `skills/`,
+ *           `.claude/`, `.agents/` trees and stray `SKILL.md` files (issue #230).
  *        b. Platform-specific native bindings, which would otherwise lock the
  *           bundle to the build host's platform and push it past the 25 MB cap
  *           registries enforce (issue #274).
@@ -36,7 +36,7 @@ import { fileURLToPath } from 'node:url';
  * (post-bundle content check) — a unit test asserts the two are identical.
  */
 export const AGENT_DOC_ENTRY =
-  /^node_modules\/.*(?:\/skills\/|\/\.claude\/|\/\.agents\/|\/SKILL\.md$)/;
+  /^node_modules\/.*(?:\/framework-skills\/|\/skills\/|\/\.claude\/|\/\.agents\/|\/SKILL\.md$)/;
 
 /**
  * Platform-specific native binding packages, which must not ship in a bundle.

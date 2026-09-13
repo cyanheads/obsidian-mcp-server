@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-3.5.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-3.5.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -268,7 +268,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.3.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
 - The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin, **v4.0.0 through v5.x**, installed and enabled in your vault. Generate an API key in **Settings → Community Plugins → Local REST API** and copy it into `OBSIDIAN_API_KEY`. Plugin v6.0 removes the markdown-patch 1.x wire format this server pins for section-targeted writes and the document map.
 - Periodic-note targets (`target: { "type": "periodic" }`) work across that whole range: natively on plugin **v5.0.1 and earlier**, and on **v5.0.2 and later** — which moved the `/periodic/` routes out of the plugin — once the companion [periodic-notes API extension](https://github.com/coddingtonbear/obsidian-local-rest-api-periodic-notes) is installed. Without that extension on v5.0.2+, periodic targets fail with a `periodic_unsupported` error naming it; `obsidian://status` lists the registered extensions if you want to check first. Every other target type is unaffected.
 - An MCP client that can answer an input request (elicitation). `obsidian_delete_note` always asks for confirmation before deleting, so a client without that support can read and write notes but cannot delete one.
@@ -391,7 +391,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rule
 
 Bugs, feature requests, and documentation gaps belong in an issue — see [CONTRIBUTING.md](.github/CONTRIBUTING.md) for what makes one actionable, and [CODE_OF_CONDUCT.md](.github/CODE_OF_CONDUCT.md) for how we work together. Security reports go through [SECURITY.md](.github/SECURITY.md), never a public issue.
 
-Pull requests are welcome for small, self-contained fixes. Run checks and tests before submitting:
+Run checks and tests before submitting:
 
 ```sh
 bun run devcheck

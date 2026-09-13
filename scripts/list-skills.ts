@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * @fileoverview Surfaces the YAML frontmatter of all SKILL.md files in this
- * project's `.claude/skills/` directory (falling back to `skills/`). Mirrors
+ * project's `.claude/skills/` directory (falling back to `framework-skills/`). Mirrors
  * how the Claude Code harness lists available skills, but as plain stdout an
  * agent can read.
  *
@@ -22,7 +22,7 @@ import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
-const CANDIDATE_DIRS = ['.claude/skills', 'skills'] as const;
+const CANDIDATE_DIRS = ['.claude/skills', 'framework-skills'] as const;
 
 interface SkillEntry {
   description: string;

@@ -1,26 +1,28 @@
 name: Bug Report
 description: Report a bug in obsidian-mcp-server
 labels: ["bug"]
-# assignees: ["your-github-username"]  # uncomment to auto-assign new issues
+assignees: ["cyanheads"]
+# The secondary labels listed below must exist in the repo — create each once: gh label create <name>
 body:
   - type: markdown
     attributes:
       value: |
-        **Do not include secrets, credentials, API keys, or tokens.** Redact sensitive values from env vars, headers, and logs before submitting. GitHub issues are public.
+        **Server bug or framework bug?** File here if a tool returns wrong data, an upstream API call fails, a schema doesn't match reality, or a description misleads the model. If a builder rejects valid input, `createApp()` fails on a valid config, or transport or auth misbehaves regardless of which tool you call, file against [mcp-ts-core](https://github.com/cyanheads/mcp-ts-core/issues) instead. Not sure? File here and it'll get routed.
+
+        **Do not include secrets, credentials, API keys, tokens, PII, or other sensitive data.** Redact env vars, auth headers, user-identifying information, and internal URLs from all code snippets, logs, and stack traces before submitting. GitHub issues are public and permanent.
 
         **Secondary labels.** `bug` is applied automatically — also add one or more of the following in the sidebar if they apply:
         - `regression` — worked before, broken after a change
         - `performance` — memory, CPU, latency, or resource usage
         - `security` — vulnerability, CVE, or hardening work
         - `breaking-change` — fix will break public API
-
-        If a label doesn't exist in this repo yet, create it once: `gh label create <name>`.
+        - `surplus-token-idea` — worth exploring when token budget allows
 
   - type: input
     id: version
     attributes:
       label: Server version
-      placeholder: "3.0.0"
+      placeholder: "3.5.2"
     validations:
       required: true
 
@@ -47,7 +49,7 @@ body:
     id: runtime-version
     attributes:
       label: Runtime version
-      placeholder: "Bun 1.2.x / Node 22.x"
+      placeholder: "Bun 1.4.x / Node 24.x"
     validations:
       required: true
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
  * @fileoverview Enforces the skill-versioning policy (#98 → #99): a change to a
- * `skills/<name>/SKILL.md` body must bump `metadata.version` in the same edit.
+ * `framework-skills/<name>/SKILL.md` body must bump `metadata.version` in the same edit.
  * Documenting the policy made the expectation visible; this check makes it stick.
  * The triggering incident was 7 missed bumps across 2 consecutive releases — the
  * kind of low-salience checklist item that needs tooling, not vigilance.
  *
- * For each `skills/<name>/SKILL.md` that differs from `HEAD` (working tree, staged
+ * For each `framework-skills/<name>/SKILL.md` that differs from `HEAD` (working tree, staged
  * or not), it compares the frontmatter `metadata.version` and the body across
  * `HEAD` → working tree. A changed body with an unchanged version is a violation.
  * Whitespace-only body edits never trigger it (the policy's typo/whitespace
@@ -35,7 +35,7 @@ import { resolve } from 'node:path';
 import process from 'node:process';
 
 const ROOT = resolve('.');
-const SKILL_MD_RE = /^skills\/[^/]+\/SKILL\.md$/;
+const SKILL_MD_RE = /^framework-skills\/[^/]+\/SKILL\.md$/;
 
 interface DevcheckConfig {
   skillVersions?: { ignore?: string[] };
@@ -54,7 +54,7 @@ function loadIgnorePatterns(): string[] {
 
 /** Match check-skills-sync semantics: full `<name>/SKILL.md` path or the bare `<name>`. */
 function isIgnored(relPath: string, patterns: string[]): boolean {
-  const name = relPath.split('/')[1]; // skills/<name>/SKILL.md → <name>
+  const name = relPath.split('/')[1]; // framework-skills/<name>/SKILL.md → <name>
   return patterns.some(
     (p) => p === relPath || p === name || (name !== undefined && p === `${name}/SKILL.md`),
   );
@@ -70,10 +70,17 @@ function changedSkillFiles(): string[] {
     .filter((p) => SKILL_MD_RE.test(p));
 }
 
-/** Content of a path at `HEAD`, or null when it didn't exist there (new file). */
+/**
+ * Content of a path at `HEAD`, or null when it didn't exist there (new file).
+ * A tree renamed from the pre-0.13 `skills/` reads its `HEAD` copy from the old
+ * path, so the release that carries the rename still checks every body edit.
+ */
 function headContent(relPath: string): string | null {
-  const result = spawnSync('git', ['show', `HEAD:${relPath}`], { encoding: 'utf-8' });
-  return result.status === 0 ? result.stdout : null;
+  const show = (p: string) => spawnSync('git', ['show', `HEAD:${p}`], { encoding: 'utf-8' });
+  const result = show(relPath);
+  if (result.status === 0) return result.stdout;
+  const legacy = show(relPath.replace(/^framework-skills\//, 'skills/'));
+  return legacy.status === 0 ? legacy.stdout : null;
 }
 
 /** `metadata.version` from skill frontmatter, or null when absent/unparseable. */
@@ -95,8 +102,8 @@ function bodiesDiffer(a: string, b: string): boolean {
   return a.replace(/\s+/g, '') !== b.replace(/\s+/g, '');
 }
 
-if (!existsSync(resolve(ROOT, 'skills'))) {
-  console.log('Skipped: no skills/ directory.');
+if (!existsSync(resolve(ROOT, 'framework-skills'))) {
+  console.log('Skipped: no framework-skills/ directory.');
   process.exit(0);
 }
 
