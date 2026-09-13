@@ -203,10 +203,57 @@ describe('OBSIDIAN_BASE_URL and OBSIDIAN_OMNISEARCH_URL — empty-string handlin
     expect(getServerConfig().omnisearchUrl).toBeUndefined();
   });
 
+  it('treats whitespace-only OBSIDIAN_OMNISEARCH_URL as unset', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_OMNISEARCH_URL', '   ');
+    expect(getServerConfig().omnisearchUrl).toBeUndefined();
+  });
+
   it('accepts a valid URL for OBSIDIAN_OMNISEARCH_URL', () => {
     vi.stubEnv('OBSIDIAN_API_KEY', 'k');
     vi.stubEnv('OBSIDIAN_OMNISEARCH_URL', 'http://127.0.0.1:51361');
     expect(getServerConfig().omnisearchUrl).toBe('http://127.0.0.1:51361');
+  });
+});
+
+describe('unsubstituted placeholders from MCPB and plugin hosts', () => {
+  /** The literal `${<name>}` text a host forwards when nothing substitutes it. */
+  const placeholder = (name: string) => `\${${name}}`;
+
+  it('treats placeholder URLs as unset, so the base URL takes its default', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_BASE_URL', placeholder('user_config.OBSIDIAN_BASE_URL'));
+    vi.stubEnv('OBSIDIAN_OMNISEARCH_URL', placeholder('user_config.OBSIDIAN_OMNISEARCH_URL'));
+    const config = getServerConfig();
+    expect(config.baseUrl).toBe('http://127.0.0.1:27123');
+    expect(config.omnisearchUrl).toBeUndefined();
+  });
+
+  it('treats placeholder booleans, timeout, and path lists as unset', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_VERIFY_SSL', placeholder('user_config.OBSIDIAN_VERIFY_SSL'));
+    vi.stubEnv(
+      'OBSIDIAN_REQUEST_TIMEOUT_MS',
+      placeholder('user_config.OBSIDIAN_REQUEST_TIMEOUT_MS'),
+    );
+    vi.stubEnv('OBSIDIAN_READ_PATHS', placeholder('user_config.OBSIDIAN_READ_PATHS'));
+    vi.stubEnv('OBSIDIAN_WRITE_PATHS', placeholder('OBSIDIAN_WRITE_PATHS'));
+    const config = getServerConfig();
+    expect(config.verifySsl).toBe(false);
+    expect(config.requestTimeoutMs).toBe(30_000);
+    expect(config.readPaths).toBeUndefined();
+    expect(config.writePaths).toBeUndefined();
+  });
+
+  it('fails a placeholder OBSIDIAN_API_KEY as missing rather than accepting the literal', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', placeholder('user_config.OBSIDIAN_API_KEY'));
+    expect(() => getServerConfig()).toThrow(/OBSIDIAN_API_KEY \(apiKey\).*received undefined/);
+  });
+
+  it('keeps a value that merely contains a placeholder', () => {
+    const value = `prefix-${placeholder('user_config.OBSIDIAN_API_KEY')}`;
+    vi.stubEnv('OBSIDIAN_API_KEY', value);
+    expect(getServerConfig().apiKey).toBe(value);
   });
 });
 

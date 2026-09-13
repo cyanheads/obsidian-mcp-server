@@ -91,16 +91,13 @@ const ServerConfigSchema = z.object({
     .describe(
       'Bearer token for the Obsidian Local REST API plugin (Settings → Community Plugins → Local REST API).',
     ),
-  baseUrl: z.preprocess(
-    (val) => (typeof val === 'string' && val.trim() === '' ? undefined : val),
-    z
-      .string()
-      .url()
-      .default('http://127.0.0.1:27123')
-      .describe(
-        'Base URL of the Obsidian Local REST API. Defaults to http://127.0.0.1:27123 — enable "Non-encrypted (HTTP) Server" in the plugin settings to match. Use https://127.0.0.1:27124 to hit the always-on HTTPS port (self-signed cert; pair with OBSIDIAN_VERIFY_SSL=false).',
-      ),
-  ),
+  baseUrl: z
+    .string()
+    .url()
+    .default('http://127.0.0.1:27123')
+    .describe(
+      'Base URL of the Obsidian Local REST API. Defaults to http://127.0.0.1:27123 — enable "Non-encrypted (HTTP) Server" in the plugin settings to match. Use https://127.0.0.1:27124 to hit the always-on HTTPS port (self-signed cert; pair with OBSIDIAN_VERIFY_SSL=false).',
+    ),
   verifySsl: envBoolean
     .default(false)
     .describe(
@@ -128,16 +125,13 @@ const ServerConfigSchema = z.object({
     .describe(
       'Global kill switch. When true, denies every write regardless of OBSIDIAN_WRITE_PATHS, and suppresses the OBSIDIAN_ENABLE_COMMANDS pair (commands can mutate). Defaults to false.',
     ),
-  omnisearchUrl: z.preprocess(
-    (val) => (typeof val === 'string' && val.trim() === '' ? undefined : val),
-    z
-      .string()
-      .url()
-      .optional()
-      .describe(
-        'Override URL for the Omnisearch plugin HTTP server. When unset, derives from OBSIDIAN_BASE_URL host with port 51361 (falling back to http://localhost:51361). Used to enable the optional `omnisearch` mode on `obsidian_search_notes`; if the URL is unreachable at startup, the mode is omitted from the tool schema.',
-      ),
-  ),
+  omnisearchUrl: z
+    .string()
+    .url()
+    .optional()
+    .describe(
+      'Override URL for the Omnisearch plugin HTTP server. When unset, derives from OBSIDIAN_BASE_URL host with port 51361 (falling back to http://localhost:51361). Used to enable the optional `omnisearch` mode on `obsidian_search_notes`; if the URL is unreachable at startup, the mode is omitted from the tool schema.',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
