@@ -1,21 +1,40 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "obsidian-mcp-server",
   "version": "3.5.2",
   "description": "Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
   },
   "homepage": "https://github.com/cyanheads/obsidian-mcp-server#readme",
   "repository": "https://github.com/cyanheads/obsidian-mcp-server",
   "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "obsidian", "notes", "knowledge-base"],
+  "userConfig": {
+    "OBSIDIAN_API_KEY": {
+      "type": "string",
+      "title": "Obsidian API key",
+      "description": "Required. Bearer token for the Obsidian Local REST API plugin (Settings → Community Plugins → Local REST API).",
+      "sensitive": true,
+      "required": true
+    },
+    "OBSIDIAN_BASE_URL": {
+      "type": "string",
+      "title": "Obsidian base URL",
+      "description": "Optional. Base URL of the Local REST API plugin; defaults to http://127.0.0.1:27123. Use https://127.0.0.1:27124 for the HTTPS port.",
+      "default": ""
+    }
+  },
   "mcpServers": {
     "obsidian-mcp-server": {
       "command": "npx",
       "args": ["-y", "obsidian-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
-        "OBSIDIAN_API_KEY": "",
-        "OBSIDIAN_BASE_URL": ""
+        "OBSIDIAN_API_KEY": "${user_config.OBSIDIAN_API_KEY}",
+        "OBSIDIAN_BASE_URL": "${user_config.OBSIDIAN_BASE_URL}"
       }
     }
   }

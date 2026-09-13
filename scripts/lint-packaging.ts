@@ -19,13 +19,13 @@
  *   5. Bundle-content guard: known root dev directories must not appear at
  *      bundle root after `.mcpbignore` evaluation (dev dir not excluded).
  *   6. Bundle-content guard: `.mcpbignore` must not use unanchored patterns
- *      for root dev dirs — an unanchored `skills/` also strips
- *      `node_modules/x/skills/` (runtime path bypass, issues #172/#207).
+ *      for root dev dirs — an unanchored `framework-skills/` also strips
+ *      `node_modules/x/framework-skills/` (runtime path bypass, issues #172/#207).
  *   7. Bundle-content guard: `.mcpbignore` patterns must not strip critical
  *      runtime package paths (e.g. `node_modules/@opentelemetry/api/build/src/`).
  *   8. Post-bundle content: a built `.mcpb` under `dist/` must contain zero
- *      `node_modules/**` agent-doc entries (dependency-shipped `skills/`,
- *      `.claude/`, `.agents/`, `SKILL.md`) — unreachable by root-anchored
+ *      `node_modules/**` agent-doc entries (dependency-shipped `framework-skills/`,
+ *      `skills/`, `.claude/`, `.agents/`, `SKILL.md`) — unreachable by root-anchored
  *      `.mcpbignore` patterns; `scripts/clean-mcpb.ts` strips them at bundle
  *      time (issue #230).
  *   9. Identity: `name`/`title` literals in `createApp()` /
@@ -41,9 +41,19 @@
  *      is a guaranteed install 404. Each present plugin manifest's `version`
  *      must equal `package.json`'s, so a release cannot ship stale plugin
  *      metadata (issue #393); `.codex-plugin/mcp.json` is connection config and
- *      carries no version. Gated by `devcheck.config.json`
- *      `packaging.pluginManifests` (default on); each manifest is skipped
- *      cleanly when absent (issue #240).
+ *      carries no version. No server `env` value may be the empty string: the
+ *      client sets it on the child process, so the placeholder replaces a key
+ *      the user exported and the framework then reads it as unset. Claude Code
+ *      takes user values through `userConfig` + `${user_config.<key>}` (every
+ *      reference must be declared); Codex forwards host variables named in
+ *      `env_vars`. Gated by `devcheck.config.json` `packaging.pluginManifests`
+ *      (default on); each manifest is skipped cleanly when absent (issue #240).
+ *  11. MCPB `user_config` wiring: every declared option is referenced from
+ *      `mcp_config` as `${user_config.<key>}`, every reference is declared,
+ *      `mcp_config` carries no other `${…}` placeholder besides the host's
+ *      path variables (the host delivers anything else as the literal string),
+ *      and an optional string option has `"default": ""` so a blank answer
+ *      arrives as empty rather than as the unsubstituted placeholder.
  *
  * Every check skips cleanly when its input is absent — consumers who deleted
  * `manifest.json` for an HTTP-only deploy, or who haven't built a bundle,
@@ -80,7 +90,7 @@ interface ManifestUserConfigEntry {
 interface Manifest {
   display_name?: unknown;
   name?: string;
-  server?: { mcp_config?: { env?: Record<string, string> } };
+  server?: { mcp_config?: { args?: unknown[]; env?: Record<string, string> } };
   user_config?: Record<string, ManifestUserConfigEntry>;
 }
 
@@ -89,15 +99,15 @@ const USER_CONFIG_REF = /^\$\{user_config\.([\w-]+)\}$/;
 /**
  * Root dev directories the scaffold template excludes from the bundle, and
  * whose `.mcpbignore` patterns must be anchored with `/` to avoid also
- * stripping nested runtime paths like `node_modules/x/skills/`. Keep in step
+ * stripping nested runtime paths like `node_modules/x/framework-skills/`. Keep in step
  * with the directory entries in `templates/_.mcpbignore`.
  */
-export const KNOWN_DEV_DIRS = ['skills/', '.agents/', '.claude/'];
+export const KNOWN_DEV_DIRS = ['framework-skills/', '.agents/', '.claude/'];
 
 /**
  * Critical runtime paths that must NOT be stripped by any `.mcpbignore` pattern.
- * These are sampled representative paths — enough to catch a bare `skills/`
- * pattern accidentally stripping `node_modules/…/skills/`.
+ * These are sampled representative paths — enough to catch a bare `framework-skills/`
+ * pattern accidentally stripping `node_modules/…/framework-skills/`.
  */
 export const CRITICAL_RUNTIME_PATHS = [
   'node_modules/@opentelemetry/api/build/src/',
@@ -108,11 +118,13 @@ export const CRITICAL_RUNTIME_PATHS = [
 
 /**
  * Agent-doc entries under `node_modules/` that must not ship in a bundle.
+ * `framework-skills/` is this framework's tree; `skills/` covers any other
+ * dependency that vendors agent skills.
  * KEEP IN SYNC with `AGENT_DOC_ENTRY` in `scripts/clean-mcpb.ts` (the strip
  * step this check verifies) — a unit test asserts the two are identical.
  */
 export const AGENT_DOC_ENTRY =
-  /^node_modules\/.*(?:\/skills\/|\/\.claude\/|\/\.agents\/|\/SKILL\.md$)/;
+  /^node_modules\/.*(?:\/framework-skills\/|\/skills\/|\/\.claude\/|\/\.agents\/|\/SKILL\.md$)/;
 
 /**
  * Platform-specific native binding packages that must not ship in a bundle.
@@ -251,7 +263,7 @@ export function checkBundleEntries(entries: string[], bundleLabel: string): stri
   if (agentDocs.length > 0) {
     errors.push(
       `${bundleLabel} contains ${agentDocs.length} node_modules agent-doc entries ` +
-        `(dependency-shipped skills/, .claude/, .agents/, SKILL.md) — re-run the \`bundle\` ` +
+        `(dependency-shipped framework-skills/, skills/, .claude/, .agents/, SKILL.md) — re-run the \`bundle\` ` +
         `script (scripts/clean-mcpb.ts strips them):${sampleOf(agentDocs)}`,
     );
   }
@@ -409,6 +421,81 @@ export function checkManifestIdentity(manifest: Manifest, unscopedName: string):
   return [];
 }
 
+/** Placeholders the MCPB host substitutes in `mcp_config` besides `${user_config.<key>}`. */
+const MCPB_HOST_VARS = new Set([
+  '__dirname',
+  'HOME',
+  'DESKTOP',
+  'DOCUMENTS',
+  'DOWNLOADS',
+  'pathSeparator',
+  '/',
+]);
+
+/**
+ * Check 11: MCPB `user_config` wiring. A value the host collects from the
+ * user reaches the server only through a `${user_config.<key>}` reference in
+ * `mcp_config`; the host substitutes nothing else except its own path
+ * placeholders, so `${API_KEY}` is delivered as that literal string. Every
+ * declared option must therefore be referenced, every reference must be
+ * declared, and an optional string option needs `"default": ""` so a blank
+ * answer arrives as empty rather than as the unsubstituted placeholder.
+ */
+export function checkManifestUserConfigWiring(manifest: Manifest): string[] {
+  const errors: string[] = [];
+  const userConfig = manifest.user_config ?? {};
+  const env = manifest.server?.mcp_config?.env ?? {};
+  const args = manifest.server?.mcp_config?.args ?? [];
+  const referenced = new Set<string>();
+
+  const scan = (value: unknown, where: string): void => {
+    if (typeof value !== 'string') return;
+    for (const match of value.matchAll(/\$\{([^}]+)\}/g)) {
+      const token = match[1] ?? '';
+      if (token.startsWith('user_config.')) {
+        const key = token.slice('user_config.'.length);
+        referenced.add(key);
+        if (!(key in userConfig)) {
+          errors.push(
+            `manifest.json ${where} references "\${user_config.${key}}" but user_config["${key}"] is not declared`,
+          );
+        }
+      } else if (!MCPB_HOST_VARS.has(token)) {
+        errors.push(
+          `manifest.json ${where} references "\${${token}}" — MCPB substitutes only \${user_config.<key>} and its ` +
+            `own path placeholders, so the server receives that literal string; declare the option under user_config ` +
+            `and reference "\${user_config.${token}}"`,
+        );
+      }
+    }
+  };
+  for (const [key, value] of Object.entries(env)) scan(value, `mcp_config.env.${key}`);
+  for (const [i, value] of args.entries()) scan(value, `mcp_config.args[${i}]`);
+
+  for (const [key, entry] of Object.entries(userConfig)) {
+    if (!referenced.has(key)) {
+      errors.push(
+        `manifest.json user_config["${key}"] is never referenced from mcp_config — the host collects the value ` +
+          `and then drops it; add "${key}": "\${user_config.${key}}" to mcp_config.env`,
+      );
+    }
+    if (
+      typeof entry === 'object' &&
+      entry !== null &&
+      entry.type === 'string' &&
+      entry.required !== true &&
+      !('default' in entry)
+    ) {
+      errors.push(
+        `manifest.json user_config["${key}"] is an optional string with no "default" — a blank answer reaches ` +
+          `the server as the literal "\${user_config.${key}}"; add "default": ""`,
+      );
+    }
+  }
+
+  return errors;
+}
+
 /** Parsed plugin marketplace manifests; an absent manifest is `undefined`. */
 export interface PluginManifestInputs {
   claudePlugin?: unknown;
@@ -424,6 +511,11 @@ function installArg(entry: Record<string, unknown>): unknown {
   return Array.isArray(entry.args) ? entry.args[1] : undefined;
 }
 
+/** A server entry's `env` object, or an empty one when absent or malformed. */
+function serverEnv(entry: Record<string, unknown>): Record<string, unknown> {
+  return isRecord(entry.env) ? entry.env : {};
+}
+
 /**
  * Check 10: plugin marketplace manifests. Display fields (`name`, server key,
  * `interface.displayName`) must equal the unscoped machine name; the install
@@ -433,6 +525,15 @@ function installArg(entry: Record<string, unknown>): unknown {
  * marketplace cards. Each manifest is validated only when present, so HTTP-only
  * and non-plugin consumers are unaffected. The caller gates the whole check on
  * `packaging.pluginManifests`.
+ *
+ * A server `env` value of `""` is rejected in both connection configs. The
+ * client sets the entry on the child process, so the placeholder replaces a
+ * key the user exported and the framework's empty-string-as-unset parsing then
+ * drops it — the user's real value never reaches the server. Claude Code
+ * collects user values through `userConfig` and substitutes
+ * `${user_config.<key>}` in `env`; every such reference must name a declared
+ * option. Codex launches stdio servers with a whitelisted environment, so a
+ * host variable reaches the server only when `env_vars` names it.
  *
  * `.codex-plugin/mcp.json` is connection configuration and carries no version.
  */
@@ -478,11 +579,31 @@ export function checkPluginManifests(
         );
       }
       const entry = servers[unscopedName];
-      if (isRecord(entry) && installArg(entry) !== fullName) {
-        errors.push(
-          `${f} mcpServers["${unscopedName}"] install arg is "${String(installArg(entry))}" — ` +
-            `must be the full package name "${fullName}" (the npx -y target; an unscoped arg for a scoped package 404s)`,
-        );
+      if (isRecord(entry)) {
+        if (installArg(entry) !== fullName) {
+          errors.push(
+            `${f} mcpServers["${unscopedName}"] install arg is "${String(installArg(entry))}" — ` +
+              `must be the full package name "${fullName}" (the npx -y target; an unscoped arg for a scoped package 404s)`,
+          );
+        }
+        const userConfig = isRecord(claude.userConfig) ? claude.userConfig : {};
+        for (const [key, value] of Object.entries(serverEnv(entry))) {
+          if (value === '') {
+            errors.push(
+              `${f} mcpServers["${unscopedName}"].env.${key} is "" — an empty placeholder replaces the ` +
+                `user's exported ${key} and is read as unset; declare the option under "userConfig" ` +
+                `and set the value to "\${user_config.<option>}"`,
+            );
+          } else if (typeof value === 'string') {
+            const ref = USER_CONFIG_REF.exec(value)?.[1];
+            if (ref !== undefined && !isRecord(userConfig[ref])) {
+              errors.push(
+                `${f} mcpServers["${unscopedName}"].env.${key} references "\${user_config.${ref}}" but ` +
+                  `"userConfig.${ref}" is not declared — Claude Code prompts only for declared options`,
+              );
+            }
+          }
+        }
       }
     }
   }
@@ -530,11 +651,22 @@ export function checkPluginManifests(
       );
     }
     const entry = codexMcp[unscopedName];
-    if (isRecord(entry) && installArg(entry) !== fullName) {
-      errors.push(
-        `${f} "${unscopedName}" install arg is "${String(installArg(entry))}" — ` +
-          `must be the full package name "${fullName}" (the npx -y target)`,
-      );
+    if (isRecord(entry)) {
+      if (installArg(entry) !== fullName) {
+        errors.push(
+          `${f} "${unscopedName}" install arg is "${String(installArg(entry))}" — ` +
+            `must be the full package name "${fullName}" (the npx -y target)`,
+        );
+      }
+      for (const [key, value] of Object.entries(serverEnv(entry))) {
+        if (value === '') {
+          errors.push(
+            `${f} "${unscopedName}".env.${key} is "" — Codex starts stdio servers with a whitelisted ` +
+              `environment, so an empty placeholder adds nothing; remove it and list "${key}" in ` +
+              `"env_vars" to forward the user's value`,
+          );
+        }
+      }
     }
   }
 
@@ -585,6 +717,8 @@ async function main(): Promise<void> {
         );
       }
     }
+
+    errors.push(...checkManifestUserConfigWiring(manifest));
 
     const serverJson = tryReadJson<ServerJson>(resolve('server.json'));
     if (serverJson) {
