@@ -23,7 +23,7 @@
 
 ## Overview
 
-An MCP server over the Obsidian Local REST API plugin. Read, write, search, and surgically edit vault notes — sections, frontmatter, tags — with folder-scoped read/write permissions built in. Runs as a stdio process or a local Streamable HTTP server.
+Read, write, search, and surgically edit Obsidian vault notes — sections, frontmatter, tags — over the Local REST API plugin, with folder-scoped read/write permissions built in. Runs as a stdio process or a local Streamable HTTP server.
 
 ### Tools
 
