@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [3.5.3](changelog/3.5.x/3.5.3.md) — 2026-09-13
 
-Bun engines floor rises to >=1.4.0 for mcp-ts-core 0.13.0; the development skill tree moves to framework-skills/ so installing the plugin no longer loads it into the agent; empty or placeholder ${...} env values now read as unset, and plugin manifests wire OBSIDIAN_* through userConfig/env_vars instead of empty-string placeholders.
+The .mcpb bundle now passes install-time settings instead of literal ${OBSIDIAN_*} text, and plugin installs no longer blank out exported OBSIDIAN_* vars; empty or placeholder ${...} env values read as unset; dev skills move to framework-skills/ so plugin installs stop loading them; Bun floor rises to >=1.4.0.
 
 ## [3.5.2](changelog/3.5.x/3.5.2.md) — 2026-09-09
 
