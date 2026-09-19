@@ -110,8 +110,9 @@ ENV MCP_HTTP_PORT=${PORT:-3010}
 # bind exposes the upstream OBSIDIAN_API_KEY to any caller that can reach the port.
 ENV MCP_HTTP_HOST="0.0.0.0"
 ENV MCP_TRANSPORT_TYPE="http"
-# Stateful because obsidian_delete_note confirms via ctx.requestInput; the
-# elicitation round backing that gate is disabled in stateless mode.
+# Stateful because obsidian_delete_note confirms via ctx.requestInput; under
+# stateless, a 2025-era HTTP client's confirmation round is refused by the
+# capability gate (client_capability_missing).
 ENV MCP_SESSION_MODE="stateful"
 ENV MCP_LOG_LEVEL="info"
 ENV LOGS_DIR="/var/log/obsidian-mcp-server"
