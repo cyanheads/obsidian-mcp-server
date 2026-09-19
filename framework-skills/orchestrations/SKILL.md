@@ -4,7 +4,7 @@ description: >
   Pick and run a multi-phase workflow that chains foundational task skills (`git-wrapup`, `release-and-publish`, `maintenance`, `field-test`, `setup`, etc.) end-to-end. Routes user intent to a workflow file under `workflows/` — greenfield builds, maintenance + release, field-test + fix, or known-work + release. Single source for the universal rules (no commits without authorization, no destructive git, no marketing language), the orchestrator posture (own the goal, ground sub-agents in primary sources, verify against the goal), and the sub-agent strategy (orient block, parallel fanout, isolation, normalization) that apply across every workflow. Sub-agents are an optional capability — workflows run linearly when fanout isn't available.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: workflow
 ---
@@ -168,7 +168,7 @@ Editing phases and wrap-up phases never go in the same sub-agent. Editing sub-ag
 A target can declare that every release goes through a pull request (in its `CLAUDE.md`/`AGENTS.md`, or in the run's brief — mechanics in `git-wrapup`'s "Release PR mode"). The wrap-up + release phase then runs as **three sub-agents in sequence**, with an orchestrator check between each:
 
 1. **Wrap-up** — `git-wrapup`; halts with the stack committed on `release/<version>`, pushed, PR open.
-2. **Review** — `release-pr-review`; reads the PR range through `code-simplifier` plus a correctness review, lands fixes as fixup commits autosquashed into the stack, force-with-lease pushes the release branch, syncs the PR body, leaves one summary comment. This is the one role that both edits and commits — scoped to the release branch, never `main`, never a tag.
+2. **Review** — `release-pr-review`; reads the PR range through `code-simplifier` plus a correctness review, lands fixes as ordinary commits on top of the stack, pushes the release branch, syncs the PR body, leaves one summary comment. This is the one role that both edits and commits — scoped to the release branch, never `main`, never a tag, never a rewrite of what is already pushed.
 3. **Release** — `release-and-publish`; `git merge --ff-only` onto `main` locally, tags `main`'s tip, pushes, publishes. Its brief must state that the review pass is finished — the skill halts without that line, and the orchestrator writes it only after confirming the review agent's report against the PR (`gh pr view --json state,headRefOid`, `git log --oneline main..HEAD`).
 
 Straight-through mode drops the review agent: one sub-agent runs wrap-up and release back to back, opening and merging the PR in the same session. Without a declaration there is no PR, and the stack lands on `main` directly.
@@ -211,7 +211,7 @@ If verification disagrees with the sub-agent's report, that's the signal to re-s
 | Reads, analysis, file edits (working tree only) | Implicit — initial workflow approval covers these |
 | Local commits, annotated tags | Explicit at workflow start; durable through workflow end |
 | Push to remote, npm / registry publish, GH release create, Docker push | Explicit at workflow start; durable through workflow end |
-| Destructive ops (force push, tag delete, remote branch delete, etc.) | Always re-confirm, never assume — two exceptions ride the release authorization: `release-pr-review`'s `--force-with-lease` on the run's own unmerged `release/<version>` branch, and `release-and-publish` deleting that branch once the PR reports `MERGED` |
+| Destructive ops (force push, tag delete, remote branch delete, etc.) | Always re-confirm, never assume — one exception rides the release authorization: `release-and-publish` deleting the run's own `release/<version>` branch once the PR reports `MERGED` |
 
 Pipeline authorization is durable through to completion. Once the user authorizes a workflow run, don't re-ask at each phase boundary — proceed automatically through gates that pass. Conditions that always require a fresh check-in: destructive ops on shared resources, external actions without sign-off, errors that need human judgment.
 

@@ -4,7 +4,7 @@ description: >
   Scaffold a new service integration. Use when the user asks to add a service, integrate an external API, or create a reusable domain module with its own initialization and state.
 metadata:
   author: cyanheads
-  version: "1.10"
+  version: "1.11"
   audience: external
   type: reference
 ---
@@ -234,9 +234,12 @@ Services don't declare `errors: [...]` contracts and don't have `ctx.fail` — t
 - **Carry contract `reason` via `data: { reason }`** when the calling tool declares an `errors[]` contract entry for this failure mode. Services can't call `ctx.fail`, but passing the reason in `data` flows through the auto-classifier untouched, so clients see the same `error.data.reason` they'd see from `ctx.fail` — no handler-side catch-and-rethrow needed:
 
   ```ts
-  // tool declares: errors: [{ reason: 'empty_expression', code: JsonRpcErrorCode.ValidationError, when: '…', recovery: '…' }]
+  // tool declares: errors: [{ reason: 'empty_expression', code: JsonRpcErrorCode.ValidationError,
+  //                           when: '…', recovery: '…', thrownBy: 'service' }]
   throw validationError('Expression cannot be empty.', { reason: 'empty_expression' });
   ```
+
+  The tool's entry carries `thrownBy: 'service'` so `error-contract-unthrown` — which reads the handler body and cannot see this throw — skips it while still checking whatever the handler throws itself. Lint-only metadata; nothing at runtime reads it.
 
 - **Resolve contract `recovery` via `ctx.recoveryFor`** to land the contract's recovery hint on the wire without duplicating the string. Always-present on `Context`, returns `{}` when the calling tool has no matching reason — spread-safe regardless:
 

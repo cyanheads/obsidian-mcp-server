@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.15"
+  version: "2.17"
   audience: external
   type: workflow
 ---
@@ -204,7 +204,7 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 **`package.json` scripts:**
 
 - `bundle` — builds the `.mcpb` (`mcpb pack`, then `scripts/clean-mcpb.ts` prunes dev deps and strips dependency-shipped agent docs)
-- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency (run by `devcheck`)
+- `lint:packaging` — validates `manifest.json` ↔ `server.json` env var consistency, plus the version-parity checks below (run by `devcheck`, which gates the step on `manifest.json`, a plugin manifest, `.mcpbignore`, or `README.md`)
 
 **Cross-file consistency:**
 
@@ -219,8 +219,9 @@ If the project ships as an `.mcpb` bundle for Claude Desktop (check for `manifes
 - Server description aligned across all surfaces: `package.json`, `manifest.json`, `server.json` (condensed, hard 100-char limit), README header `<p><b>`, and GitHub repo description (`gh repo edit --description`)
 - `package.json` `keywords` include baseline terms: `mcp`, `mcp-server`, `model-context-protocol`, `typescript`, `bun`, `stdio`, `streamable-http`, plus data-domain terms. GitHub repo topics (`gh repo edit --add-topic`) should match.
 
-**README install badges:**
+**README badges:**
 
+- The static version badge (`img.shields.io/badge/Version-<x.y.z>-`) must carry the `package.json` `version` — `lint:packaging` enforces the match, and errors on a badge whose segment is not a readable version. shields.io escapes a literal `-` as `--`, so a prerelease is written `Version-0.14.0--rc.1-`. A live `img.shields.io/npm/v/<pkg>` badge cannot drift and is skipped
 - If `manifest.json` exists, the README should include the Claude Desktop install badge linking to `releases/latest/download/<name>.mcpb`
 - If the package is published to npm, include Cursor and VS Code install badges
 - See `references/readme.md` for badge format and config generation commands

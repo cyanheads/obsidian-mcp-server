@@ -54,6 +54,11 @@
  *      path variables (the host delivers anything else as the literal string),
  *      and an optional string option has `"default": ""` so a blank answer
  *      arrives as empty rather than as the unsubstituted placeholder.
+ *  12. README version badge parity: a shields.io `Version-<semver>-` badge in
+ *      `README.md` must carry the `package.json` `version`. The badge is the
+ *      package's headline version on GitHub and npmjs.com and ships in the
+ *      tarball, so a half-finished bump is publicly visible. Skipped when the
+ *      README, the badge, or the package version is absent (issue #418).
  *
  * Every check skips cleanly when its input is absent — consumers who deleted
  * `manifest.json` for an HTTP-only deploy, or who haven't built a bundle,
@@ -99,8 +104,10 @@ const USER_CONFIG_REF = /^\$\{user_config\.([\w-]+)\}$/;
 /**
  * Root dev directories the scaffold template excludes from the bundle, and
  * whose `.mcpbignore` patterns must be anchored with `/` to avoid also
- * stripping nested runtime paths like `node_modules/x/framework-skills/`. Keep in step
- * with the directory entries in `templates/_.mcpbignore`.
+ * stripping nested runtime paths like `node_modules/x/framework-skills/`. Keep
+ * in step with the directory entries in this project's `.mcpbignore` — seeded
+ * from the mcp-ts-core repository's `templates/_.mcpbignore`, whose `_` prefix
+ * `init` drops on copy.
  */
 export const KNOWN_DEV_DIRS = ['framework-skills/', '.agents/', '.claude/'];
 
@@ -121,7 +128,10 @@ export const CRITICAL_RUNTIME_PATHS = [
  * `framework-skills/` is this framework's tree; `skills/` covers any other
  * dependency that vendors agent skills.
  * KEEP IN SYNC with `AGENT_DOC_ENTRY` in `scripts/clean-mcpb.ts` (the strip
- * step this check verifies) — a unit test asserts the two are identical.
+ * step this check verifies) — edit both literals together. The assertion that
+ * they match lives in the mcp-ts-core repository's own test suite; `tests/` is
+ * not part of the published package, so nothing enforces the pair in a server
+ * these scripts were copied into.
  */
 export const AGENT_DOC_ENTRY =
   /^node_modules\/.*(?:\/framework-skills\/|\/skills\/|\/\.claude\/|\/\.agents\/|\/SKILL\.md$)/;
@@ -129,7 +139,10 @@ export const AGENT_DOC_ENTRY =
 /**
  * Platform-specific native binding packages that must not ship in a bundle.
  * KEEP IN SYNC with `NATIVE_BINDING_ENTRY` in `scripts/clean-mcpb.ts` (the
- * strip step this check verifies) — a unit test asserts the two are identical.
+ * strip step this check verifies) — edit both literals together. The assertion
+ * that they match lives in the mcp-ts-core repository's own test suite;
+ * `tests/` is not part of the published package, so nothing enforces the pair
+ * in a server these scripts were copied into.
  */
 export const NATIVE_BINDING_ENTRY = /^node_modules\/@duckdb\/node-bindings-[^/]+\//;
 
@@ -673,6 +686,62 @@ export function checkPluginManifests(
   return errors;
 }
 
+/**
+ * The shields.io static version badge, anchored on the `Version-` label and the
+ * `-` that closes the version segment. A literal `-` inside a badge segment is
+ * escaped as `--`, so the segment is "runs of non-dash characters joined by
+ * escaped dashes" — which also keeps the scan linear, since the alternation
+ * cannot match the same character two ways. Anchoring on the label and the
+ * trailing `-` tolerates colour, extension, and query-string variation without
+ * enumerating them, and matches no other badge: a live `img.shields.io/npm/v/…`
+ * badge has no `badge/Version-` path.
+ */
+const README_VERSION_BADGE = /img\.shields\.io\/badge\/Version-([^-]*(?:--[^-]*)*)-/;
+
+/**
+ * A version the badge can be compared against once its `--` escapes are
+ * decoded: the semver core, then at most one `-` prerelease segment and one
+ * `+` build segment. The two are separate optionals rather than one repeated
+ * `(?:[-+]…)*`, because `-` is itself a member of the segment character class
+ * — a repeated group can split a run of dashes two ways and backtracks
+ * exponentially on a segment the check is about to reject (CodeQL `js/redos`,
+ * CWE-1333). `+` is outside the class, so each segment's end is determined and
+ * the scan stays linear.
+ */
+const READABLE_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+/**
+ * Check 12: README version badge parity. When `README.md` carries a shields.io
+ * `Version-<semver>-` badge, its version must equal `package.json` `version` —
+ * the badge is the package's headline version on GitHub and npmjs.com, and it
+ * ships in the tarball, so a half-finished bump is publicly visible.
+ *
+ * Skipped when the README, the badge, or the package version is absent: a
+ * server that replaced the static badge with a live `npm/v` one has nothing to
+ * check, and a version-less `package.json` is the same fail-safe the
+ * plugin-manifest parity check applies. A badge that exists but cannot be read
+ * is drift the check cannot rule out, so it fails rather than skips.
+ */
+export function checkReadmeVersionBadge(readme: string, packageVersion?: string): string[] {
+  if (!packageVersion) return [];
+
+  const segment = README_VERSION_BADGE.exec(readme)?.[1];
+  if (segment === undefined) return [];
+
+  const badgeVersion = segment.replaceAll('--', '-');
+  if (!READABLE_VERSION.test(badgeVersion)) {
+    return [
+      `README.md version badge segment is "${segment}" — not a readable version, so it cannot be ` +
+        `checked against the package.json version "${packageVersion}"; write the badge as ` +
+        `"Version-${packageVersion.replaceAll('-', '--')}-"`,
+    ];
+  }
+  if (badgeVersion === packageVersion) return [];
+  return [
+    `README.md version badge is "${badgeVersion}" — must equal the package.json version "${packageVersion}"`,
+  ];
+}
+
 /** Read `packaging.pluginManifests` from devcheck.config.json; default on. */
 function pluginManifestsEnabled(): boolean {
   const cfg = tryReadJson<{ packaging?: { pluginManifests?: boolean } }>(
@@ -803,6 +872,12 @@ async function main(): Promise<void> {
       errors.push(...result.errors);
       warnings.push(...result.warnings);
     }
+  }
+
+  // ── README version badge (check 12) ──
+  const readmePath = resolve('README.md');
+  if (existsSync(readmePath)) {
+    errors.push(...checkReadmeVersionBadge(readFileSync(readmePath, 'utf-8'), pkg?.version));
   }
 
   // ── Plugin marketplace manifests (check 10) ──

@@ -14,10 +14,14 @@
  *
  * Runtime-agnostic: works with bun, tsx, and Node.js (via ts-node/esm).
  *
+ * Rule knobs come from the project's `devcheck.config.json` `lint` block, so one
+ * declaration covers every entrypoint that shells out to this script.
+ *
  * @module scripts/lint-mcp
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------------------
 // Import validateDefinitions — resolve from package or local source
@@ -111,6 +115,38 @@ function tryReadJson(path: string): unknown {
   }
 }
 
+/** The `lint` block of `devcheck.config.json`, as far as this script reads it. */
+interface LintConfig {
+  lint?: { truncationAllowlist?: unknown };
+}
+
+/** The `LintInput` knobs a project declares in `devcheck.config.json`. */
+export interface LintOptions {
+  truncationAllowlist?: ReadonlyArray<string> | false;
+}
+
+/**
+ * Reads `lint.truncationAllowlist` from the project's `devcheck.config.json`.
+ *
+ * An absent or unreadable key yields `{}`, which leaves `validateDefinitions()`
+ * to fall back to `MCP_LINT_TRUNCATION_ALLOWLIST`. A declared value is passed as
+ * `LintInput.truncationAllowlist` and therefore wins over that env var — a
+ * reviewed, version-controlled exemption is not something ambient environment
+ * should override.
+ */
+export function readLintOptions(configPath = resolve('devcheck.config.json')): LintOptions {
+  const allowlist = (tryReadJson(configPath) as LintConfig | undefined)?.lint?.truncationAllowlist;
+  if (allowlist === undefined) return {};
+  if (allowlist === false) return { truncationAllowlist: false };
+  if (Array.isArray(allowlist) && allowlist.every((name) => typeof name === 'string')) {
+    return { truncationAllowlist: allowlist as string[] };
+  }
+  console.warn(
+    `Warning: ${configPath} "lint.truncationAllowlist" must be an array of tool names or false — ignoring it.`,
+  );
+  return {};
+}
+
 async function main(): Promise<void> {
   const files = discoverFiles();
 
@@ -163,6 +199,7 @@ async function main(): Promise<void> {
     prompts,
     serverJson,
     ...(packageJson ? { packageJson } : {}),
+    ...readLintOptions(),
   });
 
   for (const w of report.warnings) {
@@ -187,7 +224,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error('lint-mcp failed:', err);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main().catch((err) => {
+    console.error('lint-mcp failed:', err);
+    process.exit(1);
+  });
+}

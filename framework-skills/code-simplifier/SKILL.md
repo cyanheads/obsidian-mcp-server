@@ -1,17 +1,17 @@
 ---
 name: code-simplifier
 description: >
-  Post-session code review and cleanup against a working tree of changes. Analyzes `git diff` to simplify, consolidate, and align changed code with the existing codebase — modernize syntax, remove unnecessary complexity, consolidate duplicated logic, catch efficiency issues. Use after a substantive working session, or when asked to clean up, simplify, reduce slop, consolidate, modernize, tighten up, or de-slop code. For `@cyanheads/mcp-ts-core` projects, includes specific transformations for tool/resource/prompt definitions, the ctx pattern, error factories, and framework idioms.
+  Code review and cleanup against a working tree of changes, or against a named path or whole codebase. Analyzes `git diff` (or the named target) to simplify, consolidate, and align code with the existing codebase — modernize syntax, remove unnecessary complexity, consolidate duplicated logic, catch efficiency issues. Use after a substantive working session, or when asked to clean up, simplify, reduce slop, consolidate, modernize, tighten up, de-slop, or scan a codebase. For `@cyanheads/mcp-ts-core` projects, includes specific transformations for tool/resource/prompt definitions, the ctx pattern, error factories, and framework idioms.
 metadata:
   author: cyanheads
-  version: "1.4"
+  version: "1.5"
   audience: external
   type: workflow
 ---
 
 # Code Simplifier
 
-Post-session cleanup pass. Reviews what changed, understands how it fits the existing codebase, and makes targeted improvements — modernizing syntax, removing unnecessary complexity, consolidating duplicated logic, catching efficiency issues. Prioritizes codebase cohesion over local perfection.
+Cleanup pass over a session's changes or a named target. Reviews the code in scope, understands how it fits the existing codebase, and makes targeted improvements — modernizing syntax, removing unnecessary complexity, consolidating duplicated logic, catching efficiency issues. Prioritizes codebase cohesion over local perfection.
 
 ## Core philosophy
 
@@ -19,9 +19,12 @@ Post-session cleanup pass. Reviews what changed, understands how it fits the exi
 
 ## Procedure
 
-### Phase 1: Identify changes
+### Phase 1: Set the scope
 
-Run `git status` to see the shape of the working tree, then `git diff HEAD` for all uncommitted changes (staged and unstaged). Untracked files never appear in the diff — read new files directly. If the diff is empty and there are no untracked files, review the last commit (`git diff HEAD~1 HEAD`); if that is also empty, say the tree is clean and stop. Don't go hunting through the codebase for files to improve.
+Two scopes; the caller's wording picks one, and the diff is the default.
+
+- **Diff** (nothing named): run `git status` to see the shape of the working tree, then `git diff HEAD` for all uncommitted changes (staged and unstaged). Untracked files never appear in the diff — read new files directly. If the diff is empty and there are no untracked files, review the last commit (`git diff HEAD~1 HEAD`); if that is also empty, say the tree is clean and stop. Don't go hunting through the codebase for files to improve.
+- **Target** (a named path, module, or "the whole codebase"): the named files are the scope, whatever their git state. Work one module or directory at a time and re-run the gate after each, so a large scan never becomes one unverifiable diff. Take the target as named — don't rank or narrow it by commit history.
 
 ### Phase 2: Understand the surrounding codebase
 
@@ -47,6 +50,8 @@ Evaluate the changes across these dimensions. Not every dimension applies to eve
 
 - **Redundant state** — State that duplicates existing state, cached values that could be derived.
 - **Unnecessary complexity** — Deep nesting that could be guard clauses, premature abstractions, over-engineered solutions to simple problems.
+- **Pass-through layers** — Apply the deletion test to a wrapper, helper, or module: if deleting it and inlining its body makes the complexity vanish, it was a pass-through — inline it. If the same logic would reappear across several callers, it earns its keep. An interface, port, or injected dependency with a single implementation and no test double is a hypothetical seam, not a real one — collapse it until something actually varies across it.
+- **Test-only reach** — A function extracted or exported only so a test can get at it is a shape problem, not a cleanup: name it in the summary with the module it belongs to. Don't restructure it here — the tests would have to move with it.
 - **Dead code** — Unreachable branches, unused variables, commented-out code. An export nothing imports is dead in an application or a package-internal module; on a published package's public surface it is API — leave it and note it in the summary.
 - **Defensive code for impossible states** — Guards for cases the type system or upstream validation already prevents. Drop them.
 - **Type escapes** — `any`, `as` casts that paper over a mismatch, non-null `!`, and `@ts-ignore`. Each is a claim the compiler couldn't check: replace with a narrowed type, a type guard, or a parse at the boundary. Keep the ones documenting a genuine type-system or third-party-types limitation, and prefer `@ts-expect-error` with a one-line reason over `@ts-ignore`.
@@ -74,13 +79,14 @@ Evaluate the changes across these dimensions. Not every dimension applies to eve
 - **Tool annotations** — `readOnlyHint`, `idempotentHint`, `openWorldHint` should reflect reality. A read-only tool with `readOnlyHint: false` gives clients the wrong picture.
 - **`exactOptionalPropertyTypes` boundaries** — If a downstream type insists on the field being present-or-not-present (not present-as-undefined), use a mapped widening type at the boundary. The pattern is documented in the framework.
 - **`format()` ↔ `structuredContent` parity** — Different MCP clients forward different surfaces. Tests should assert both surfaces carry equivalent data.
+- **Framework layering is not a pass-through** — the init/accessor pair (`initFooService()` / `getFooService()`), the tool definition → service split, and a provider interface the framework selects by config are prescribed convention; the deletion test doesn't apply to them, and a single-implementation service accessor is the framework's seam, not a hypothetical one.
 - **Defensive code** — the "impossible states" the framework already prevents include malformed params (Zod-validated before the handler runs) and unclassified errors (caught and classified after it throws). Guards for either are dead.
 - **Public surface** — the MCP surface (every tool input/output schema advertised to clients) is public API for the "API compatibility" rule; changing one is a breaking change, not a refactor.
 
 ### Phase 4: Apply transformations
 
 1. **Filter findings ruthlessly.** If a finding is a false positive or not worth the churn, skip it. Don't argue with yourself about borderline cases — move on.
-2. **Stay in scope.** Edit only files in the diff or new this session. Touch a file outside that set only when a finding requires it — importing an existing helper, deleting a private export the diff just orphaned — and only on the lines that finding names. Anything broader goes in the summary as a recommendation, not into the tree.
+2. **Stay in scope.** Edit only files inside the Phase 1 scope — the diff plus files new this session, or the named target. Touch a file outside that set only when a finding requires it — importing an existing helper, deleting a private export the diff just orphaned — and only on the lines that finding names. Anything broader goes in the summary as a recommendation, not into the tree.
 3. **Correctness bugs are not this pass's job.** A real defect doesn't get folded into a cleanup diff — name it in the summary with file and line so it can be handled as its own change.
 4. **Transform incrementally** — one category of change at a time (modernize syntax, then reduce nesting, then consolidate).
 5. **Verify equivalence** — all functionality, types, and public interfaces must remain unchanged. Re-run the gate from Phase 2 after transforming; a simplification that breaks the build is worse than the verbosity it removed.

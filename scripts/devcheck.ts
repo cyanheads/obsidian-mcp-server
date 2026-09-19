@@ -624,6 +624,13 @@ function classifyAuditVulns(output: string): { direct: string[]; upstream: strin
 // Define file extensions for linting and formatting
 const LINT_EXTS = ['.ts', '.tsx', '.js', '.jsx'];
 
+/**
+ * Worker tsconfig locations, in precedence order. A project keeps its project
+ * tsconfigs in `config/` or at the root — the `init` scaffold writes the root
+ * form — and this script ships to both verbatim.
+ */
+const WORKER_PROJECT_CANDIDATES = ['config/tsconfig.worker.json', 'tsconfig.worker.json'];
+
 const ALL_CHECKS: Check[] = [
   // Fast checks first (local operations, no network)
   {
@@ -703,18 +710,23 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-packaging',
     canFix: false,
     // Validates env var alignment between manifest.json (MCPB bundle) and
-    // server.json (MCP Registry), plus plugin marketplace manifests (#240), and
-    // the bundle-content guards on .mcpbignore (#343). Runs when any of those
-    // inputs is present; skipped cleanly when none exist — consumers on an
-    // HTTP-only deploy are unaffected.
+    // server.json (MCP Registry), plus plugin marketplace manifests (#240), the
+    // bundle-content guards on .mcpbignore (#343), and the README version badge
+    // (#418). Runs when any of those inputs is present; skipped cleanly when
+    // none exist — consumers on an HTTP-only deploy are unaffected. README.md is
+    // a trigger in its own right: the badge check must gate a project that
+    // carries no bundle or plugin metadata at all, which the other three inputs
+    // only covered incidentally.
     getCommand: () => {
-      const hasManifest = existsSync(path.join(ROOT_DIR, 'manifest.json'));
-      const hasPluginManifest =
-        existsSync(path.join(ROOT_DIR, '.claude-plugin/plugin.json')) ||
-        existsSync(path.join(ROOT_DIR, '.codex-plugin/plugin.json')) ||
-        existsSync(path.join(ROOT_DIR, '.codex-plugin/mcp.json'));
-      const hasMcpbIgnore = existsSync(path.join(ROOT_DIR, '.mcpbignore'));
-      if (!hasManifest && !hasPluginManifest && !hasMcpbIgnore) return null;
+      const inputs = [
+        'manifest.json',
+        '.claude-plugin/plugin.json',
+        '.codex-plugin/plugin.json',
+        '.codex-plugin/mcp.json',
+        '.mcpbignore',
+        'README.md',
+      ];
+      if (!inputs.some((input) => existsSync(path.join(ROOT_DIR, input)))) return null;
       return ['bun', 'run', 'scripts/lint-packaging.ts'];
     },
     tip: (c) =>
@@ -864,14 +876,20 @@ const ALL_CHECKS: Check[] = [
     canFix: false,
     // The workerd type environment is its own program: Cloudflare's ambient
     // globals cannot share one with @types/node's (#397). It reads the built
-    // declarations, so it only has something to check after a build.
+    // declarations, so it only has something to check after a build. The
+    // tsconfig is looked for in both supported layouts — `config/` and the
+    // project root, which is where the `init` scaffold writes its tsconfigs
+    // (#440) — and the step skips only when neither carries one.
     getCommand: (ctx) => {
-      if (!existsSync(path.join(ctx.rootDir, 'tsconfig.worker.json'))) return null;
+      const project = WORKER_PROJECT_CANDIDATES.find((candidate) =>
+        existsSync(path.join(ctx.rootDir, candidate)),
+      );
+      if (!project) return null;
       if (!existsSync(path.join(ctx.rootDir, 'dist'))) return null;
       return [
         path.join(ctx.rootDir, 'node_modules', '.bin', 'tsc'),
         '--project',
-        'tsconfig.worker.json',
+        project,
         '--noEmit',
       ];
     },
@@ -1030,8 +1048,21 @@ const UI = {
     return `${c.bold(c.yellow(`🔶 Skipping ${check.name}...`))}${c.dim(` (${reason})`)}`;
   },
 
+  /**
+   * The running-log line for a finished step. A result `isSuccess` demoted to a
+   * warning is reported as one here too, on `printSummary`'s own guard
+   * (`exitCode === 0 && warning`), so the two surfaces cannot disagree about a
+   * single outcome (#344). A `{ success: false, warning }` return keeps its
+   * non-zero exit and so still renders as a failure.
+   */
   formatCheckResult(result: CommandResult, _mode: UIMode): string {
-    const { checkName, exitCode, duration } = result;
+    const { checkName, exitCode, duration, warning } = result;
+    if (exitCode === 0 && warning) {
+      return [
+        `${c.bold(c.yellow('⚠️'))} ${c.yellow(checkName)} ${c.yellow(`finished with a warning in ${duration}ms.`)}`,
+        c.yellow(warning.replace(/^/gm, '   | ')),
+      ].join('\n');
+    }
     if (exitCode === 0) {
       return `${c.bold(c.green('✅'))} ${c.yellow(checkName)} ${c.green(`finished successfully in ${duration}ms.`)}`;
     }

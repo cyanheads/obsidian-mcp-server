@@ -33,7 +33,10 @@ import { fileURLToPath } from 'node:url';
 /**
  * Agent-doc entries under `node_modules/` that must not ship in a bundle.
  * KEEP IN SYNC with `AGENT_DOC_ENTRY` in `scripts/lint-packaging.ts`
- * (post-bundle content check) — a unit test asserts the two are identical.
+ * (post-bundle content check) — edit both literals together. The assertion that
+ * they match lives in the mcp-ts-core repository's own test suite; `tests/` is
+ * not part of the published package, so nothing enforces the pair in a server
+ * these scripts were copied into.
  */
 export const AGENT_DOC_ENTRY =
   /^node_modules\/.*(?:\/framework-skills\/|\/skills\/|\/\.claude\/|\/\.agents\/|\/SKILL\.md$)/;
@@ -41,7 +44,10 @@ export const AGENT_DOC_ENTRY =
 /**
  * Platform-specific native binding packages, which must not ship in a bundle.
  * KEEP IN SYNC with `NATIVE_BINDING_ENTRY` in `scripts/lint-packaging.ts`
- * (post-bundle content check) — a unit test asserts the two are identical.
+ * (post-bundle content check) — edit both literals together. The assertion that
+ * they match lives in the mcp-ts-core repository's own test suite; `tests/` is
+ * not part of the published package, so nothing enforces the pair in a server
+ * these scripts were copied into.
  *
  * `mcpb pack` archives the whole project directory, so a native dependency
  * contributes the build host's platform slice and nothing else — for

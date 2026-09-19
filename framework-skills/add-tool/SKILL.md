@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.24"
+  version: "2.29"
   audience: external
   type: reference
 ---
@@ -131,7 +131,7 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
 
 ### Multi-round-trip variant
 
-A handler that needs something the caller didn't supply returns `ctx.requestInput(...)` and is re-entered with the answers on `ctx.inputs`. There is no mid-handler `await` for user input, and no capability check — the surface is always present, on every transport and both protocol eras. Whether the caller can *answer* is a separate question — a 2025-era HTTP client cannot when the server runs `MCP_SESSION_MODE=stateless` (`api-context` § `ctx.requestInput`). Treat an unanswered round as terminal, never as consent.
+A handler that needs something the caller didn't supply returns `ctx.requestInput(...)` and is re-entered with the answers on `ctx.inputs`. There is no mid-handler `await` for user input, and no capability check — the surface is always present, on every transport and both protocol eras. Whether the caller can *answer* is a separate question — a 2025-era HTTP client cannot when the server runs `MCP_SESSION_MODE=stateless`, which a server needing that leg declares with `createApp({ sessionMode: { require: 'stateful' } })` rather than leaving to a deployment (`api-context` § `ctx.requestInput`). Treat an unanswered round as terminal, never as consent.
 
 ```typescript
 import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
@@ -221,8 +221,8 @@ export const submitObservations = getServerConfig().enableWrites
 | Surface | Disabled tools? |
 |:---|:---|
 | `tools/list` (MCP protocol — what clients call) | **No** — disabled tools are skipped at registration |
-| `/.well-known/mcp.json` `definitions.tools` (Server Card) | **Yes**, with `disabled` field — discovery agents see them as present-but-uncallable |
-| `/` (HTML landing page) | **Yes**, in a 4th muted bucket after `read \| write \| destructive` |
+| `/.well-known/mcp.json` (Server Card) | **No** — the card carries no per-tool entries at all, so a discovery agent reading it cannot see a disabled tool |
+| `/` (HTML landing page) | **Yes**, in a 4th muted bucket after `read \| write \| destructive` — the only surface where a disabled tool is visible |
 
 The wrapper preserves all original definition fields (handler, schemas, auth scopes, error contracts) — when re-enabled, the tool already conforms to every lint rule.
 
@@ -276,6 +276,45 @@ Two limits worth knowing when you write a schema:
 - **Root level only**, matching `.strict()` itself. A nested `z.object()` inside the input still strips unknown keys unless it is strict in its own right — mark the nested option objects you want guarded.
 - **An explicit opening wins.** A definition that declared `.passthrough()` or `.catchall(...)` asked for an open object, and `tool()` leaves it alone. Use that (deliberately) for tools that proxy arbitrary upstream query parameters.
 - **A union root is strictened per variant.** See below — the branch is where the properties live, so that is where `additionalProperties: false` lands.
+
+**Declare `.strict()` before `.describe()` / `.meta()` on the root.** Zod keys both to the schema *instance*, and `.strict()` clones without it — so `z.object({…}).describe('…')` loses the description when `tool()` strictens, and the advertised `inputSchema` carries none. `z.object({…}).strict().describe('…')` keeps it, because an already-strict schema is returned untouched. `lint:mcp` reports the loss as `schema-root-meta-discarded`. It bites the root only (and each variant of a union root); field- and nested-level describes are unaffected.
+
+### Three things the framework fixes before the schema sees the arguments
+
+Strict input is right for a misspelling the caller can fix, and wrong when the arguments the model wrote were correct and something between the model and the schema was not. An ordered step inside `parseToolArguments` covers those cases: **drop client-added keys → key aliases → parse → on failure, repair and one re-parse.** All three stages are on by default, none changes what `tools/list` advertises, and none appears in a response — each emits a debug log and a counter (`mcp.input.ignored_key`, `mcp.input.aliased`, `mcp.input.coerced`) instead, so a new client artifact surfaces in telemetry rather than as a failed call.
+
+**1. Client-added root keys are dropped.** Some clients put their own keys inside `arguments`: a placeholder when the model sends none, a call description, a call id, or a `_meta` block that belongs on `params`. The model never wrote them and cannot remove them, so the retry fails identically. An undeclared root key is dropped when it is underscore-prefixed or on the built-in list (`_meta`, `tool_call_description`, `toolCallId`). Three boundaries: a declared key is never dropped (on a union root, that means every variant's keys); an author-opened root is left alone; and a tool declaring any underscore-prefixed key of its own switches the underscore rule off — otherwise a misspelled `_cursor` would vanish silently, which is the failure strict input exists to prevent.
+
+**2. A key alias reaches the handler under the canonical name.** Declare the mappings you know:
+
+```ts
+export const drugProfile = tool('drug_profile', {
+  input: z.object({ drug: z.string().describe('Generic or brand name.') }),
+  inputAliases: { drug_name: 'drug', substance: 'drug' },
+  // …
+});
+```
+
+Alongside those, an undeclared key whose case-folded form (`-`/`_` stripped, lowercased) names exactly one declared key is rewritten too — `max_results`, `Max-Results`, and `MAXRESULTS` all reach a declared `maxResults`, with nothing declared. Neither half advertises anything: `inputSchema` is byte-identical with or without `inputAliases`, so the canonical key keeps its place in `required` and the model is still told to use it.
+
+Declare an alias where the meaning is certain and the mapping is one-to-one — a sibling tool's spelling for the same concept, the upstream API's own name, a shorthand weaker models reach for. It is not fuzzy matching: a key matching no alias and no declared key is still rejected by name, with the accepted-key hint. Four boundaries: a rewrite applies only when the target key is absent (alias *and* target present fails exactly as it does today); an author-opened root is never rewritten; a union root resolves against the variant the discriminator selects, and rewrites nothing when the discriminator is absent or unrecognized; and a `headerParam`-designated target is never rewritten *to* — the SDK cross-checks the `Mcp-Param-<Name>` header against the raw body before dispatch, so a later rewrite would hand your handler a value no intermediary attested. `lint:mcp` rejects an alias that shadows a declared key, names a target that does not exist, or is ambiguous against another alias or key (`input-alias-conflict`).
+
+**3. A stringified array is repaired after the parse fails.** `statusFilter: "[\"RECRUITING\"]"` against `z.array(z.string())` is a serialization slip the server can undo with certainty — `JSON.parse` is the exact inverse of the `JSON.stringify` that produced it, which is what separates it from the nearest-key guessing strict input refuses. The repair runs *only* on the failure branch, *only* at the paths the rejection's own issues name, and is kept only if the repaired arguments then pass your schema. So it cannot touch a value that was already valid — a free-text field legitimately holding `"[1,2,3]"` is not in the issue list, so it survives untouched even when the same call carries a genuine stringified array in another field. It walks values only: no key is added, dropped, or renamed. When nothing validates, the original rejection is thrown verbatim: same code, message, `data.issues`, and `data.recovery.hint`.
+
+Turn any stage off per server — there is no per-tool switch:
+
+```ts
+await createApp({
+  input: {
+    ignoreKeys: ['some_client_field'], // adds to the built-in list; `false` disables the stage
+    caseStyleAliases: false,           // declared `inputAliases` only
+    coerce: false,                     // never retry a failed parse
+  },
+  tools: allToolDefinitions,
+});
+```
+
+Those three stages are the whole of the framework's input edge: argument **key** names, and one **value** shape — a JSON-stringified array, which `JSON.parse` inverts with certainty. Every other value normalization is domain knowledge and belongs to the tool: the case or bare-leaf form of a code, a unit or vocabulary alias, a composite identifier assembled from two arguments, a delimiter-joined list, a spelled-out name. Which variants a given input accepts is decided per input at design time (`design-mcp-server` § *Parameter descriptions*) and applied at the head of the handler, on the unambiguous mappings only.
 
 ### Multi-mode tools take a discriminated-union input
 
@@ -594,6 +633,8 @@ format: (result) => [{
 }],
 ```
 
+**A parsed value is the same problem one step later.** `Number(raw)` over an absent or non-numeric upstream field yields `NaN`; a missing nested path yields `null` or `undefined`. Against a required `z.number()` / `z.string()` each of those fails the effective-output parse, and the agent gets an internal error in place of a record the tool otherwise had. Guard where the value is parsed, not at the schema: when a documented-sparse feed supplies nothing usable for a field, omit it (declare it `.optional()`, render it `Not available`) rather than passing a `NaN`, a `null`, or a coerced `0` into the return. Decide per field which upstream absences are expected — the honesty rule above, applied to values the server computes rather than copies.
+
 ### Error classification and messaging
 
 **Recommended: declare an `errors[]` contract.** A typed contract surfaces in `tools/list` and gives the handler a typed `ctx.fail(reason, …)` keyed by the declared reason union — TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated and tamper-proof, and the linter enforces conformance against the handler body.
@@ -678,6 +719,8 @@ export const fetchArticles = tool('fetch_articles', {
 
 `ctx.recoveryFor` returns `{}` when the calling tool has no contract or the reason isn't declared, so the spread is always safe — services don't have to know which tool called them.
 
+Add `thrownBy: 'service'` to a contract entry the service produces once the handler also throws one of its own. `error-contract-unthrown` reads the handler body alone: as soon as one literal `ctx.fail(` appears there, every declared reason the body does not name is flagged, and the marker is what tells the rule this one is thrown a layer down. Lint-only metadata — the entry stays typed, advertised, and thrown exactly as an unmarked one.
+
 See `add-service` for the full pattern.
 
 #### Ad-hoc factory throws (fallback)
@@ -699,9 +742,12 @@ import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 throw serviceUnavailable(`arXiv API returned HTTP ${status}. Retry in a few seconds.`);
 
 // Recovery hint via the canonical `data.recovery.hint` shape — the framework
-// auto-mirrors it into the content[] text as `Recovery: <hint>`, so format()-only
+// mirrors it into the content[] text as `Recovery: <hint>`, so format()-only
 // clients (Claude Desktop) see the same guidance that structuredContent clients
-// (Claude Code) read from `error.data.recovery.hint`. Other `data` keys reach
+// (Claude Code) read from `error.data.recovery.hint`. A hint the message already
+// contains verbatim is dropped from the text rather than stated twice; it stays
+// on structuredContent regardless. `data.reason` and `data.retryable` render as
+// a closing `(reason … · not retryable)` line; other `data` keys reach
 // structuredContent only.
 import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
 throw invalidParams(
@@ -774,7 +820,7 @@ Large payloads burn the agent's context window. Default to curated summaries; of
 - **Lists**: Return top N with a total count and pagination cursor, not unbounded arrays
 - **Large objects**: Return key fields by default; accept a `fields` or `verbose` parameter for full data
 - **Binary/blob content**: Return metadata and a reference, not the raw content
-- **Analytical working sets**: When upstream returns more *analytical* rows (data an agent would SQL — aggregate, group, join) than fit in context, `DataCanvas` (`core.canvas`, wired in `setup()` via `setCanvas`; Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) lets you register the rows and return the `canvas_id` plus a preview so the agent can run SQL to slice down without a re-fetch. The `spillover()` helper (`@cyanheads/mcp-ts-core/canvas`) automates the overflow case: drain rows up to a character budget for the inline preview, auto-register the full source on overflow, return both as a discriminated union. **Two gates:** it must be analytical, not a discovery/search surface of categorical metadata (those don't earn a canvas regardless of row count — use MCP-side list filtering or pagination); and a tool emitting a `canvas_id` MUST be paired with a registered `dataframe_query` tool, or the handle is unreachable. Compute distributions or refinement hints across the full result — not the preview — so the agent gets honest aggregate signal on the rows it didn't read. See `api-canvas` for the register / query / export pattern and the spillover flow.
+- **Analytical working sets**: When upstream returns more *analytical* rows (data an agent would SQL — aggregate, group, join) than fit in context, `DataCanvas` (`core.canvas`, wired in `setup()` via `setCanvas`; Tier 3 — opt-in via `CANVAS_PROVIDER_TYPE=duckdb`) lets you register the rows and return the `canvas_id` plus a preview so the agent can run SQL to slice down without a re-fetch. The `spillover()` helper (`@cyanheads/mcp-ts-core/canvas`) automates the overflow case: drain rows up to a character budget for the inline preview, auto-register the full source on overflow, return both as a discriminated union. **Two gates:** it must be analytical, not a discovery/search surface of categorical metadata (those don't earn a canvas regardless of row count — use MCP-side list filtering or pagination); and a tool emitting a `canvas_id` MUST be paired with a registered `dataframe_query` tool, or the handle is unreachable. Compute distributions or refinement hints across the full result — not the preview — so the agent gets honest aggregate signal on the rows it didn't read. Declare the *input* `canvas_id` field with `CanvasIdSchema` (`@cyanheads/mcp-ts-core/canvas`) rather than a bare `z.string()`: it advertises the 10-character URL-safe pattern in `inputSchema`, so a model sees the shape before it calls and a value that could never be an id is rejected at argument validation instead of after a registry lookup. Add your own `.describe()` over it to say which tool produced the id. The *output* field stays a plain `z.string()` — that id came from the server. See `api-canvas` for the register / query / export pattern and the spillover flow.
 - **One large document**: When a single call returns one document-shaped record (not a row set) that can overflow context, return a section *outline* — top-level keys + per-section byte size — and let the agent re-call with `sections: [...]` for only what it needs, instead of truncating one surface. `outlineOnOverflow()` with `OUTLINE_VARIANT` / `selectSections()` / `formatOutline()` (`@cyanheads/mcp-ts-core/utils`) measures the payload and returns a `full | outline` result. Declare the tool's `output` as a flat `z.object` with a `kind` discriminator and presence-based optional arms (fold in `OUTLINE_VARIANT.shape.sections` / `.notice`) — `tool()` rejects a `z.discriminatedUnion` output — and render each arm on field presence in `format()` so parity holds. Pure measure + key-slice — Workers-portable, unlike canvas `spillover()`. Use for one fat record; use `spillover()` for a row collection. See the `techniques` skill's `outline-on-overflow` reference.
 
 ## MCP-side list filtering
@@ -816,9 +862,9 @@ return { items: hits };
 - [ ] Optional nested objects guarded for empty inner values from form-based clients (check `?.field` truthiness, not just object presence)
 - [ ] No `console` calls — use `ctx.log` for handler logging
 - [ ] `handler(input, ctx)` is pure — throws on failure, no try/catch (exception: batch tools with per-item isolation use try/catch inside the loop — that's intentional, don't remove it)
-- [ ] `format()` renders every field in the output schema — enforced at lint time via sentinel injection, startup fails with `format-parity` errors otherwise. Different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data. Primary fix: render the missing field in `format()` (use `z.discriminatedUnion` for list/detail variants). Escape hatch: if the output schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) rather than maintaining aspirational typing
+- [ ] `format()` renders every field in the output schema — enforced at lint time via sentinel injection, startup fails with `format-parity` errors otherwise. Different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data. Primary fix: render the missing field in `format()` (for list/detail variants, one flat `z.object` with a `kind` discriminator and presence-based optional arms rendered by independent `if` blocks — `tool()` rejects a `z.discriminatedUnion` output). Escape hatch: if the output schema was over-typed for a genuinely dynamic upstream API, relax it (`z.object({}).passthrough()`) rather than maintaining aspirational typing
 - [ ] Agent-facing context (empty-result notices, query/filter echo, pagination totals) declared in an `enrichment` block and populated via `ctx.enrich(...)` — reaches both `structuredContent` and `content[]` automatically, not authored solely in `format()` text. Enrichment keys disjoint from `output` keys
-- [ ] If wrapping external API: output schema and `format()` preserve uncertainty from sparse upstream payloads instead of inventing concrete values
+- [ ] If wrapping external API: output schema and `format()` preserve uncertainty from sparse upstream payloads instead of inventing concrete values, and a parsed `NaN`/`null` is dropped at the parse site rather than passed to a required output field
 - [ ] `auth` scopes declared if the tool needs authorization
 - [ ] `errors: [...]` contract declared for the tool's domain-specific failure modes — or block deleted if no domain failures apply (baseline codes bubble freely)
 - [ ] Error contract declared inline on this tool — not imported from a shared module, even when other tools have near-identical entries

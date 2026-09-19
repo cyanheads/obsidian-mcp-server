@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.25"
+  version: "2.28"
   audience: external
   type: workflow
 ---
@@ -251,7 +251,7 @@ Tools that perform multi-step mutations (the Workflow shape) have two safety con
 
 **Confirmation-gated destructive modes, with an annotation fallback.** When a workflow's `mode` parameter switches between safe and destructive arms (`draft` vs `send`, `plan` vs `apply`), gate the destructive arm on a confirmation the handler asks for via `ctx.requestInput(...)`, so a human approves before the irreversible step fires. The handler is re-entered with the answer on `ctx.inputs`; it does not `await` mid-call.
 
-The gate is always *reachable* — `ctx.requestInput` is present on every transport and both protocol revisions (2025-11-25 legacy, 2026-07-28 current) — but it is not always *answerable*: a client that never fulfils the `input_required` result simply doesn't retry, and the destructive step never runs. The same holds for a 2025-11-25 HTTP client when the server runs `MCP_SESSION_MODE=stateless`, which disables the legacy round-trip shim — the gate refuses and the destructive step never fires. That is the safe outcome, but it makes the tool unusable for those clients, so weigh it before defaulting such a server to `stateless` (`api-context` § `ctx.requestInput`). Keep `destructiveHint: true` in annotations so those clients' own approval flows still surface the risk. A decline is terminal — the handler fails the call rather than re-asking, which would loop until the round budget runs out. The handler shape is in `api-context` § *The shape of a multi-round-trip handler*.
+The gate is always *reachable* — `ctx.requestInput` is present on every transport and both protocol revisions (2025-11-25 legacy, 2026-07-28 current) — but it is not always *answerable*: a client that never fulfils the `input_required` result simply doesn't retry, and the destructive step never runs. The same holds for a 2025-11-25 HTTP client when the server runs `MCP_SESSION_MODE=stateless`: the legacy round-trip shim still runs, but its capability gate refuses because the serving instance never processed `initialize` — the destructive step never fires. That is the safe outcome, but it makes the tool unusable for those clients, so a server built around such a gate declares `createApp({ sessionMode: { default: 'stateful', require: 'stateful' } })` and refuses to start stateless rather than degrading (`api-context` § `ctx.requestInput`). Keep `destructiveHint: true` in annotations so those clients' own approval flows still surface the risk. A decline is terminal — the handler fails the call rather than re-asking, which would loop until the round budget runs out. The handler shape is in `api-context` § *The shape of a multi-round-trip handler*.
 
 **Safe defaults on parameters that determine blast radius.** When a workflow accepts a parameter that controls how far-reaching a mutation is, default to the safer value. A bulk file-update tool defaulting `mode: 'preview'` (no writes) means a sloppy agent call shows a diff rather than blasting changes; an apply-plan tool defaulting `dryRun: true` means a misread plan previews rather than executes; an object-delete tool requiring an explicit `confirmCount` matching the result-set size means an unscoped query can't silently nuke a million rows. Agents that genuinely want the destructive behavior have to name it explicitly, which surfaces intent in the tool call and in logs.
 
@@ -306,6 +306,20 @@ autoExclude: z.boolean().default(true)
 nctIds: z.union([z.string(), z.array(z.string()).max(5)])
   .describe('A single NCT ID (e.g., "NCT12345678") or an array of up to 5 NCT IDs to fetch.'),
 ```
+
+**Input-edge normalization.** For every identifier, code, or enum-ish input, enumerate at design time the variants a caller will plausibly send, and decide per variant: normalize, or error. The rule is **normalize what is certain, error on what is ambiguous.** A variant is certain when the mapping is unambiguous, one-to-one, and preserves the submitted meaning exactly — then the call succeeds instead of returning a miss for a value the server could resolve. Everything short of that is an error naming the expected shape, with a `recovery` routing to the reference tool. Never fuzzy-match a value, broaden a query, swap one entity for another, or drop a filter to make a call succeed: plausible-looking rows from a guessed input are worse than a rejection the agent can act on.
+
+| Class | Example | Handling |
+|:---|:---|:---|
+| Case or bare-leaf shorthand of a code | `ACS5`, `acs5` → `acs/acs5` | Normalize before lookup |
+| Domain value alias | `mph` → `m/h`, `kph` → `km/h` | Alias table at the input edge |
+| Composite identifier completed by context | `part: "52"` + `section: "21"` → `52.21` | Try as-given first, retry the composed form on a miss — never rewrite unconditionally, since the bare form can be legitimate |
+| Delimiter-joined list where an array is accepted | `"US,JP,KR"` → `["US","JP","KR"]` | Split on the documented separator |
+| Spelled-out vs. abbreviated name | `"Houston, Texas"` → `"Houston, TX"` | Normalize against the bundled name table |
+
+These are **value**-level, and the mappings are domain knowledge — settle them per input in the design doc's param table. Argument **key** names are not: the framework drops client-added root keys and rewrites declared and case-style key aliases before the schema sees the arguments, and repairs a JSON-stringified array against the tool's own schema after a failed parse. Don't re-implement any of that per server — see `add-tool` § *Three things the framework fixes before the schema sees the arguments*.
+
+This resolves one submitted value to one canonical value, and does not loosen the strict token match in [MCP-side list filtering](#mcp-side-list-filtering), which scores a query against many candidate names.
 
 #### Output design
 
@@ -407,7 +421,7 @@ Errors are part of the tool's interface — design them during the design phase,
 | **Auth/permissions** | Insufficient scopes, expired token | `Forbidden` / `Unauthorized` | Maybe — escalate or re-auth |
 | **Server internal** | Parse failure, missing config, unexpected state | `InternalError` | No — server-side issue |
 
-(`InvalidParams` also exists — the SDK emits it when input fails Zod schema validation before the handler runs. Anything the handler itself throws about inputs uses `ValidationError`.)
+(`InvalidParams` also exists — the framework's `parseToolArguments` emits it when input fails Zod schema validation before the handler runs. Anything the handler itself throws about inputs uses `ValidationError`.)
 
 The framework auto-classifies many of these at runtime (HTTP status codes, JS error types, common patterns), but explicit classification in the handler gives better error messages. For declared contract failures, throw via `ctx.fail('reason', …)`. For ad-hoc throws outside the contract, use error factories (`notFound()`, `validationError()`, etc.) when the code matters; plain `throw new Error()` when the framework's auto-classification is good enough.
 
@@ -423,9 +437,11 @@ throw new Error('Not found');
 "No session working directory set. Please specify a 'path' or use 'git_set_working_dir' first."
 
 // Good — structured hint in error data using the canonical `data.recovery.hint` shape.
-// The framework auto-mirrors `data.recovery.hint` into the content[] text as
+// The framework mirrors `data.recovery.hint` into the content[] text as
 // `Recovery: <hint>` so format()-only clients (Claude Desktop) see the same
 // guidance structuredContent clients (Claude Code) read from `error.data.recovery.hint`.
+// A hint the message already contains verbatim is dropped from the text rather
+// than stated twice, and stays on structuredContent either way.
 throw forbidden(
   "Cannot perform 'reset --hard' on protected branch 'main' without explicit confirmation.",
   {
@@ -647,6 +663,7 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] Tool descriptions are imperative present tense, concrete, and include operational guidance where non-obvious
 - [ ] Parameter `.describe()` text explains what the value is, what it affects, and tradeoffs
 - [ ] Input schemas use constrained types (enums, literals, regex) over free strings
+- [ ] **If an input is an identifier, code, or enum-ish value:** the variants callers will plausibly send are enumerated per input — the unambiguous, one-to-one, meaning-preserving ones normalized before lookup; the rest rejected with a `recovery` naming the expected shape; any composite form tried as-given before a composed retry
 - [ ] Output schemas designed for LLM's next action — chaining IDs, post-write state, filtering communicated
 - [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data, not just a count or title
 - [ ] Error messages guide recovery — name what went wrong and the next tool call (no dead ends)

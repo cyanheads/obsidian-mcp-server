@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.17"
+  version: "1.19"
   audience: external
   type: reference
 ---
@@ -25,9 +25,10 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 
 1. `name`/`version`/`title`/`websiteUrl`/`description`/`icons` options passed to `createApp()` or `createWorkerHandler()`
 2. Environment variables
-3. `package.json` fields
+3. `sessionMode.default` passed to `createApp()` — a default, so it sits *below* the env var it seeds, unlike the identity options above
+4. `package.json` fields
 
-**Where `package.json` is read from:** the application root — the nearest `package.json` at or above the process entry module (`process.argv[1]`), which is the served package on every launch path (`npx`, `.mcpb`, a client config naming `dist/index.js`), none of which run from the package root. The launching client's working directory is never the anchor: a stdio client starts the server from wherever it happens to be, so reading identity from there makes a server report a foreign project's name and version. When the entry module is a tool installed under the project's own `node_modules` and the process runs from that project — a test runner is the usual case — the project's manifest wins. With no manifest reachable, the framework's own identity is the fallback.
+**Where `package.json` is read from:** the application root — the nearest `package.json` at or above the process entry module (`process.argv[1]`), which is the served package on every launch path (`npx`, `.mcpb`, a client config naming `dist/index.js`), none of which run from the package root. The launching client's working directory is never the anchor: a stdio client starts the server from wherever it happens to be, so reading identity from there makes a server report a foreign project's name and version. When the entry module is a tool installed under a `node_modules` tree and the process runs from the directory owning that tree — a test runner is the usual case — the nearest manifest at or above the working directory wins instead. That also covers a workspace monorepo, where the runner is hoisted to the repo root while the process runs from a package directory: an owner that is a strict *ancestor* of the working directory qualifies only when it declares a workspace (a `workspaces` field in its manifest, or a `pnpm-workspace.yaml` beside it), which is what keeps a cache prefix or a plain project root — equally ancestors of a working directory inside them — from overriding an installed package's own identity. The owner is the outermost `node_modules` boundary, so a transitively-installed runner and a pnpm isolated layout resolve the same way. With no manifest reachable, the framework's own identity is the fallback.
 
 ---
 
@@ -50,6 +51,7 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 | `description` | `string?` | One-line description; wins over `MCP_SERVER_DESCRIPTION` when set |
 | `icons` | `Implementation['icons']?` | Array of icon objects: `{ src, mimeType?, sizes?: string[], theme?: 'light'\|'dark' }` |
 | `cacheHints` | `CacheHints?` | Cache hints for the 2026-07-28 cacheable results, keyed by operation — see below |
+| `sessionMode` | `SessionMode \| { default?: SessionMode; require?: 'stateful' }` | Session posture declared in code — see below |
 
 #### Cache hints (`cacheHints`)
 
@@ -68,6 +70,20 @@ await createApp({
 - `cacheScope` — `'private'` (only the requesting client may cache) or `'public'` (shared caches may too).
 - A resource's own `cacheHint` overrides the `resources/read` entry for that resource, field by field — see the `add-resource` skill.
 - Omitting a hint keeps the SDK defaults (`ttlMs: 0`, `cacheScope: 'private'`). Responses to 2025-era clients are never affected.
+
+#### Session mode (`sessionMode`)
+
+Declares the session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`. The bare string is shorthand for `{ default }`. HTTP only — `MCP_SESSION_MODE` has no effect on stdio.
+
+```ts
+await createApp({ sessionMode: 'stateless' });                                  // default only
+await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); // and enforced
+```
+
+- **`default`** applies only when `MCP_SESSION_MODE` carries no meaningful value. An empty string and a whole-value unsubstituted `${…}` placeholder both read as unset on the config path, so both fall through to the option rather than to the schema default (`auto`). An explicit `MCP_SESSION_MODE` always wins.
+- **`require: 'stateful'`** fails startup with a `ConfigurationError` naming the conflicting env value when the resolved HTTP mode is `stateless`, before any service is constructed. Declare it when a handler gates a destructive action behind `ctx.requestInput` / `inputRequired.elicit` — see the `MCP_SESSION_MODE` row for why that combination is unusable for 2025-era clients. There is no `require: 'stateless'`; nothing needs statelessness to work.
+- The advertised `transport.sessionMode` follows automatically — `resolveSessionMode` is the single resolution the manifest, the session store, and the `ctx.sessionId` gate all read — and still never publishes `auto`.
+- Cloudflare Workers are outside this contract: `MCP_SESSION_MODE` is not in `CORE_ENV_BINDINGS`, so a `[vars]` entry reaches `process.env` only through `extraEnvBindings`.
 
 ---
 
@@ -90,7 +106,7 @@ await createApp({
 | `MCP_HTTP_MAX_BODY_BYTES` | `mcpHttpMaxBodyBytes` | `1048576` (1 MiB) | Max **inbound** JSON-RPC request body; oversized requests get `413` before per-request allocation. Does **not** cap upstream data staged into a canvas or response sizes. `0` disables (defer to runtime/proxy). |
 | `MCP_HTTP_MAX_PORT_RETRIES` | `mcpHttpMaxPortRetries` | `15` | Rungs of the port ladder walked when a bind collides; each rung tries `port + 1`. See [Port binding](#port-binding) |
 | `MCP_HTTP_PORT_RETRY_DELAY_MS` | `mcpHttpPortRetryDelayMs` | `50` | Delay between port retries (ms) |
-| `MCP_SESSION_MODE` | `mcpSessionMode` | `auto` | `stateless` \| `stateful` \| `auto`; `auto` resolves to `stateful`. `stateless` also disables the 2025-era multi-round-trip shim, so v1 HTTP clients cannot answer a `ctx.requestInput` round — 2026-07-28 clients and stdio are unaffected |
+| `MCP_SESSION_MODE` | `mcpSessionMode` | `auto` | `stateless` \| `stateful` \| `auto`; `auto` resolves to `stateful`. Under `stateless`, the 2025-era multi-round-trip shim still runs but its capability gate refuses: each request is served by an instance that never processed `initialize`, so the client-capability view is empty and a `ctx.requestInput` round can never be answered — fail-closed, but unconditional, so the tool is unusable for those clients rather than merely guarded. 2026-07-28 clients and stdio are unaffected. Seed it from code with `createApp({ sessionMode })` — see below |
 | `MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS` | `mcpStatefulSessionStaleTimeoutMs` | `1800000` | 30 min; stale session eviction |
 | `MCP_HTTP_RESUMABILITY` | `mcpHttpResumability` | `true` | SSE stream replay under stateful HTTP. On by default — selecting a session mode is the opt-in. Kill switch only; no effect on stateless serving or the session-less 2026-07-28 era |
 | `MCP_HTTP_RESUMABILITY_MAX_EVENTS` | `mcpHttpResumabilityMaxEvents` | `512` | Events retained per session for replay; oldest evicted first. Lower it on a server whose tools return large results |
@@ -260,7 +276,7 @@ export function getServerConfig(): ServerConfig {
 }
 ```
 
-**Env booleans — use `z.stringbool()`, never `z.coerce.boolean()`.** `z.coerce.boolean()` runs `Boolean(value)`, so `"false"`, `"0"`, and `"no"` all coerce to `true` — the flag becomes impossible to disable through the environment except by omitting it entirely. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` (case-insensitive) and rejects anything else, so `MY_VERBOSE_LOGGING=false` actually disables and a typo fails loudly at startup instead of silently coercing. Empty string and unset both fall through to `.default()`.
+**Env booleans — use `z.stringbool()`, never `z.coerce.boolean()`.** `z.coerce.boolean()` runs `Boolean(value)`, so `"false"`, `"0"`, and `"no"` all coerce to `true` — the flag becomes impossible to disable through the environment except by omitting it entirely. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` (case-insensitive) and rejects anything else, so `MY_VERBOSE_LOGGING=false` actually disables and a typo fails loudly at startup instead of silently coercing. An empty string is not in that accepted set — `z.stringbool()` rejects `''` with `Invalid option`. What makes a blank `.env` line take the default is the normalization layer described under **Unset means unset** below, not the schema type.
 
 **Unset means unset.** `parseEnvConfig` and the framework's own config both treat an empty string and a whole-value `${…}` placeholder — what an MCPB or plugin host forwards when a user leaves an option blank and nothing substitutes it — as the variable being absent: an optional field stays `undefined`, a defaulted field takes its default, and a required field fails as missing rather than as a format error against the literal text. A value that merely contains `${…}` is kept. No per-field `z.preprocess` guard is needed for either case.
 
@@ -273,6 +289,6 @@ Server config validation failed:
 
 Instead of a raw `ZodError` dump at startup. The framework catches the resulting `ConfigurationError` and prints a clean banner (full stack behind `DEBUG=true`).
 
-Direct `ServerConfigSchema.parse(...)` still works — the framework intercepts raw `ZodError` thrown from `setup()` and converts it — but error messages won't know about env var names, so they show the Zod path (`apiKey`) instead of the variable name (`MY_API_KEY`).
+Direct `ServerConfigSchema.parse(...)` still works — the framework intercepts raw `ZodError` thrown from `setup()` and converts it — but error messages won't know about env var names, so they show the Zod path (`apiKey`) instead of the variable name (`MY_API_KEY`). No normalization runs on that path either, so a blank `MY_FLAG=` arrives as `''` and fails validation. `normalizeEnv` is exported from `/config` for exactly that case: normalize the values first, then parse.
 
 **Workers:** Do not parse `process.env` at module top-level. In Workers, env bindings are injected at request time via `injectEnvVars()`, after all static imports. Lazy parsing is required.

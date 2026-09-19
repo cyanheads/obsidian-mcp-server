@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: reference
 ---
@@ -123,6 +123,8 @@ toolContractSuite(searchTool, {
 ```
 
 Use `runToolContract(definition, input, { context })` from `/testing` when a custom test runner or an imperative assertion is a better fit. It intentionally skips transport auth and telemetry; those belong in transport/integration tests.
+
+Arguments that fail the `input` schema are rejected the way the production handler factory rejects them: `InvalidParams` (`-32602`), with a message naming the tool and every failing field. That is the code a client sees on the wire, so assert it — not `ValidationError` (`-32007`), which stays the classification for a `ZodError` a handler throws itself and for an output-schema rejection.
 
 ---
 

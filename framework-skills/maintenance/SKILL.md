@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "2.7"
+  version: "2.8"
   audience: external
   type: workflow
 ---
@@ -172,7 +172,7 @@ Apply the findings from Steps 3 and 4. Framework changes and third-party library
 
 The consumer opted into the framework; its templates, skills, scripts, linter rules, conventions, and new APIs that supersede local code are authoritative. Adopt them now — not as a follow-up.
 
-- **Synced skill content from Phase A** — `git diff framework-skills/` for every skill that was updated. Each updated body is new framework guidance; apply it to matching surfaces in this server. Examples: `add-tool` gains a section on output formatting → audit existing tool definitions against that section; `api-errors` documents a new contract pattern → adopt across error surfaces; `security-pass` adds a new check → run it against the surface. Skill updates aren't metadata.
+- **Synced skill content from Phase A** — `git diff framework-skills/` for every skill that was updated. Each updated body is new framework guidance; apply it to matching surfaces in this server. Examples: `add-tool` gains a section on output formatting → audit existing tool definitions against that section; `api-errors` documents a new contract pattern → adopt across error surfaces; `security-pass` adds a new check → run it against the surface; `polish-docs-meta/references/readme.md` changes → re-audit `README.md` against it section by section (structure, Features shape, hosted callout) and restructure what no longer matches. Skill updates aren't metadata.
 - **Breaking changes** — fix call sites. Not optional.
 - **Deprecations** — migrate now, while context is fresh.
 - **New linter rules** — if the rule now flags existing code, fix the code; don't silence the rule.

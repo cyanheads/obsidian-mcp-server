@@ -109,7 +109,7 @@ In-process sliding window rate limiter with LRU eviction and OTEL span annotatio
 new RateLimiter(config: AppConfig, logger: Logger)
 ```
 
-Reads initial settings from `AppConfig`. Call `configure()` to override at runtime.
+Reads initial settings from `AppConfig`. Call `configure()` to override at runtime — including `maxTrackedKeys`, which is a memory ceiling and is enforced during that call rather than after subsequent key churn.
 
 ### Configuration
 
@@ -131,7 +131,7 @@ Defaults: `windowMs` 15 min, `maxRequests` 100, `cleanupInterval` 5 min, `maxTra
 
 | Method | Signature | Notes |
 |:-------|:----------|:------|
-| `configure` | `(config: Partial<RateLimitConfig>) -> void` | Merges partial config; restarts cleanup timer if `cleanupInterval` changed |
+| `configure` | `(config: Partial<RateLimitConfig>) -> void` | Merges partial config; restarts cleanup timer if `cleanupInterval` changed. Lowering `maxTrackedKeys` below the current tracked-key count trims the map to the new cap synchronously, before the call returns — one pass, expired windows dropped before live entries, live entries taken in least-recently-used order, survivors keeping their counts and reset times. Raising it, or restating a value at or above the current size, trims nothing. |
 | `check` | `(key, context?) -> void` | Throws `McpError(RateLimited)` with data `{ waitTimeSeconds, key, limit, windowMs }` when exceeded; annotates active OTEL span |
 | `getStatus` | `(key) -> { current, limit, remaining, resetTime } \| null` | Does NOT apply `keyGenerator` — pass the already-resolved key |
 | `getConfig` | `() -> RateLimitConfig` | Shallow copy of effective config |

@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.1"
+  version: "2.3"
   audience: external
   type: reference
 ---
@@ -79,8 +79,28 @@ A canvas is identified by an opaque 10-character URL-safe `canvasId` (~10¹⁸ k
 | **Existing id (own tenant)** | Resolves to that canvas, slides TTL forward, returns `isNew: false`. |
 | **Existing id (other tenant)** | Throws `NotFound` — uniform with unknown to avoid leaking existence across tenants. |
 | **Unknown id** | Throws `NotFound` (`data.reason: 'canvas_not_found'`) with a recovery hint to re-run the producing tool or re-check the id. |
+| **Malformed id** | Throws `ValidationError` (`data.reason: 'canvas_id_malformed'`) before any lookup, with a hint naming the format. A value that cannot be an id is an input error; only a well-formed id that is absent is a lookup miss. |
+| **Omitted, tenant at its cap** | Throws `RateLimited` (`data.reason: 'canvas_capacity_exhausted'`, `retryable: true`) carrying `tenantId`, `activeCount`, and `cap`. The hint leads with reusing an id the caller already holds — the one reclaim path present in every configuration. |
 
 When auth is enabled, the effective scope is the composite `(tenantId, canvasId)`. In `MCP_AUTH_MODE=none`, `tenantId` collapses to `'default'` and the canvasId is the only differentiator — entropy + TTL + the framework's rate limiter make brute-force discovery operationally infeasible. **Designed for public-data servers (BrAPI, OpenFEC, etc.). Don't put PII on a no-auth canvas.**
+
+That collapse is also why the capacity hint reads the way it does: under `default` the occupied slots may belong to other callers, and a consumer's dataframe-drop tool is off by default, so "drop an unused canvas" is advice nobody can follow. The cap is reached only on the mint path, when `canvas_id` was omitted. The refusal keeps `-32003` and its HTTP 429 mapping; `data.reason` is what separates it from upstream throttling, including in the `mcp.tool.error_category` metric, where it files under `server` rather than `upstream`.
+
+### Advertising the id shape
+
+`CanvasIdSchema` is exported from `@cyanheads/mcp-ts-core/canvas` — `z.string().regex(/^[A-Za-z0-9_-]{10}$/)` with a `.describe()` naming where an id comes from. A tool that declares its `canvas_id` field with it advertises the constraint in `inputSchema`, so a model sees the shape before it calls and an impossible value is rejected at argument validation rather than inside the handler:
+
+```ts
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
+
+input: z.object({
+  canvas_id: CanvasIdSchema.optional().describe(
+    'Optional canvas ID from a prior call. Omit on first call to start a fresh canvas.',
+  ),
+}),
+```
+
+The two halves are independent. On a tool that adopts the shape, `"x"` fails as `InvalidParams` (-32602) with the framework's own `reason: 'invalid_arguments'` and a schema-derived hint, and the handler never runs — so `canvas_id_malformed` never fires there. It covers tools that have not adopted it and ids the registry receives from somewhere other than a validated argument, `importFrom`'s source id in particular. Adopting the shape does not change any existing server's advertised schema until that server adopts it.
 
 ---
 
@@ -148,9 +168,13 @@ await instance.registerTable('recent_fetch', rows, { ttlMs: 30 * 60 * 1000 });
 
 Run SQL across registered tables. Returns at most `rowLimit` rows (default 10 000). When the result exceeds `rowLimit`, the response carries `truncated: true` and `rowCount` reflects the number of materialized rows (not the full result set). For full result sets and exact counts, pass `registerAs` — the result is materialized as a new canvas table; the response carries a `preview` slice and the exact `rowCount`.
 
-Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`) with a recovery hint to re-stage the table or call `describe()`. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape. An unknown or expired `canvas_id` fails the same way (`data.reason: 'canvas_not_found'`, with its own recovery hint) — thrown by `acquire()` and every canvas operation.
+Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`) with a recovery hint to re-run the tool that staged the table or list what is currently staged. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape. A well-formed but unknown or expired `canvas_id` fails the same way (`data.reason: 'canvas_not_found'`, with its own recovery hint) — thrown by `acquire()` and every canvas operation. An id that fails the format check is a different failure: `ValidationError` with `data.reason: 'canvas_id_malformed'`, raised before the lookup on each of the three entry points that take a caller-supplied id — `acquire`, `drop` (which previously reported it as a silent `false`), and `importFrom`'s source id.
 
 A `SELECT` that parses but fails to prepare for any other reason — a mistyped column, an unknown function, an invalid expression — throws `ValidationError` (`data.reason: 'invalid_sql'`) and preserves the DuckDB binder detail in `data.binderMessage` (e.g. `Referenced column "x" not found...`, often with a candidate suggestion). This is distinct from `non_select_statement`, reserved for statements that genuinely aren't `SELECT`s — here the shape is fine, so the agent should fix the named column or function.
+
+A `SELECT` that prepares and then fails on the staged data throws `ValidationError` (`data.reason: 'sql_execution_error'`) with the engine message preserved and a hint pointing at `TRY_CAST` or filtering the offending rows. The split follows DuckDB's own execution-error classes — `Conversion Error`, `Invalid Input Error`, `Out of Range Error` — matched on the message prefix. Engine faults (`IO Error`, `INTERNAL Error`, `Out of Memory Error`, and anything unmatched) stay `DatabaseError`, so an export or import failing on I/O is never reported to the caller as bad SQL. `DUCKDB_ERROR_REASONS` exports these alongside `SQL_GATE_REASONS`.
+
+**Every gate and engine rejection carries `data.recovery.hint`**, which the framework mirrors into `content[]` as a `Recovery:` line — so the guidance reaches `structuredContent`-only and `content[]`-only clients alike. The hints name a capability, never a framework method: an MCP client sees only the consuming server's tool names, so `registerTable()` or `describe()` in a hint is guidance it cannot follow. Write your own hints the same way (see `api-errors`).
 
 ```ts
 const result = await instance.query(`
@@ -230,7 +254,7 @@ await instance.export('g_with_obs', { format: 'csv', stream: writableStream });
 
 ```ts
 const tables = await instance.describe();
-// [{ name: 'germplasm', kind: 'table', rowCount: 200, approxSizeBytes: 8192, columns: [...] }, ...]
+// [{ name: 'germplasm', kind: 'table', rowCount: 200, columns: [...] }, ...]
 
 // Filter by kind ('table' | 'view').
 const onlyViews = await instance.describe({ kind: 'view' });
@@ -241,7 +265,7 @@ await instance.clear();                  // returns count dropped (drops views b
 
 `TableInfo.kind` discriminates `'table'` vs `'view'`. For views, `rowCount` is materialized at describe time via `COUNT(*)` — not free; treat as an approximation if the view is expensive.
 
-`TableInfo.approxSizeBytes` is set for base tables (DuckDB's `estimated_size` from `duckdb_tables()`). It is `undefined` for views — views have no entry in `duckdb_tables()`. Use it to decide what to drop when a canvas approaches its memory limit.
+`TableInfo.approxSizeBytes` is `@deprecated` and never populated. DuckDB exposes no per-table byte footprint, so there is no size figure to report and no size-based eviction heuristic to build on; `rowCount` and the canvas memory limit are what `describe()` gives you. The member stays on the type so existing readers compile, and goes away in a future major.
 
 ### Cancellation
 
@@ -307,7 +331,7 @@ A fetcher that spills and a query tool that runs SQL across what was spilled —
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { spillover } from '@cyanheads/mcp-ts-core/canvas';
+import { CanvasIdSchema, spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
 /** Fetch an upstream dataset, inline a preview, spill the full result to a canvas table. */
@@ -318,10 +342,9 @@ export const fetchDataset = tool('fetch_dataset', {
   annotations: { readOnlyHint: true },
   input: z.object({
     query: z.string().describe('Upstream search/filter expression'),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe('Canvas ID from a prior call. Omit to start fresh — the response returns a new one.'),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'Canvas ID from a prior call. Omit to start fresh — the response returns a new one.',
+    ),
   }),
   output: z.object({
     canvas_id: z.string().describe('Canvas ID — pass to dataframe_query or another fetch call'),
@@ -357,7 +380,7 @@ export const dataframeQuery = tool('dataframe_query', {
   description: 'Run a read-only SQL SELECT against tables staged on a canvas by fetch_dataset.',
   annotations: { readOnlyHint: true },
   input: z.object({
-    canvas_id: z.string().describe('Canvas ID returned by fetch_dataset'),
+    canvas_id: CanvasIdSchema.describe('Canvas ID returned by fetch_dataset'),
     sql: z.string().describe('Read-only SELECT. Reference tables by the names fetch_dataset returned.'),
   }),
   output: z.object({
@@ -393,18 +416,16 @@ A domain-specific instance of the [minimum viable spillover server](#minimum-via
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
 export const fetchAndStage = tool('fetch_and_stage_germplasm', {
   description: 'Fetch germplasm matching a query and stage it on a DataCanvas for follow-up SQL.',
   input: z.object({
     query: z.string().describe('Search query'),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        'Optional 10-char canvas ID returned from a prior call. Omit on first call to start a fresh canvas; the response will include a new canvas_id you can pass to subsequent calls or share with another agent.',
-      ),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'Optional canvas ID returned from a prior call. Omit on first call to start a fresh canvas; the response will include a new canvas_id you can pass to subsequent calls or share with another agent.',
+    ),
   }),
   output: z.object({
     canvas_id: z.string().describe('Canvas ID — pass to subsequent tool calls'),

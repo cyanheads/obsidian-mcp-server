@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.3"
+  version: "2.5"
   audience: external
   type: reference
 ---
@@ -326,7 +326,11 @@ Always present, on every transport and both protocol eras. A handler that needs 
 
 One code path serves both eras. A 2026-07-28 client fulfils the embedded requests and retries the call; for a 2025-era session the SDK's legacy shim fulfils the same returns by issuing real `elicitation/create` / `sampling/createMessage` / `roots/list` round trips and re-entering the handler itself.
 
-**`MCP_SESSION_MODE` decides whether that second leg exists.** Under `stateful` / `auto` the shim has the session it needs. Under `stateless` each 2025-era request is served by a fresh instance that never saw `initialize`, so its client-capability view is empty and the round trip is refused rather than attempted — fail-closed, but the handler never gets its answer. Ship `stateless` on a server whose destructive tools gate on `ctx.requestInput` and those tools become unusable for v1 HTTP clients. 2026-07-28 clients are unaffected in either mode: that revision has no server→client request channel at all, which is precisely why `input_required` exists. stdio is unaffected in either mode.
+**A 2025-era client that declared no matching capability is refused, with an envelope.** URL-mode elicitation needs `elicitation.url`, form-mode needs `elicitation.form` (a bare `elicitation: {}` satisfies it), sampling needs `sampling` — `sampling.tools` when the request carries `tools` / `toolChoice` — and `roots/list` needs `roots`. `ctx.requestInput` runs the check on the result it builds and throws the refusal instead of the signal, so it never reaches the wire and the handler fails where it stands — the execution measurement records it as a failed call, and each family's usual error path shapes it. A tool gets `isError` with `structuredContent.error.code = -32600` (`InvalidRequest`), `data.reason: 'client_capability_missing'`, and a `data.recovery.hint` naming the capability; a resource read gets the same code, reason, and hint through the JSON-RPC error envelope. A prompt's `generate` receives no `ctx`, so it has no `ctx.requestInput` to gate. The check runs on every round, so a handler that elicits first and samples second is gated again on the second. A return carrying only `requestState` asks the client for nothing and is never gated. On the 2026-07-28 leg the SDK owns this check and a violation surfaces as its `MissingRequiredClientCapabilityError` (`-32021`) instead.
+
+**`MCP_SESSION_MODE` decides whether that second leg exists.** Under `stateful` / `auto` the shim has the session it needs. Under `stateless` each 2025-era request is served by a fresh instance that never saw `initialize`, so its client-capability view is empty and the round trip is refused rather than attempted — fail-closed, but the handler never gets its answer. The refusal carries the same envelope, with a message and hint that name the per-request case and point at a stateful session. Ship `stateless` on a server whose destructive tools gate on `ctx.requestInput` and those tools become unusable for v1 HTTP clients. 2026-07-28 clients are unaffected in either mode: that revision has no server→client request channel at all, which is precisely why `input_required` exists. stdio is unaffected in either mode.
+
+**Declare the requirement rather than documenting it.** `createApp({ sessionMode: { default: 'stateful', require: 'stateful' } })` seeds the mode from code and refuses to start over HTTP when the resolved mode is `stateless`, so the incompatibility surfaces at boot instead of at the first refused confirmation. `MCP_SESSION_MODE` still wins over the default; the requirement is what an operator cannot silently override. Nothing derives this from handler code — `ctx.requestInput` is present on every transport and both eras, so whether a server needs a live session is a decision its author makes. Full precedence and error shape: `api-config` § Session mode.
 
 ### The shape of a multi-round-trip handler
 

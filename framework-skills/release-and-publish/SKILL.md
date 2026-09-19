@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.16"
+  version: "2.19"
   audience: external
   type: workflow
 ---
@@ -18,7 +18,7 @@ This skill runs **after** git wrapup. By the time it's invoked:
 - `changelog/<major.minor>.x/<version>.md` is authored
 - `CHANGELOG.md` is regenerated
 - README and every version-bearing file is in sync
-- Release commit (`chore(release): <version> — <theme>`) is at HEAD
+- Release commit (`chore(release): <version> — <theme>`) is at HEAD — or, in gated release PR mode, reachable from HEAD with only the review pass's commits above it
 - No tag exists yet — this skill creates it (step 4)
 - Working tree is clean
 - Release PR mode (see `git-wrapup`'s "Release PR mode"): HEAD is on `release/<version>`, the branch is pushed, the PR is open, and — in gated mode — the caller has confirmed the review pass is finished. Without that confirmation, halt: this skill never decides on its own that a review is done.
@@ -68,11 +68,11 @@ The user fixes locally and re-invokes. On re-invocation, already-published desti
 Read `package.json` → capture `version`. Then use your git tools to verify:
 
 - **Working tree is clean** — no uncommitted changes
-- **HEAD is the release commit** — `git log -1 --format=%s` starts with `chore(release): <version>`
+- **The release commit is in the stack** — `git log -1 --format=%s` starts with `chore(release): <version>`, or, in gated release PR mode, `git log main..HEAD --format=%s` contains it with only the review pass's own commits above it (`release-pr-review` lands fixes as ordinary commits on top; the tag still goes on the tip). Any other commit above the release commit — new work, a second version — is a halt.
 - **Current branch** — `main`, or `release/<version>` in release PR mode. Anything else, halt.
 - **Release PR mode:** `gh pr view --json number,state,headRefOid` shows the PR `OPEN` with `headRefOid` equal to local HEAD. A mismatch means the branch has commits the PR doesn't (or the reverse) — halt and report both SHAs. Keep `number` and `headRefOid`: the merge check (step 3) and the tag body (step 4) need them after the checkout has moved to `main`.
 
-If working tree is dirty or HEAD isn't the release commit, halt.
+If the working tree is dirty or the release commit isn't in the stack as described, halt.
 
 ### 2. Run the verification gate
 
@@ -111,21 +111,24 @@ If `--ff-only` refuses, `main` moved underneath the release branch. Halt and rep
 The tag goes on HEAD. In release PR mode that is `main`'s tip after step 3 — the commit the PR's `headRefOid` names — so the tag is created on the branch it stays reachable from.
 
 ```bash
-git tag -a v<version> --cleanup=whitespace -m "<tag message with embedded newlines>"
+cat > /tmp/tag-v<version>.md <<'TAG'
+<tag message>
+TAG
+git tag -a v<version> --cleanup=whitespace -F /tmp/tag-v<version>.md
 ```
 
 If `v<version>` already exists and points at HEAD, a prior run created it — proceed. If it exists and points anywhere else, **halt and report the conflict** with the version string, the existing tag SHA, and HEAD. Never delete or move a tag without explicit authorization.
 
-Use `-m` with embedded newlines in the string (plain `-m` only — no heredoc, no command substitution). The tag message renders as the GitHub Release body via `--notes-from-tag`. It must be structured markdown, not a flat string.
+Write the message to a file through a quoted-delimiter heredoc and pass it with `-F`, never inline with `-m`: the body carries backticks, which a double-quoted string runs as command substitution and silently deletes, and apostrophes, which end a single-quoted string. The tag message renders as the GitHub Release body via `--notes-from-tag`. It must be structured markdown, not a flat string.
 
-**Release PR mode: the tag body is the PR body's `## Changes` bullets plus its final changelog link, verbatim** — `gh pr view <N> --json body -q .body` (`<N>` from step 1 — on `main` there is no branch for `gh` to infer it from), take the theme line as the subject, the bullets under `## Changes`, and the last line; drop `## Gates` and the headers. That digest was authored at wrapup and reviewed on the PR; re-authoring it here would publish unreviewed words. The one addition: append ` · release PR #<N>` to that final line, so the GitHub Release points at its audit trail (GitHub autolinks the bare `#<N>`). Without a PR, author it from the changelog entry at `changelog/<major.minor>.x/<version>.md` — every claim in the tag must appear in that file, and the file's `summary:` line is the tag's theme.
+**Release PR mode: the tag body is the PR body's `## Changes` bullets plus its final changelog link, verbatim** — `gh pr view <N> --json body -q .body` (`<N>` from step 1 — on `main` there is no branch for `gh` to infer it from), take the bullets under `## Changes` and the last line; drop the PR's opening theme line, `## Gates`, and the headers. That digest was authored at wrapup and reviewed on the PR; re-authoring it here would publish unreviewed words. The subject is the one part not lifted — write it fresh, per the rules below. The one addition to the digest: append ` · release PR #<N>` to that final line, so the GitHub Release points at its audit trail (GitHub autolinks the bare `#<N>`). Without a PR, author the bullets from the changelog entry at `changelog/<major.minor>.x/<version>.md` — every claim in the tag must appear in that file.
 
 `--cleanup=whitespace` is load-bearing. The default cleanup (`strip`) deletes `#`-leading lines as comments, so markdown headers silently vanish from the tag body. `--cleanup=verbatim` is worse: it skips end-of-message normalization, so with tag signing enabled the signature is appended flush against the message's last character — git then can't parse its own signature (the tag reads as unsigned) and the whole `-----BEGIN SSH SIGNATURE-----` block publishes verbatim into the GitHub Release body.
 
 Format — a **headline digest**, never a section-by-section changelog mirror:
 
 ```
-<theme — omit version number, GitHub prepends v<VERSION>:>
+<subject — one short theme written for this tag, ~60 chars; omit the version number, GitHub prepends v<VERSION>:>
 
 - <notable user-facing change> (#N)
 - <notable user-facing change> (#N)
@@ -138,7 +141,7 @@ Format — a **headline digest**, never a section-by-section changelog mirror:
 (` · release PR #<N>` only in release PR mode; without a PR the line ends at the changelog link.)
 
 **Rules:**
-- **Subject line is ONE short theme, at most ~60 characters, no semicolons, no clauses** — it becomes the GitHub Release title after `v<VERSION>: `. The digest lives in the bullets; a subject that summarizes each change is wrong even when every word is accurate. In release PR mode the PR body's opening paragraph is NOT the subject — write the theme fresh (the release commit's subject after the version and dash is usually it)
+- **Subject line is ONE short theme, at most ~60 characters, no semicolons, no clauses** — it becomes the GitHub Release title after `v<VERSION>: `. The digest lives in the bullets; a subject that summarizes each change is wrong even when every word is accurate. **It is written for this tag, never lifted** — not from the changelog entry's `summary:`, which has a 350-character budget for a different surface, and not from the PR body's opening paragraph, which is that same line. The release commit's subject after the version and dash is usually the theme already
 - Subject line omits the version number (GitHub prepends `v<VERSION>:` to the release title)
 - **Flat bullets only — never Keep-a-Changelog section headers.** `Added:`/`Changed:`/`Fixed:`/`Dependency bumps:` belong in the changelog file; a tag that mirrors the changelog's structure is wrong even when every line is accurate
 - **Complete at headline granularity** — every changelog-worthy change stays visible: notable changes get their own bullet, minor/internal items (build config, repo hygiene, metadata) share ONE grouped compact bullet. Nothing silently dropped, nothing expanded — the changelog carries the depth, the tag carries the existence
@@ -153,7 +156,7 @@ Format — a **headline digest**, never a section-by-section changelog mirror:
 Verify before moving on:
 
 ```bash
-git show v<version> --stat | head -20   # tag points at HEAD (the release commit)
+git show v<version> --stat | head -20   # tag points at HEAD (the release commit, or the last review commit above it)
 git tag -l v<version> --format='%(if)%(contents:signature)%(then)signed%(else)unsigned%(end)'   # with tag signing enabled, must print "signed"
 ```
 
@@ -193,9 +196,15 @@ Halt on publish error other than "version already exists" (which means this step
 
 Only if `server.json` exists at the repo root (otherwise skip). Note: `server.json` (MCP Registry metadata) and `manifest.json` (MCPB bundle manifest, step 8) are independent — a project may have either, both, or neither.
 
+The registry checks that the npm version exists before it registers, and npm's read endpoint can lag `bun publish` by several minutes. Wait for the version to be served before publishing; a publisher error saying the npm version was not found is this lag, not a terminal failure:
+
 ```bash
+curl -sf --retry 30 --retry-delay 30 --retry-all-errors -o /dev/null \
+  "https://registry.npmjs.org/<package-name>/<version>"
 bun run publish-mcp
 ```
+
+Step 8 depends only on the pushed tag, so it may run while this wait is in progress.
 
 If `publish-mcp` isn't defined in `package.json`, add it permanently (one-time setup, macOS):
 
@@ -298,13 +307,13 @@ If any check fails, halt and report which destination is unreachable. A successf
 
 ## Checklist
 
-- [ ] Working tree clean; release commit at HEAD; on `main` or `release/<version>`; release PR mode: PR head equals local HEAD and the review pass is confirmed finished
+- [ ] Working tree clean; release commit at HEAD (gated mode: in the stack, with only review commits above it); on `main` or `release/<version>`; release PR mode: PR head equals local HEAD and the review pass is confirmed finished
 - [ ] `bun run devcheck` passes
 - [ ] `bun run rebuild` succeeds
 - [ ] `bun run test:all` (or `test`) passes
 - [ ] `bun run test:package` passes, when the project defines it
 - [ ] Release PR mode: `git merge --ff-only` onto `main` locally — never the GitHub merge button; HEAD equals the PR's `headRefOid` afterwards
-- [ ] Annotated tag `v<version>` created on HEAD (`main`'s tip in release PR mode) with `--cleanup=whitespace`, headline-digest body, changelog link as final line, signature parses
+- [ ] Annotated tag `v<version>` created on HEAD (`main`'s tip in release PR mode) with `--cleanup=whitespace`, a subject written fresh at ~60 characters without the version, headline-digest body, changelog link as final line, signature parses
 - [ ] `main` pushed, then the tag pushed
 - [ ] Release PR mode: PR reports `MERGED`; remote and local `release/<version>` deleted
 - [ ] `bun publish --access public` succeeds

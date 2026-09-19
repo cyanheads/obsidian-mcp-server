@@ -4,7 +4,7 @@ description: >
   Read-only audit of MCP definition language across an existing surface — tools, resources, prompts, server instructions. Walks every definition file and checks 16 categories the LLM reads to decide whether and how to call: voice & tense, internal leaks, audience leaks, defaults, recovery hints, field descriptions, cross-references, sparsity, examples, structure, mutator observability, unit-bearing numeric names, validator-enforced constraints, annotations truthfulness, single-line strings, exclusive modes in the schema — then a cross-surface pass: naming taxonomy, parameter vocabulary, tool overlap, instructions drift, length outliers. Produces grouped findings with file:line citations and a numbered options list. Use during polish, after a refactor, or before a release. Complements `field-test` (behavior testing) and `security-pass` (security audit).
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: audit
 ---
@@ -153,9 +153,9 @@ Field-test catches this in its leak audit; this skill is the more thorough pass.
 
 **Look in:** tool / resource / prompt `description`.
 
-**Check:** single cohesive paragraph. No bullet lists, no blank-line-separated sections, no markdown headers inside the description.
+**Check:** single cohesive paragraph, written as one string literal in source. No bullet lists, no blank-line-separated sections, no markdown headers inside the description; no `+`-joined fragments in the file — a description assembled one sentence per line reads as a list of disconnected claims and grows a line at a time until it is several times its siblings' length.
 
-**Smell:** blank lines (`\n\n`) inside a description string, `- bullet` lines, `## Header` lines, "Operations:\n- foo: …" duplicating an enum's `.describe()` text.
+**Smell:** blank lines (`\n\n`) inside a description string, `- bullet` lines, `## Header` lines, "Operations:\n- foo: …" duplicating an enum's `.describe()` text, `'…' +` continuation lines under `description:`.
 
 #### 11. Mutator observability
 
@@ -218,7 +218,7 @@ The per-file walk misses drift that only shows between files. After it, sweep th
 - **Naming taxonomy** — verb prefixes mean one thing each across the surface (`search_` / `find_` / `get_` / `list_` / `lookup_`); the same verb carrying different semantics on different tools is a finding.
 - **Parameter vocabulary** — one name per concept everywhere: `query` vs `q`, `limit` vs `maxResults`, `nctId` vs `nct_id` on sibling tools is a finding.
 - **Tool overlap** — for any pair with adjacent scope, the two descriptions alone must answer "when X vs Y." If an agent can't pick, that's material.
-- **Instructions drift** — if the server sets `instructions`: every tool it names exists, workflow guidance reflects the current surface (new tools that belong in it, renamed or removed ones purged), and nothing contradicts a per-tool description.
+- **Instructions drift** — if the server sets `instructions`: every tool it names exists, workflow guidance reflects the current surface (new tools that belong in it, renamed or removed ones purged), and nothing contradicts a per-tool description. Shape is a finding too: two to three cohesive sentences in one string literal (no `+`-joined fragments, no one-line-per-tool inventory — the catalog already carries that), written for the calling agent only. Operator configuration (`*_BASE_URL`, API keys, ports) belongs in the README and `.env.example`, not here — the agent cannot act on it.
 - **Length outliers** — a description several times longer than its siblings (attention drag), or a one-liner that underspecifies (selection risk).
 
 Cross-surface findings use the same finding format, cited at the file:line you'd change (the `instructions` string is a citable location).

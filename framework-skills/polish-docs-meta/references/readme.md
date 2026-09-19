@@ -123,18 +123,22 @@ If a public hosted instance is available, **promote it to a top-level callout** 
 
 Keep the full connection-config JSON block inside a `### Public Hosted Instance` subsection under Getting Started (covered below). This callout is just the visibility pointer.
 
+No hosted instance → omit the callout, the Getting Started subsection, and any hosted mention in the Overview. Never state the absence ("no public hosted instance"); self-hosting is the default a reader already assumes.
+
 ### Overview
 
 The first section after the header rule. Two parts: a short description paragraph, then one two-column table per primitive type. This is what a visitor reads to decide whether the server is for them, so it must scan in one screen.
 
-**Description paragraph:** two or three sentences — what the server sits on top of (the upstream APIs), what a user can do with it (the headline workflows, action verbs), and how it runs (transports, the hosted endpoint if any). Not a count, and not "an MCP server that…" framing.
+**Description paragraph:** two or three sentences — what the server sits on top of (the upstream APIs), what a user can do with it (the headline workflows, action verbs), and how it runs (transports, plus the hosted endpoint when one exists). Not a count.
+
+The opening sentence names the subject, not the container. The reader is already on an MCP server's repo page — the `<h1>`, the badge row, and the framework line all say so — so an opener that restates it ("An MCP server over…", "An MCP calculator…", "An MCP server that…") spends the most-read sentence on nothing. Lead with the domain or the upstream as a noun phrase, article optional: "Calculator powered by math.js.", "Seismic data from USGS ComCat and the EMSC SeismicPortal.", "The Acme v2 API — projects, tasks, and team activity.", "Read, write, and search Obsidian vault notes over the Local REST API plugin." The words "MCP server" appear at most once in the paragraph, and never as its first noun.
 
 **Primitive tables:** a `### Tools` table, then `### Resources` and `### Prompts` tables when the server has any. Omit a heading whose table would be empty, but keep a one-row table rather than folding it into another. Two columns, Name/Description, one-line descriptions — the detail lives in the Capability reference.
 
 ```markdown
 ## Overview
 
-An MCP server over the Acme v2 API. Search projects, manage tasks, and track team activity from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Project management over the Acme v2 API. Search projects, manage tasks, and track team activity from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
@@ -201,12 +205,12 @@ Link an examples file from an entry when one exists: `[View detailed examples](.
 
 ### Features
 
-A one-sentence framework line naming what a user gets from the framework (transports, auth, storage, observability — not how the code is organized; contributor facts belong in the Development guide), then two bullet groups: domain-specific capabilities, then agent-friendly output design.
+The framework line below, verbatim — it names what a user gets from the framework (transports, auth, storage, observability), so it replaces any framework-feature bullets; contributor facts about code organization belong in the Development guide. Then two labeled bullet groups, both always present: `<Upstream>-specific:` (3–5 bullets on the server's own integration), then `Agent-friendly output:`.
 
 ```markdown
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 Acme-specific:
 
@@ -221,7 +225,7 @@ Agent-friendly output:
 - Discriminated output contracts — typed status and source fields let callers branch on data, not string parsing
 ```
 
-The **Agent-friendly output** subsection documents output-design choices that make the server work well as an AI-agent backend. Include it when the server exhibits at least two of these patterns. Write bullets grounded in the server's actual behavior — not aspirational framework capabilities. Examples of what fits:
+The **Agent-friendly output** subsection documents output-design choices that make the server work well as an AI-agent backend. Always include it, with 2–4 bullets in the "Pattern — concrete detail" form, each naming fields or behavior verified in the server's source — not aspirational framework capabilities. Drop a pattern the server doesn't have (no batch tools → no partial-failure bullet) rather than claiming it. Examples of what fits:
 
 - Provenance: source labels (`viaSource`, `source`), license/access-level fields, effective-query echo, best-effort warnings on lossy tiers
 - Partial failure: per-item status in batch operations, structured error rows alongside successes, recovery hints ("Next Step" text)
@@ -434,10 +438,10 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 
 ### Cloudflare Workers
 
-1. **Build the Worker bundle:**
+1. **Run locally under wrangler:**
 
 \`\`\`sh
-bun run build:worker
+bun run deploy:dev
 \`\`\`
 
 2. **Deploy:**
@@ -447,7 +451,7 @@ bun run deploy:prod
 \`\`\`
 ```
 
-Include the Docker or Workers subsection only if the server supports it. The Docker trailing paragraph (log directory, OTEL build arg) is important — it documents Dockerfile behavior that isn't obvious from the build command.
+Include the Docker subsection only if the server ships a Dockerfile, and the Workers subsection only if it ships a `src/worker.ts` entry. The Docker trailing paragraph (log directory, OTEL build arg) is important — it documents Dockerfile behavior that isn't obvious from the build command.
 
 ### Project Structure
 

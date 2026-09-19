@@ -1,12 +1,16 @@
 /**
  * @fileoverview Utility script to clean build artifacts and temporary directories.
  * @module scripts/clean
- *   By default, it removes the 'dist' and 'logs' directories.
- *   Custom directories can be specified as command-line arguments.
+ *   By default, it removes the 'dist' and 'logs' directories plus every
+ *   TypeScript build-info file the project's tsconfigs write — in the root and
+ *   in 'config/', where a tsconfig kept there resolves its relative
+ *   `tsBuildInfoFile` against itself.
+ *   Custom directories can be specified as command-line arguments, which
+ *   replace the default set entirely.
  *   Works on all platforms using Node.js path normalization.
  *
  * @example
- * // Default directories (dist, logs):
+ * // Default targets (dist, logs, build info):
  * // bun run scripts/clean.ts
  *
  * // Custom directories:
@@ -19,6 +23,38 @@ interface CleanResult {
   dir: string;
   reason?: string;
   status: 'cleaned' | 'skipped' | 'error';
+}
+
+/**
+ * A TypeScript build-info file: the plain `.tsbuildinfo`, a `<name>.tsbuildinfo`,
+ * and the lane-suffixed `.tsbuildinfo.<lane>` forms a multi-tsconfig project
+ * writes (`tsBuildInfoFile: ".tsbuildinfo.worker"`).
+ */
+const BUILD_INFO_FILE = /\.tsbuildinfo(\.[^.]*)?$/;
+
+/**
+ * Directories a tsconfig may write its build info into. A `tsBuildInfoFile` is
+ * resolved against the tsconfig that declares it, so a project keeping its
+ * tsconfigs in `config/` leaves build info there rather than at the root.
+ */
+const BUILD_INFO_DIRS = ['.', 'config'];
+
+/** Every build-info file under the scanned directories, as root-relative paths. */
+async function findBuildInfoFiles(root: string): Promise<string[]> {
+  const found = await Promise.all(
+    BUILD_INFO_DIRS.map(async (dir) => {
+      let entries: string[];
+      try {
+        entries = await readdir(resolve(root, dir));
+      } catch {
+        return []; // directory absent — nothing to clean there
+      }
+      return entries
+        .filter((entry) => BUILD_INFO_FILE.test(entry))
+        .map((entry) => (dir === '.' ? entry : `${dir}/${entry}`));
+    }),
+  );
+  return found.flat();
 }
 
 /**
@@ -46,7 +82,7 @@ const clean = async (): Promise<void> => {
   try {
     const root = process.cwd();
     const args = process.argv.slice(2);
-    const buildInfoFiles = (await readdir(root)).filter((f) => f.endsWith('.tsbuildinfo'));
+    const buildInfoFiles = await findBuildInfoFiles(root);
     const dirsToClean = [...new Set(args.length > 0 ? args : ['dist', 'logs', ...buildInfoFiles])];
 
     console.log(`Cleaning directories: ${dirsToClean.join(', ')}`);

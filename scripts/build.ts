@@ -14,13 +14,39 @@
  */
 
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST_DIR = join(ROOT_DIR, 'dist');
+
+/** Where `bunx @cyanheads/mcp-ts-core init` writes the build tsconfig. */
+const SCAFFOLD_BUILD_PROJECT = 'tsconfig.build.json';
+
+/**
+ * Build tsconfig locations, in precedence order. A project may keep its project
+ * tsconfigs in `config/` or at the root, and this script ships to both
+ * verbatim, so the default is probed rather than hardcoded.
+ */
+const BUILD_PROJECT_CANDIDATES = ['config/tsconfig.build.json', SCAFFOLD_BUILD_PROJECT];
+
+/**
+ * The tsconfig to build: an explicit `--project <path>` verbatim — a missing
+ * one still reaches the compiler and fails there — otherwise the first
+ * candidate location present. With neither present the scaffold's layout is
+ * named, so the compiler error points at the file the project should have.
+ */
+function resolveProject(argv: string[]): string {
+  const flagIndex = argv.indexOf('--project');
+  const explicit = flagIndex === -1 ? undefined : argv[flagIndex + 1];
+  if (explicit !== undefined) return explicit;
+  return (
+    BUILD_PROJECT_CANDIDATES.find((candidate) => existsSync(join(ROOT_DIR, candidate))) ??
+    SCAFFOLD_BUILD_PROJECT
+  );
+}
 
 async function exec(
   cmd: string[],
@@ -92,11 +118,7 @@ function formatBytes(bytes: number): string {
 async function main() {
   // Read package info
   const pkg = JSON.parse(readFileSync(join(ROOT_DIR, 'package.json'), 'utf-8'));
-  const projectIdx = process.argv.indexOf('--project');
-  const project =
-    projectIdx !== -1
-      ? (process.argv[projectIdx + 1] ?? 'tsconfig.build.json')
-      : 'tsconfig.build.json';
+  const project = resolveProject(process.argv);
 
   console.log(`\x1b[1mBuilding ${pkg.name}@${pkg.version}\x1b[0m`);
   console.log(`\x1b[2m  tsconfig: ${project}\x1b[0m`);

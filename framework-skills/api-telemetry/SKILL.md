@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.12"
   audience: external
   type: reference
 ---
@@ -59,18 +59,21 @@ Cloud platform detection auto-populates resource attributes:
 
 ## Flush at exit
 
-Spans batch and metrics push on a 15-second cycle, so a process that exits between cycles takes its telemetry with it. `ServerHandle.shutdown()` is the drain: it stops the transport, then force-flushes traces and metrics through the OTLP exporters and closes the logger.
+Spans batch and metrics push on a 15-second cycle, so a process that exits between cycles takes its telemetry with it. `ServerHandle.shutdown()` is the drain: it stops the transport, runs the `teardown` hook, then force-flushes traces and metrics through the OTLP exporters and closes the logger.
 
-| Trigger | Path |
-|:--------|:-----|
-| `SIGTERM` / `SIGINT` | `shutdown(signal)` |
-| `uncaughtException` / `unhandledRejection` | `shutdown(signal)`, then `process.exit(1)` |
-| stdin EOF, stdio transport | `shutdown('STDIN_EOF')`, then `process.exit(0)` |
-| `ServerHandle.shutdown()` called directly | the same drain, no exit |
+| Trigger | Path | Exit |
+|:--------|:-----|:-----|
+| `SIGTERM` / `SIGINT` | `shutdown(signal)`, then an explicit exit | `0`, or `1` when the backstop fires |
+| `uncaughtException` / `unhandledRejection` | `shutdown(signal)`, then an explicit exit | `1` |
+| stdin EOF, stdio transport | `shutdown('STDIN_EOF')`, then an explicit exit | `0`, backstop or not |
+| a second signal during shutdown | none — the handlers are already detached | the OS default (`143` / `130`) |
+| `ServerHandle.shutdown()` called directly | the same drain | none — exit-free by contract |
 
-**Stdin EOF is a disconnect.** A stdio host closing the pipe runs the cleanup a signal runs, exactly once — the shutdown detaches the signal handlers and the EOF watcher as it starts, so neither can re-enter it — and the process then exits explicitly instead of waiting to run out of handles. Two things follow: the OTLP export leaves the process, and a `setInterval` a service registered without `unref()` can no longer keep the server resident after its client is gone. The path writes nothing to stdout.
+**A signal ends the process.** Every exit-bearing path runs the cleanup exactly once — shutdown detaches the signal handlers and the EOF watcher as it starts, so neither can re-enter it — and then exits explicitly instead of waiting to run out of handles. Two things follow: the OTLP export leaves the process, and a handle registered outside framework teardown (a recursive `fs.watch`, a `setInterval` without `unref()`) can no longer keep the server resident. A second signal arriving mid-shutdown reaches no handler, so the default disposition terminates immediately — the operator's force-kill escape hatch. Neither path writes to stdout.
 
-**The drain is bounded.** Shutdown-on-exit races a 10-second backstop, so a cleanup step that never settles still terminates the process. The logger bounds its own flush separately, per pino instance: a completing callback is awaited in full, and a runtime whose callback never arrives releases shutdown rather than hanging it.
+**The drain is bounded.** Shutdown-on-exit races a 10-second backstop that bounds the shutdown as a whole, not any single await: a step that settles inside the ceiling is never truncated, and only one that never settles is cut. A signal cut exits 1 after a warning naming that step; a stdin-EOF cut exits 0 without one. The logger bounds its own flush separately, per pino instance: a completing callback is awaited in full, and a runtime whose callback never arrives releases shutdown rather than hanging it.
+
+**Release what the framework cannot see.** `createApp({ teardown })` is the `setup` counterpart: it runs after the transport stops and before the logger closes, on every shutdown path, with `CoreServices` still alive. Close a watcher, socket, or poller there rather than leaving it for the backstop, which cuts a ref'd handle rather than closing it. An error it raises is logged and never blocks the exit; a hook that never settles is what the ceiling then bounds. Node/Bun only — `createWorkerHandler` does not accept it.
 
 Workers has no `ServerHandle` and no `NodeSDK` — flush whatever exporter you wired there yourself, via `ctx.waitUntil()`.
 
@@ -120,10 +123,13 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 |:-------|:-----|:-----|:-----------|
 | `mcp.tool.calls` | counter | `{calls}` | `mcp.tool.name`, `mcp.tool.success` |
 | `mcp.tool.duration` | histogram | `ms` | `mcp.tool.name`, `mcp.tool.success` |
-| `mcp.tool.errors` | counter | `{errors}` | `mcp.tool.name`, `mcp.tool.error_category` (`upstream`/`server`/`client`) |
+| `mcp.tool.errors` | counter | `{errors}` | `mcp.tool.name`, `mcp.tool.error_category` (`upstream`/`server`/`client`) — see [Error category](#error-category) |
 | `mcp.tool.input_bytes` | histogram | `bytes` | `mcp.tool.name` |
 | `mcp.tool.output_bytes` | histogram | `bytes` | `mcp.tool.name` (success only; the handler's returned value) |
 | `mcp.tool.param.usage` | counter | `{uses}` | `mcp.tool.name`, `mcp.tool.param` (top-level keys supplied by caller) |
+| `mcp.input.ignored_key` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.ignore_rule` (the ignore-list entry that matched, or `underscore_prefix`) |
+| `mcp.input.aliased` | counter | `{keys}` | `mcp.tool.name`, `mcp.input.target` (the declared key), `mcp.input.alias_kind` (`declared`/`case_style`) |
+| `mcp.input.coerced` | counter | `{calls}` | `mcp.tool.name`, `mcp.input.coercion` (`stringified_array`) |
 | `mcp.resource.reads` | counter | `{reads}` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.duration` | histogram | `ms` | `mcp.resource.name`, `mcp.resource.success` |
 | `mcp.resource.errors` | counter | `{errors}` | `mcp.resource.name` |
@@ -135,6 +141,27 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.prompt.output_bytes` | histogram | `bytes` | `mcp.prompt.name` (success only) |
 | `mcp.prompt.message_count` | histogram | `{messages}` | `mcp.prompt.name` |
 | `mcp.requests.active` | up/down counter | `{requests}` | — (in-flight handler executions, all three types) |
+
+The three `mcp.input.*` counters are the only trace of the pre-validation step a tool call leaves. Each marks a call the strict `input` schema would otherwise have rejected: a client-added root key dropped, a key rewritten to its canonical spelling, or a stringified array repaired after the parse failed (one increment per repaired call, not per repaired value). Nothing about any of them reaches the response, so a client artifact spreading across a fleet shows up here first. All three are lazy: a server whose callers never trip a stage emits no series at all.
+
+**Every label is author- or framework-defined — the caller's own key text is never one.** `mcp.input.ignore_rule` is the ignore-list entry that matched or the fixed `underscore_prefix`, bounded by the list's length plus one. `mcp.input.aliased` is labelled by the canonical `mcp.input.target` (a declared property of the tool) and `mcp.input.alias_kind`, not by the alias the caller sent — the case-style half accepts every `-`/`_`/case permutation of a declared key, so labelling the alias would put a caller-controlled set on a permanent series. That is the unbounded-label leak removed from the rate-limiter counter in 0.9.0: a metric attribute set lives until process restart, so anything the caller names belongs on a span or in a log, never on a counter.
+
+**To find the raw key, read the debug log**, which carries `ignoredKey` / `alias` alongside the bounded rule and target. The counter tells you a client artifact exists and how often; the log tells you what it is called, which is what you need before extending `input.ignoreKeys`, declaring an `inputAliases` entry, or renaming a parameter.
+
+### Outbound pacer
+
+`createPacer` (`/utils`) emits four instruments, all lazy — a server that never queues against an upstream emits no series at all.
+
+| Metric | Type | Unit | Attributes |
+|:-------|:-----|:-----|:-----------|
+| `mcp.pacer.queue_depth` | up/down counter | `{requests}` | `mcp.pacer.name` |
+| `mcp.pacer.wait` | histogram | `ms` | `mcp.pacer.name` (enqueue → dispatch, not task duration) |
+| `mcp.pacer.sheds` | counter | `{requests}` | `mcp.pacer.name` (rejected before dispatch — wait budget or queue depth) |
+| `mcp.pacer.cooldowns` | counter | `{cooldowns}` | `mcp.pacer.name` (gate closed by an upstream rate limit) |
+
+`mcp.pacer.name` is the **only** attribute on all four — `createPacer({ name })`, set by the server author and bounded by its own configuration. Nothing a caller supplies reaches these series, for the reason above; which upstream call was shed belongs on a span or in a log.
+
+Read together: `queue_depth` rising while `wait` climbs means the configured rate is below demand; `sheds` rising against a flat `queue_depth` means callers' `maxWaitMs` budgets are tighter than the window; `cooldowns` rising at all means the upstream is answering 429, so the configured `limits` sit above what it actually grants.
 
 ### Storage, LLM, speech, graph
 
@@ -165,12 +192,27 @@ All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` wher
 | `mcp.sessions.active` | observable gauge | `{sessions}` | — |
 | `mcp.heartbeat.failures` | counter | `{failures}` | `mcp.connection.transport` (`stdio`/`http`) |
 
+### Error category
+
+`mcp.tool.error_category` and `mcp.prompt.error_category` bucket a failure as `upstream` (an external dependency refused or timed out), `server` (a bug or this process's own infrastructure), or `client` (the request itself). The bucket comes from the classified JSON-RPC code, with one refinement: `RateLimited` (`-32003`) legitimately carries two sources, so the canvas tenant-cap refusal — which names itself with `data.reason: 'canvas_capacity_exhausted'` — files under `server`, and every other `-32003` stays `upstream`. Retry semantics and the HTTP 429 mapping are the same for both, which is why the code is shared and the stable `reason` discriminator does the separating.
+
+A dashboard reading `error_category` alone therefore no longer needs to special-case one server's capacity limit as an upstream outage. `reason` itself is not on the metric — it is unbounded across a fleet, so it lives on the span and in the log.
+
+### Declared error severity
+
+A definition may put `severity` on an `errors[]` entry — `debug`, `info`, `notice`, or `warning` — for an outcome it models rather than suffers. Two things move, and nothing else:
+
+- The `Error in tool:<name>` log record is emitted at that level instead of `error`, with the same message and structured fields.
+- `mcp.errors.classified` gains `mcp.error.severity` on that record. It is set only when a declared severity resolved, so a server that declares none emits exactly the series it did before.
+
+The call still failed: the execution span keeps `SpanStatusCode.ERROR` and its recorded exception, `mcp.tool.calls` / `mcp.tool.duration` / `mcp.tool.errors` record the same values, and the completion log still reads `isSuccess: false`. Splitting those series on an authoring decision would redefine what an error rate means. Tools only — resources re-throw for the SDK to log. A cancelled request keeps its own `info`, stack-free path whatever the contract declares. See `api-errors`.
+
 ### Errors, rate limits, HTTP client
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
-| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `operation` |
-| `mcp.ratelimit.rejections` | counter | `{rejections}` | `mcp.rate_limit.key` |
+| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `operation`, and `mcp.error.severity` when the failure's declared severity resolved |
+| `mcp.ratelimit.rejections` | counter | `{rejections}` | — (the rate-limit key is caller-supplied and typically per-client, so it would materialize an unbounded series in the meter; per-key attribution lives on the span instead) |
 | `http.client.request.duration` | histogram | `s` | `http.request.method`, `server.address`, `http.response.status_code` (when > 0; absent on network errors before a response is received) |
 
 ### Process

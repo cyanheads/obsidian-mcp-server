@@ -6,8 +6,8 @@
 
 # Required. One-line GitHub Release-style headline. 350 character cap — a
 # ceiling, not a target. Default short and scannable. Don't pad, don't stitch
-# unrelated changes with commas/semicolons into an inventory — pick the
-# headline, like a tag's theme line. Quotes required: unquoted YAML treats
+# unrelated changes with commas/semicolons into an inventory — pick the one
+# headline the release is about. Quotes required: unquoted YAML treats
 # `: ` inside the value as a key separator and fails GitHub's strict parser.
 summary: ""
 
@@ -119,11 +119,11 @@ security: false
   TAG ANNOTATIONS — the annotated tag body renders as the GitHub Release body
   via `gh release create --notes-from-tag`. It is a condensed digest of this
   entry, never a copy, and its format is owned by the `release-and-publish`
-  skill (step 4, "Create the annotated tag"): the entry's `summary:` as the
-  theme line without the version, flat headline bullets — no Keep-a-Changelog
-  section headers, no gates line — at most one deps line, issue backlinks,
-  and the changelog link last. In release-PR mode the `git-wrapup` skill
-  authors that digest as the PR body's `## Changes` and the tag copies it.
+  skill (step 4, "Create the annotated tag"): a short subject line without the
+  version, flat headline bullets — no Keep-a-Changelog section headers, no
+  gates line — at most one deps line, issue backlinks, and the changelog link
+  last. In release-PR mode the `git-wrapup` skill authors those bullets as the
+  PR body's `## Changes` and the tag copies them.
 -->
 
 ## Added
