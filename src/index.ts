@@ -104,6 +104,15 @@ const { services } = await createApp({
   resources: allResourceDefinitions,
   prompts: allPromptDefinitions,
   instructions: buildInstructions(),
+  /**
+   * `obsidian_delete_note` confirms through `ctx.requestInput`, which a
+   * 2025-era HTTP client can only answer on a stateful session. Declared as the
+   * default, not a requirement — an explicit `MCP_SESSION_MODE=stateless` still
+   * starts; the delete confirmation is then refused with
+   * `client_capability_missing` on those clients.
+   */
+  sessionMode: 'stateful',
+  teardown: () => obsidian.close(),
 });
 
 /**
