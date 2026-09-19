@@ -783,9 +783,14 @@ export class ObsidianService {
    * is therefore correct on both, with no runtime sniffing. A plain-HTTP URL
    * gets neither — there is no certificate to relax, and the Omnisearch leg is
    * plain HTTP even when the vault endpoint is not.
+   *
+   * The scheme is matched case-insensitively because that is what it is: a URL
+   * schema accepts `HTTPS://…` and keeps the caller's spelling, so an exact
+   * `startsWith` reads a configured `HTTPS://` base URL as plain HTTP and
+   * withholds the relaxation the operator asked for.
    */
   #tlsInit(url: string): { tls?: { rejectUnauthorized: boolean } } {
-    if (this.#config.verifySsl || !url.startsWith('https:')) return {};
+    if (this.#config.verifySsl || !/^https:/i.test(url)) return {};
     return { tls: { rejectUnauthorized: false } };
   }
 

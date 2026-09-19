@@ -135,6 +135,28 @@ describe('ObsidianService TLS relaxation', () => {
     }
   });
 
+  /**
+   * A URL schema accepts `HTTPS://…` and hands back the spelling it was given,
+   * so the config can carry an uppercase scheme all the way to the wire. Bun
+   * reads only the per-request option, which makes withholding it here a failed
+   * connection to the self-signed endpoint `verifySsl: false` exists for.
+   */
+  it('relaxes an https endpoint written with an uppercase scheme', async () => {
+    const ctx = createMockContext();
+    const { calls, service } = recordingService({
+      baseUrl: 'HTTPS://obsidian.test',
+      omnisearchUrl: 'HTTPS://omni.test',
+      verifySsl: false,
+    });
+
+    await exerciseEveryCallSite(service, ctx);
+
+    expect(calls.length).toBe(4);
+    for (const call of calls) {
+      expect(call.init).toMatchObject(relaxed);
+    }
+  });
+
   it('sends no TLS option when verifySsl is true', async () => {
     const ctx = createMockContext();
     const { calls, service } = recordingService({
