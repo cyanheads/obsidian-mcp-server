@@ -184,6 +184,44 @@ describe('OBSIDIAN_READ_PATHS / OBSIDIAN_WRITE_PATHS — separator parity with P
   });
 });
 
+/**
+ * Issue #121. `z.string().url()` accepts a trailing slash and passes it
+ * through, and every request path the service builds already starts with `/`,
+ * so one stray character doubled the separator on every single endpoint and
+ * 404'd the entire tool surface. Writing a base URL with a trailing slash is a
+ * natural thing to do, so the schema absorbs it rather than the operator.
+ */
+describe('OBSIDIAN_BASE_URL — trailing-slash normalization', () => {
+  it('strips a single trailing slash', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_BASE_URL', 'https://127.0.0.1:27124/');
+    expect(getServerConfig().baseUrl).toBe('https://127.0.0.1:27124');
+  });
+
+  it('strips several trailing slashes', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_BASE_URL', 'https://127.0.0.1:27124///');
+    expect(getServerConfig().baseUrl).toBe('https://127.0.0.1:27124');
+  });
+
+  it('leaves a slash-free base URL alone', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_BASE_URL', 'https://127.0.0.1:27124');
+    expect(getServerConfig().baseUrl).toBe('https://127.0.0.1:27124');
+  });
+
+  it('keeps a path prefix and strips only its trailing slash', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_BASE_URL', 'https://gateway.test/obsidian/');
+    expect(getServerConfig().baseUrl).toBe('https://gateway.test/obsidian');
+  });
+
+  it('leaves the default untouched', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    expect(getServerConfig().baseUrl).toBe('http://127.0.0.1:27123');
+  });
+});
+
 describe('OBSIDIAN_BASE_URL and OBSIDIAN_OMNISEARCH_URL — empty-string handling', () => {
   it('treats empty OBSIDIAN_BASE_URL as unset and falls back to the default', () => {
     vi.stubEnv('OBSIDIAN_API_KEY', 'k');

@@ -96,12 +96,19 @@ const ServerConfigSchema = z.object({
     .url()
     .default('http://127.0.0.1:27123')
     .describe(
-      'Base URL of the Obsidian Local REST API. Defaults to http://127.0.0.1:27123 — enable "Non-encrypted (HTTP) Server" in the plugin settings to match. Use https://127.0.0.1:27124 to hit the always-on HTTPS port (self-signed cert; pair with OBSIDIAN_VERIFY_SSL=false).',
-    ),
+      'Base URL of the Obsidian Local REST API. Defaults to http://127.0.0.1:27123 — enable "Non-encrypted (HTTP) Server" in the plugin settings to match. Use https://127.0.0.1:27124 to hit the always-on HTTPS port (self-signed cert; pair with OBSIDIAN_VERIFY_SSL=false). A trailing slash is stripped — writing one is natural and every request path already starts with `/`, so leaving it would double the separator and 404 every endpoint.',
+    )
+    /**
+     * Normalized here rather than at each `${baseUrl}${path}` join: the schema
+     * is the one place that runs before anything reads the value, so a single
+     * transform covers `#request`, the HEAD size probe, the capability probe,
+     * and `deriveOmnisearchUrl` alike (issue #121).
+     */
+    .transform((url) => url.replace(/\/+$/, '')),
   verifySsl: envBoolean
     .default(false)
     .describe(
-      "Whether to verify the TLS certificate on the Obsidian endpoint. Defaults to false because the plugin uses a self-signed cert. On Node, the dispatcher's `rejectUnauthorized` option handles this without any process-wide change. On Bun, the runtime ignores that option, so the service additionally sets `NODE_TLS_REJECT_UNAUTHORIZED=0` — that fallback is scoped to Bun only.",
+      "Whether to verify the TLS certificate on the Obsidian endpoint. Defaults to false because the plugin uses a self-signed cert. The relaxation is scoped to this server's own requests to an `https:` OBSIDIAN_BASE_URL — nothing else the process talks to is affected, and a plain-HTTP base URL is unaffected either way.",
     ),
   requestTimeoutMs: z.coerce
     .number()
