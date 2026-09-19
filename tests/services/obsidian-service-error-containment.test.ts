@@ -379,6 +379,68 @@ describe('listing guards / upstream text never reaches the client (issue #105)',
   });
 });
 
+/**
+ * Issue #122. The client-visible `path` is the vault-relative locator the
+ * caller sent, and stays that way: `#throwForStatus` classifies on the route
+ * prefix, `displayPath()` renders what the caller recognizes, and the base URL
+ * is deployment detail no client has any business receiving. But when the base
+ * URL itself is what broke the request — a trailing slash doubling every path —
+ * the clean locator is the only thing anyone sees, and it reads like a genuine
+ * 404. So the resolved URL rides the `cause`: the log record names it, and the
+ * containment invariant above is untouched, since no client surface serializes
+ * `cause`.
+ */
+describe('#throwForStatus / the requested URL rides the cause (issue #122)', () => {
+  const causeOf = (err: McpError): string => {
+    expect(err.cause).toBeInstanceOf(Error);
+    return (err.cause as Error).message;
+  };
+
+  it('names the URL that was fetched, from the #request call site', async () => {
+    const err = await throwsMcpError(() => replyToAppend(404, POISONED_400));
+
+    expect(causeOf(err)).toContain('https://obsidian.test/vault/x.md');
+    // The wire surface is exactly what it was: the vault-relative path alone.
+    expect(err.message).toBe('Not found: x.md');
+    expect((err.data as { path?: string }).path).toBe('x.md');
+    expect(JSON.stringify(clientSurface(err))).not.toContain('obsidian.test');
+  });
+
+  it('names the URL that was fetched, from the tryGetSize call site', async () => {
+    pool
+      .intercept({ path: '/vault/x.md', method: 'HEAD' })
+      .reply(403, POISONED_400, { headers: { 'content-type': 'application/json' } });
+
+    const err = await throwsMcpError(() => service.tryGetSize(ctx, { type: 'path', path: 'x.md' }));
+
+    expect(causeOf(err)).toContain('https://obsidian.test/vault/x.md');
+    expect((err.data as { path?: string }).path).toBe('x.md');
+    expect(JSON.stringify(clientSurface(err))).not.toContain('obsidian.test');
+  });
+
+  /**
+   * The failure #122 was filed from: a trailing slash on the configured base
+   * URL doubles the separator on every request, and the un-doubled path in the
+   * message reads as a well-formed 404 against a healthy vault.
+   */
+  it('shows the doubled slash a malformed base URL produced', async () => {
+    const fetchImpl: ObsidianFetch = async () =>
+      mockResponse(JSON.stringify(POISONED_400), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      });
+    const misconfigured = new ObsidianService(
+      makeTestConfig({ baseUrl: 'https://obsidian.test/' }),
+      fetchImpl,
+    );
+
+    const err = await throwsMcpError(() => misconfigured.listTags(ctx));
+
+    expect(causeOf(err)).toContain('https://obsidian.test//tags/');
+    expect(err.message).toBe('Not found: /tags/');
+  });
+});
+
 describe('#throwForStatus / no upstream-authored keys survive on data', () => {
   it('carries neither data.body nor data.upstream on a 5xx', async () => {
     const err = await throwsMcpError(() => replyToAppend(500, POISONED_500));

@@ -42,10 +42,18 @@ type UndiciResponse = Awaited<ReturnType<typeof undiciFetch>>;
  * `fetch`; tests inject a stub here instead of mocking the `undici` module
  * (Bun's runtime treats `undici` as a builtin, so `vi.mock('undici')` has no
  * effect under `bunx vitest`).
+ *
+ * `tls` is Bun's per-request TLS option. It is absent from undici's own
+ * `RequestInit`, and declared here because the two runtimes read the
+ * relaxation off different places — see `#tlsInit`.
  */
 export type ObsidianFetch = (
   url: string,
-  init: RequestInit & { dispatcher?: Dispatcher; signal?: AbortSignal },
+  init: RequestInit & {
+    dispatcher?: Dispatcher;
+    signal?: AbortSignal;
+    tls?: { rejectUnauthorized: boolean };
+  },
 ) => Promise<UndiciResponse>;
 
 interface UpstreamErrorBody {
@@ -185,16 +193,10 @@ export class ObsidianService {
     this.#policy = new PathPolicy(config);
     this.#omnisearchUrl = deriveOmnisearchUrl(config);
     /**
-     * Bun's runtime ignores undici's per-dispatcher `connect.rejectUnauthorized`
-     * option, so the only reliable opt-out under Bun is the process-wide
-     * `NODE_TLS_REJECT_UNAUTHORIZED=0` flag. Node honors the dispatcher option
-     * (set below), so the env var fallback is scoped to Bun to avoid mutating
-     * process-wide TLS behavior on Node. Default Obsidian Local REST API ships
-     * a self-signed cert, so most users run with `OBSIDIAN_VERIFY_SSL=false`.
+     * Node honors this dispatcher option and ignores the per-request `tls` one;
+     * Bun's `fetch` does the reverse. Both are sent on every request (see
+     * `#tlsInit`), so one code path covers both runtimes with no runtime sniff.
      */
-    if (!config.verifySsl && typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') {
-      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-    }
     this.#dispatcher = new Agent({
       connect: { rejectUnauthorized: config.verifySsl },
       headersTimeout: config.requestTimeoutMs,
@@ -211,6 +213,20 @@ export class ObsidianService {
   /** Resolved Omnisearch URL (derived from baseUrl or OBSIDIAN_OMNISEARCH_URL override). */
   get omnisearchUrl(): string {
     return this.#omnisearchUrl;
+  }
+
+  /**
+   * Close the undici dispatcher, releasing its keep-alive sockets to the Local
+   * REST API and Omnisearch. Wired through `createApp({ teardown })`; waits for
+   * in-flight requests to settle rather than aborting them.
+   *
+   * Bun resolves `undici` to a built-in shim whose `Agent` is an inert object
+   * with no `close` — Bun's `fetch` pools sockets itself and ignores the
+   * dispatcher — so there is nothing to release there.
+   */
+  async close(): Promise<void> {
+    const dispatcher: Partial<Pick<Dispatcher, 'close'>> = this.#dispatcher;
+    await dispatcher.close?.();
   }
 
   // ── Status ───────────────────────────────────────────────────────────────
@@ -385,14 +401,16 @@ export class ObsidianService {
       this.#policy.assertReadable(target.path);
     }
     const url = this.#targetToPath(target);
-    const res = await this.#fetch(`${this.#config.baseUrl}${url}`, {
+    const requestUrl = `${this.#config.baseUrl}${url}`;
+    const res = await this.#fetch(requestUrl, {
       method: 'HEAD',
       headers: { Authorization: `Bearer ${this.#config.apiKey}` },
       dispatcher: this.#dispatcher,
+      ...this.#tlsInit(requestUrl),
       signal: ctx.signal,
     });
     if (res.status === 404) return null;
-    if (!res.ok) await this.#throwForStatus(res, url, ctx);
+    if (!res.ok) await this.#throwForStatus(res, url, ctx, { requestedUrl: requestUrl });
     this.#assertNotDirectory(res, url, ctx);
     return parseContentLength(res, url);
   }
@@ -516,10 +534,12 @@ export class ObsidianService {
    */
   async probeOmnisearch(signal?: AbortSignal): Promise<boolean> {
     const probeSignal = signal ?? AbortSignal.timeout(OMNISEARCH_PROBE_TIMEOUT_MS);
+    const url = `${this.#omnisearchUrl}/search?q=`;
     try {
-      const res = await this.#fetch(`${this.#omnisearchUrl}/search?q=`, {
+      const res = await this.#fetch(url, {
         method: 'GET',
         dispatcher: this.#dispatcher,
+        ...this.#tlsInit(url),
         signal: probeSignal,
       });
       if (!res.ok) return false;
@@ -547,6 +567,7 @@ export class ObsidianService {
       res = await this.#fetch(url, {
         method: 'GET',
         dispatcher: this.#dispatcher,
+        ...this.#tlsInit(url),
         signal: ctx.signal,
       });
     } catch (err) {
@@ -747,6 +768,27 @@ export class ObsidianService {
     return headers;
   }
 
+  /**
+   * The TLS relaxation for one request, scoped to that request.
+   *
+   * `OBSIDIAN_VERIFY_SSL=false` exists because the Local REST API's always-on
+   * HTTPS port ships a self-signed certificate, so the relaxation belongs on
+   * the requests that reach it and nowhere else — a process-wide
+   * `NODE_TLS_REJECT_UNAUTHORIZED=0` would also disable verification for every
+   * unrelated HTTPS call the process makes (a JWKS fetch, say). Issue #131.
+   *
+   * Verified on Bun 1.4.0: Bun's `fetch` honors this per-request `tls` option
+   * and ignores the dispatcher, while Node's undici honors the dispatcher's
+   * `connect.rejectUnauthorized` and ignores `tls`. Sending both unconditionally
+   * is therefore correct on both, with no runtime sniffing. A plain-HTTP URL
+   * gets neither — there is no certificate to relax, and the Omnisearch leg is
+   * plain HTTP even when the vault endpoint is not.
+   */
+  #tlsInit(url: string): { tls?: { rejectUnauthorized: boolean } } {
+    if (this.#config.verifySsl || !url.startsWith('https:')) return {};
+    return { tls: { rejectUnauthorized: false } };
+  }
+
   #request(
     ctx: Context,
     pathAndQuery: string,
@@ -778,10 +820,14 @@ export class ObsidianService {
         headers,
         ...(init.body !== undefined ? { body: init.body } : {}),
         dispatcher: this.#dispatcher,
+        ...this.#tlsInit(url),
         signal: ctx.signal,
       });
       if (!res.ok) {
-        await this.#throwForStatus(res, pathAndQuery, ctx, { listRead: init.listRead });
+        await this.#throwForStatus(res, pathAndQuery, ctx, {
+          listRead: init.listRead,
+          requestedUrl: url,
+        });
       }
       if (init.noteRead) {
         this.#assertNotDirectory(res, pathAndQuery, ctx);
@@ -885,10 +931,12 @@ export class ObsidianService {
   async #probeCapabilities(ctx: Context): Promise<VaultStatus | undefined> {
     const deadline = AbortSignal.timeout(CAPABILITY_PROBE_TIMEOUT_MS);
     try {
-      const res = await this.#fetch(`${this.#config.baseUrl}/`, {
+      const url = `${this.#config.baseUrl}/`;
+      const res = await this.#fetch(url, {
         method: 'GET',
         headers: { Authorization: `Bearer ${this.#config.apiKey}` },
         dispatcher: this.#dispatcher,
+        ...this.#tlsInit(url),
         signal: ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline,
       });
       if (!res.ok) return;
@@ -929,20 +977,28 @@ export class ObsidianService {
    * envelope is built from `code`/`message`/`data` alone, and so is the
    * JSON-RPC error object the SDK emits for resources.
    *
-   * Issues #104 and #116.
+   * `opts.requestedUrl` — the absolute URL actually fetched — rides the same
+   * channel for the same reason. `path` stays the vault route both call sites
+   * supply: the branches below classify on its prefix and `displayPath()`
+   * renders it as the caller wrote it, while the base URL is deployment detail
+   * that has no place on the wire. It does belong in the log, though, since a
+   * malformed `OBSIDIAN_BASE_URL` is otherwise invisible behind a clean-looking
+   * 404 (issue #122).
+   *
+   * Issues #104, #116, and #122.
    */
   async #throwForStatus(
     res: UndiciResponse,
     path: string,
     ctx: Context,
-    opts: { listRead?: boolean | undefined } = {},
+    opts: { listRead?: boolean | undefined; requestedUrl: string },
   ): Promise<never> {
     const text = await this.#readBodySafe(res);
     const body = parseJsonObject(text);
     const display = displayPath(path);
     /** Classification input and log payload only — never a wire value. */
     const upstreamMsg = typeof body?.message === 'string' ? body.message : text.trim();
-    const cause = new UpstreamErrorText(upstreamMsg);
+    const cause = new UpstreamErrorText(upstreamMsg, opts.requestedUrl);
     const data = (reason?: string) => ({
       path: display,
       ...(reason !== undefined ? { reason, ...ctx.recoveryFor(reason) } : {}),
@@ -1207,17 +1263,22 @@ function contextRelativeSpan(
 }
 
 /**
- * The upstream error body, carried as the `cause` of everything
- * `#throwForStatus` throws.
+ * The upstream error body and the URL it answered, carried as the `cause` of
+ * everything `#throwForStatus` throws.
  *
  * `cause` is the one channel that reaches the server's logs without reaching
  * the client, which is what lets the containment invariant hold while the
- * text stays available for debugging and for the classifiers below. The body
- * is the `Error` message so the framework's cause-chain extractor records it.
+ * text stays available for debugging and for the classifiers below. Both facts
+ * go in the `Error` message so the framework's cause-chain extractor records
+ * them. Each is also kept as its own field: the classifiers match on `text`
+ * alone, so a request URL can never satisfy a pattern meant for the body.
  */
 class UpstreamErrorText extends Error {
-  constructor(text: string) {
-    super(text);
+  constructor(
+    readonly text: string,
+    readonly requestedUrl: string,
+  ) {
+    super([text, `[requested: ${requestedUrl}]`].filter(Boolean).join(' '));
     this.name = 'UpstreamErrorText';
   }
 }
@@ -1231,7 +1292,7 @@ class UpstreamErrorText extends Error {
 function upstreamTextOf(err: unknown): string | undefined {
   let current: unknown = err;
   for (let depth = 0; depth < 4; depth++) {
-    if (current instanceof UpstreamErrorText) return current.message;
+    if (current instanceof UpstreamErrorText) return current.text;
     if (!(current instanceof Error)) return;
     current = current.cause;
   }
