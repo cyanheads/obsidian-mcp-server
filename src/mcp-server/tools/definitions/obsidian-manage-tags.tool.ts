@@ -91,6 +91,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
   errors: [
     {
       reason: 'path_forbidden',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.Forbidden,
       when: '`list` requires the path to be readable; `add`/`remove` require it to be inside OBSIDIAN_WRITE_PATHS, with OBSIDIAN_READ_ONLY=false.',
       recovery: 'Use a path inside the configured scope. The error data echoes the active scope.',
@@ -102,7 +103,15 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       recovery: 'Pass a non-empty `tags` array (without `#`), e.g. `["draft", "wip"]`.',
     },
     {
+      reason: 'frontmatter_invalid',
+      code: JsonRpcErrorCode.ValidationError,
+      when: '`location` reaches the frontmatter and the note\'s existing block does not parse as a mapping of properties, or the tag change would leave YAML that cannot be re-emitted. Nothing is written — the note keeps its original bytes, and under `location: "both"` the inline half is skipped too rather than applied on its own.',
+      recovery:
+        'Use `location: "inline"` to tag the body without touching the block, or repair the YAML between the `---` fences and retry.',
+    },
+    {
       reason: 'note_missing',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'The vault path does not resolve to an existing note.',
       recovery:
@@ -110,6 +119,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
     },
     {
       reason: 'no_active_file',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
       recovery:
@@ -117,6 +127,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
     },
     {
       reason: 'periodic_unsupported',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic` and this vault runs Local REST API v5.0.2 or later without the companion periodic-notes extension, so the `/periodic/` routes are not served at all.',
       recovery:
@@ -124,12 +135,14 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
     },
     {
       reason: 'periodic_not_found',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic`, the `/periodic/` routes are served on this vault, and no note exists for the requested period.',
       recovery: 'Create the periodic note first or pass an explicit path target.',
     },
     {
       reason: 'periodic_disabled',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
       recovery:
@@ -137,6 +150,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
     },
     {
       reason: 'path_is_directory',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied path names a folder rather than a note file.',
       recovery:
@@ -144,6 +158,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
     },
     {
       reason: 'path_traversal',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The path contains a `.` or `..` segment, which is rejected to prevent vault escape.',
       recovery:
@@ -177,6 +192,13 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
     }
 
     const reconciled = reconcileTags(note.content, input.tags, input.operation, input.location);
+    if (!reconciled.ok) {
+      throw ctx.fail(
+        'frontmatter_invalid',
+        `Cannot ${input.operation} tags in ${note.path}: its frontmatter block is not safely editable — ${reconciled.problem}`,
+        { path: note.path, ...ctx.recoveryFor('frontmatter_invalid') },
+      );
+    }
     // Delivered bytes — not note.stat.size (see ObsidianService.tryGetSize).
     const previousSizeInBytes = Buffer.byteLength(note.content, 'utf8');
 

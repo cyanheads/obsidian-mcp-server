@@ -5,7 +5,17 @@
  * @module services/obsidian/frontmatter-ops
  */
 
-import { type Document, isMap, parseDocument } from 'yaml';
+import { type Document, isMap, isScalar, isSeq, parseDocument, Scalar, type YAMLSeq } from 'yaml';
+
+/**
+ * The outcome of a frontmatter mutation. A block that cannot be re-emitted
+ * faithfully is reported as a value rather than written or thrown: these
+ * helpers back a read-modify-write, so "cannot" means the caller would
+ * otherwise hand the vault a note with properties it never asked to change —
+ * or lose the block outright. The handlers turn `ok: false` into a typed,
+ * declared tool error and issue no write.
+ */
+export type FrontmatterEdit = { ok: true; content: string } | { ok: false; problem: string };
 
 /**
  * The one frontmatter boundary: an opening `---` alone on the first line, YAML,
@@ -71,9 +81,13 @@ export function splice(content: string): Splice {
 
 /**
  * Describe why `yamlText` is not usable as a frontmatter block, or `undefined`
- * when it is. Catches YAML that no longer parses and YAML that parses to
+ * when it is. Catches YAML that no longer parses, YAML that parses to
  * something other than a mapping — the two states in which Obsidian reads no
- * properties at all.
+ * properties at all — and YAML that parses but cannot be emitted again.
+ *
+ * That last one is its own class: an unresolved alias (`bad: *missing`) is
+ * accepted by `parseDocument` with an empty `doc.errors` and refused only by
+ * the emitter, so the round trip is what surfaces it.
  *
  * It cannot catch an edit that stays well-formed while meaning something else:
  * a renamed key, a scalar that re-parses as a different type. Those are valid
@@ -86,7 +100,29 @@ export function frontmatterParseError(yamlText: string): string | undefined {
   if (doc.contents !== null && !isMap(doc.contents)) {
     return 'Frontmatter must be a YAML mapping of properties.';
   }
-  return;
+  return serializeError(doc);
+}
+
+/** The emitter's own complaint about `doc`, or `undefined` when it round-trips. */
+function serializeError(doc: Document): string | undefined {
+  try {
+    doc.toString({ lineWidth: 0 });
+    return;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * The line ending a rewritten block is emitted with. `doc.toString()` always
+ * emits LF and the fences used to be hard-coded to it, which left a CRLF note
+ * with an LF block above a CRLF body. An existing block keeps its own ending;
+ * a block being created on a note that had none follows the body's first line
+ * (issue #125).
+ */
+function blockEol(spliced: Splice): '\n' | '\r\n' {
+  if (spliced.hasFrontmatter) return spliced.open.endsWith('\r\n') ? '\r\n' : '\n';
+  return /\r\n|\n/.exec(spliced.body)?.[0] === '\r\n' ? '\r\n' : '\n';
 }
 
 /**
@@ -95,35 +131,62 @@ export function frontmatterParseError(yamlText: string): string | undefined {
  * these helpers parse with `yaml`'s CST-backed `parseDocument` and edit nodes in
  * place rather than round-tripping the block through a plain object (which drops
  * comments and rewrites untouched scalars, e.g. `date: 2026-06-29` → an ISO
- * timestamp). When no keys remain, the whole block is dropped and the body's
- * leading whitespace trimmed.
+ * timestamp). When no keys remain, the whole block is dropped along with the
+ * whitespace-only lines that separated it from the body.
  *
  * The body is re-attached verbatim. `FM_RE` consumes the newline that closes
- * the fence line and nothing more, so the template's trailing `\n` replaces
- * exactly what was eaten — the blank separator line before the body (or its
- * absence, or several of them) survives the rewrite byte for byte.
+ * the fence line and nothing more, so the trailing separator replaces exactly
+ * what was eaten — the blank line before the body (or its absence, or several
+ * of them) survives the rewrite byte for byte.
+ *
+ * Emitting can still fail after a mutation that parsed cleanly: deleting the
+ * key that owned an anchor leaves every alias to it dangling, and the emitter
+ * is the only thing that notices. That is a refusal, not a throw — the caller
+ * decides what to tell the user, and no write goes out either way.
  */
-function serializeFrontmatter(doc: Document, body: string): string {
+function serializeFrontmatter(doc: Document, spliced: Splice): FrontmatterEdit {
   const node = doc.contents;
   if (!node || (isMap(node) && node.items.length === 0)) {
-    return body.replace(/^\s+/, '');
+    /**
+     * The block is gone, and only the whitespace-only lines that separated it
+     * from the body go with it. A blanket `^\s+` also ate the first content
+     * line's own indentation, which is what an indented code block is made of
+     * (issue #125).
+     */
+    return { ok: true, content: spliced.body.replace(/^(?:[ \t]*\r?\n)+/, '') };
   }
-  const yamlText = doc.toString({ lineWidth: 0 }).trimEnd();
-  return `---\n${yamlText}\n---\n${body}`;
+  let yamlText: string;
+  try {
+    yamlText = doc.toString({ lineWidth: 0 }).trimEnd();
+  } catch (err) {
+    return { ok: false, problem: err instanceof Error ? err.message : String(err) };
+  }
+  const eol = blockEol(spliced);
+  return {
+    ok: true,
+    content: `---${eol}${yamlText.split('\n').join(eol)}${eol}---${eol}${spliced.body}`,
+  };
 }
 
 /**
- * Returns the full file content with `key` removed from the frontmatter.
- * If the file has no frontmatter or the key isn't present, returns content
- * unchanged.
+ * The full file content with `key` removed from the frontmatter. A file with
+ * no frontmatter, or one where the key isn't present, comes back unchanged.
+ *
+ * Refuses — rather than writing — when the existing block does not parse as a
+ * mapping or the mutation leaves YAML that cannot be emitted. Both were silent
+ * data loss before: a block the parser recovered into a single malformed key
+ * was "emptied" by deleting that key, taking every sibling property and the
+ * block itself with it (issue #123).
  */
-export function deleteFrontmatterKey(content: string, key: string): string {
-  const { hasFrontmatter, yamlText, body } = splice(content);
-  if (!hasFrontmatter) return content;
-  const doc = parseDocument(yamlText);
-  if (!doc.has(key)) return content;
+export function deleteFrontmatterKey(content: string, key: string): FrontmatterEdit {
+  const spliced = splice(content);
+  if (!spliced.hasFrontmatter) return { ok: true, content };
+  const problem = frontmatterParseError(spliced.yamlText);
+  if (problem) return { ok: false, problem };
+  const doc = parseDocument(spliced.yamlText);
+  if (!doc.has(key)) return { ok: true, content };
   doc.delete(key);
-  return serializeFrontmatter(doc, body);
+  return serializeFrontmatter(doc, spliced);
 }
 
 export interface TagReconcileResult {
@@ -138,6 +201,11 @@ export interface TagReconcileResult {
 export type TagOperation = 'add' | 'remove';
 export type TagLocation = 'frontmatter' | 'inline' | 'both';
 
+/** A completed reconciliation, or the reason the frontmatter half refused. */
+export type TagReconcileOutcome =
+  | ({ ok: true } & TagReconcileResult)
+  | { ok: false; problem: string };
+
 /**
  * Add or remove tags across frontmatter (`tags:` array) and inline `#tag`
  * syntax. Inline detection skips code spans, link spans, and a hash escaped as
@@ -148,7 +216,7 @@ export function reconcileTags(
   tags: string[],
   operation: TagOperation,
   location: TagLocation,
-): TagReconcileResult {
+): TagReconcileOutcome {
   const norm = (t: string) => t.replace(/^#+/, '').trim();
   const wanted = tags.map(norm).filter((t) => t.length > 0);
   const applied = new Set<string>();
@@ -157,7 +225,15 @@ export function reconcileTags(
   let updated = content;
 
   if (location === 'frontmatter' || location === 'both') {
-    updated = mutateFrontmatterTags(updated, wanted, operation, applied, skipped);
+    const edit = mutateFrontmatterTags(updated, wanted, operation, applied, skipped);
+    /**
+     * A refusal ends the whole call, `both` included. The frontmatter half runs
+     * first precisely so that returning here leaves the note byte-identical —
+     * proceeding to the inline half would tag the body on the strength of a
+     * frontmatter edit that never happened (issue #124).
+     */
+    if (!edit.ok) return edit;
+    updated = edit.content;
   }
   if (location === 'inline' || location === 'both') {
     updated = mutateInlineTags(updated, wanted, operation, applied, skipped);
@@ -168,7 +244,7 @@ export function reconcileTags(
   // it from skipped.
   for (const t of applied) skipped.delete(t);
 
-  return { content: updated, applied: [...applied], skipped: [...skipped] };
+  return { ok: true, content: updated, applied: [...applied], skipped: [...skipped] };
 }
 
 function mutateFrontmatterTags(
@@ -177,44 +253,119 @@ function mutateFrontmatterTags(
   operation: TagOperation,
   applied: Set<string>,
   skipped: Set<string>,
-): string {
-  const { hasFrontmatter, yamlText, body } = splice(content);
-  const doc = parseDocument(hasFrontmatter ? yamlText : '');
-  const fm = (doc.toJS() ?? {}) as Record<string, unknown>;
+): FrontmatterEdit {
+  const spliced = splice(content);
+  if (spliced.hasFrontmatter) {
+    const problem = frontmatterParseError(spliced.yamlText);
+    if (problem) return { ok: false, problem };
+  }
+  const doc = parseDocument(spliced.hasFrontmatter ? spliced.yamlText : '');
+  const node = isMap(doc.contents) ? doc.get('tags', true) : undefined;
+  const changed = isSeq(node)
+    ? mutateTagSeq(doc, node, tags, operation, applied, skipped)
+    : rewriteTagList(doc, node, tags, operation, applied, skipped);
 
-  const existing = normalizeTagList(fm.tags);
-  const set = new Set(existing);
-  let changed = false;
+  if (!changed) return { ok: true, content };
+  return serializeFrontmatter(doc, spliced);
+}
 
+/**
+ * The tags whose state actually differs from `present`, with every tag
+ * recorded as applied or skipped along the way. `present` is updated as the
+ * walk goes, so a tag named twice in one call changes once and is skipped
+ * thereafter — both shapes below share this bookkeeping and differ only in
+ * what they then do to the document.
+ */
+function planTagChanges(
+  tags: string[],
+  operation: TagOperation,
+  present: Set<string>,
+  applied: Set<string>,
+  skipped: Set<string>,
+): string[] {
+  const adding = operation === 'add';
+  const changes: string[] = [];
   for (const tag of tags) {
+    if (present.has(tag) === adding) {
+      skipped.add(tag);
+      continue;
+    }
+    if (adding) present.add(tag);
+    else present.delete(tag);
+    changes.push(tag);
+    applied.add(tag);
+  }
+  return changes;
+}
+
+/**
+ * Edit an existing `tags:` sequence node in place.
+ *
+ * In place rather than `doc.set('tags', [...normalized])`: replacing the node
+ * discards everything the caller never named. `tags:` is free-form YAML and a
+ * vault may hold entries this server has no reading of — a number, a nested
+ * map — which the normalized string set silently dropped on the next write,
+ * along with the comments and quoting of every item that was not being touched
+ * (issue #123).
+ */
+function mutateTagSeq(
+  doc: Document,
+  seq: YAMLSeq,
+  tags: string[],
+  operation: TagOperation,
+  applied: Set<string>,
+  skipped: Set<string>,
+): boolean {
+  const present = new Set(seq.items.map(itemTag).filter((t): t is string => t !== undefined));
+  const changes = planTagChanges(tags, operation, present, applied, skipped);
+  if (changes.length === 0) return false;
+
+  for (const tag of changes) {
     if (operation === 'add') {
-      if (set.has(tag)) skipped.add(tag);
-      else {
-        set.add(tag);
-        applied.add(tag);
-        changed = true;
-      }
-    } else {
-      if (set.has(tag)) {
-        set.delete(tag);
-        applied.add(tag);
-        changed = true;
-      } else {
-        skipped.add(tag);
-      }
+      seq.items.push(new Scalar(tag));
+      continue;
+    }
+    for (let i = seq.items.length - 1; i >= 0; i--) {
+      if (itemTag(seq.items[i]) === tag) seq.items.splice(i, 1);
     }
   }
 
-  if (!changed) return content;
+  /**
+   * The key goes only once nothing at all is left. A sequence still holding
+   * entries that are not string tags keeps them, and keeps the key they live
+   * under.
+   */
+  if (seq.items.length === 0) doc.delete('tags');
+  return true;
+}
 
+/** The normalized tag an item carries, or `undefined` when it is not a string scalar. */
+function itemTag(item: unknown): string | undefined {
+  if (!isScalar(item) || typeof item.value !== 'string') return;
+  const tag = item.value.replace(/^#+/, '').trim();
+  return tag.length > 0 ? tag : undefined;
+}
+
+/**
+ * The two shapes with no sequence node to edit: a string-valued `tags:`
+ * (`tags: alpha beta`) and a note carrying no `tags` key at all. Both are
+ * written out as a fresh block sequence, which is the shape Obsidian's own
+ * properties editor produces.
+ */
+function rewriteTagList(
+  doc: Document,
+  node: unknown,
+  tags: string[],
+  operation: TagOperation,
+  applied: Set<string>,
+  skipped: Set<string>,
+): boolean {
+  const set = new Set(normalizeTagList(isScalar(node) ? node.value : undefined));
+  if (planTagChanges(tags, operation, set, applied, skipped).length === 0) return false;
   const ordered = [...set];
-  if (ordered.length === 0) {
-    doc.delete('tags');
-  } else {
-    doc.set('tags', ordered);
-  }
-
-  return serializeFrontmatter(doc, body);
+  if (ordered.length === 0) doc.delete('tags');
+  else doc.set('tags', ordered);
+  return true;
 }
 
 function normalizeTagList(value: unknown): string[] {

@@ -4,12 +4,19 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianManageTags } from '@/mcp-server/tools/definitions/obsidian-manage-tags.tool.js';
 import { setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
+
+/** The recovery hint the tool's own contract declares, so the test cannot drift from it. */
+function declaredRecovery(reason: string): string {
+  const entry = obsidianManageTags.errors?.find((e) => e.reason === reason);
+  if (!entry) throw new Error(`obsidian_manage_tags declares no '${reason}' contract entry`);
+  return entry.recovery;
+}
 
 const noteJson = (
   content: string,
@@ -160,6 +167,192 @@ describe('obsidian_manage_tags / remove', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'tags_required' },
     });
+  });
+});
+
+/**
+ * Issue #123 1b. `tags:` is a free-form YAML sequence and a vault may well
+ * carry entries this server has no opinion about. Replacing the whole node
+ * with the normalized string set silently dropped every one of them — a
+ * write, so unrecoverable. The sequence is edited in place instead: new
+ * scalars are appended, only matching string items are removed, and anything
+ * else survives byte for byte alongside its comments and quoting.
+ */
+describe('obsidian_manage_tags / a mixed-type tags sequence keeps its non-string entries', () => {
+  const MIXED = [
+    '---',
+    'tags:',
+    '  - keep # a trailing comment',
+    '  - 42',
+    '  - { meta: preserved }',
+    'other: yes',
+    '---',
+    'body',
+  ].join('\n');
+
+  async function run(operation: 'add' | 'remove', tags: string[]): Promise<string> {
+    let putBody = '';
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(MIXED, { tags: ['keep'] }, ['keep']), {
+        headers: { 'content-type': 'application/json' },
+      });
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply((opts) => {
+      putBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('after', {}, []), { headers: { 'content-type': 'application/json' } });
+
+    await obsidianManageTags.handler(
+      obsidianManageTags.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        operation,
+        tags,
+        location: 'frontmatter',
+      }),
+      createMockContext({ errors: obsidianManageTags.errors }),
+    );
+    return putBody;
+  }
+
+  it('appends without rewriting the entries it does not recognize', async () => {
+    const putBody = await run('add', ['added']);
+
+    expect(putBody).toContain('- 42');
+    expect(putBody).toContain('{ meta: preserved }');
+    expect(putBody).toContain('- added');
+    expect(putBody).toContain('# a trailing comment');
+    expect(putBody).toContain('other: yes');
+  });
+
+  it('removes only the matching string item', async () => {
+    const putBody = await run('remove', ['keep']);
+
+    expect(putBody).not.toContain('- keep');
+    expect(putBody).toContain('- 42');
+    expect(putBody).toContain('{ meta: preserved }');
+  });
+});
+
+/**
+ * Issue #125 3a. `doc.toString()` emits LF, and the fences were hard-coded to
+ * LF too, so re-serializing a CRLF note's block left an LF block sitting above
+ * a CRLF body. The block is emitted with the line ending it already had.
+ */
+describe('obsidian_manage_tags / a CRLF note stays CRLF through a frontmatter rewrite', () => {
+  it('emits the block and both fences with CRLF', async () => {
+    const before = '---\r\ntitle: a\r\ntags:\r\n  - x\r\n---\r\n\r\nBody.\r\n';
+    let putBody = '';
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(before, { tags: ['x'] }, ['x']), {
+        headers: { 'content-type': 'application/json' },
+      });
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply((opts) => {
+      putBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('after', {}, []), { headers: { 'content-type': 'application/json' } });
+
+    await obsidianManageTags.handler(
+      obsidianManageTags.input.parse({
+        target: { type: 'path', path: 'N.md' },
+        operation: 'add',
+        tags: ['y'],
+        location: 'frontmatter',
+      }),
+      createMockContext({ errors: obsidianManageTags.errors }),
+    );
+
+    expect(putBody).toBe('---\r\ntitle: a\r\ntags:\r\n  - x\r\n  - y\r\n---\r\n\r\nBody.\r\n');
+    expect(/[^\r]\n/.test(putBody)).toBe(false);
+  });
+});
+
+/**
+ * Issue #124: a block that cannot be mutated safely fails as the declared,
+ * typed error rather than escaping as an undeclared `-32603`, and the note is
+ * left byte-identical — asserted as the absence of any PUT. Under
+ * `location: "both"` the refusal covers the inline half too: the note is not
+ * half-tagged on the strength of a frontmatter edit that never landed.
+ */
+describe('obsidian_manage_tags / refuses an unsafe frontmatter block', () => {
+  async function addTag(content: string, location: 'frontmatter' | 'both'): Promise<number> {
+    const pool = harness.current().pool;
+    let puts = 0;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(content, {}, []), { headers: { 'content-type': 'application/json' } });
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply(() => {
+      puts++;
+      return { statusCode: 200, data: '' };
+    });
+
+    await expect(
+      obsidianManageTags.handler(
+        obsidianManageTags.input.parse({
+          target: { type: 'path', path: 'N.md' },
+          operation: 'add',
+          tags: ['added'],
+          location,
+        }),
+        createMockContext({ errors: obsidianManageTags.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'frontmatter_invalid', path: 'N.md' },
+    });
+
+    return puts;
+  }
+
+  it('carries frontmatter_invalid to both wire surfaces', async () => {
+    const pool = harness.current().pool;
+    let puts = 0;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('---\nParagraph between rules\n---\nBody after', {}, []), {
+        headers: { 'content-type': 'application/json' },
+      });
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply(() => {
+      puts++;
+      return { statusCode: 200, data: '' };
+    });
+
+    const res = await runToolContract(obsidianManageTags, {
+      target: { type: 'path', path: 'N.md' },
+      operation: 'add',
+      tags: ['added'],
+      location: 'both',
+    });
+
+    expect(res.isError).toBe(true);
+    const error = (res.structuredContent as { error: { code: number; data: { reason: string } } })
+      .error;
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data.reason).toBe('frontmatter_invalid');
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('not safely editable');
+    expect(text).toContain(declaredRecovery('frontmatter_invalid'));
+    expect(puts).toBe(0);
+  });
+
+  it.each([
+    ['a scalar YAML root (#124 r3)', '---\nParagraph between rules\n---\nBody after'],
+    ['YAML that does not parse', '---\na: "unterminated\nkeep: yes\n---\nBody\n'],
+    ['an unresolved alias', '---\nbad: *missing\nkeep: yes\n---\nbody'],
+  ])('refuses and writes nothing for %s', async (_label, content) => {
+    expect(await addTag(content, 'frontmatter')).toBe(0);
+  });
+
+  it('makes no partial inline edit under location "both"', async () => {
+    expect(await addTag('---\nParagraph between rules\n---\nBody after', 'both')).toBe(0);
   });
 });
 

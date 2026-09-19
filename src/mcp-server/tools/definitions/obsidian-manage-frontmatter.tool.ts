@@ -77,6 +77,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
   errors: [
     {
       reason: 'path_forbidden',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.Forbidden,
       when: '`get` requires the path to be readable; `set`/`delete` require it to be inside OBSIDIAN_WRITE_PATHS, with OBSIDIAN_READ_ONLY=false.',
       recovery: 'Use a path inside the configured scope. The error data echoes the active scope.',
@@ -89,7 +90,15 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
         'Pass `value` as any JSON-typed value: string, number, boolean, array, or object (e.g. `"draft"`, `42`, `true`, `["a","b"]`).',
     },
     {
+      reason: 'frontmatter_invalid',
+      code: JsonRpcErrorCode.ValidationError,
+      when: '`operation` is "delete" and the note\'s existing frontmatter does not parse as a mapping of properties, or removing the key would leave YAML that cannot be re-emitted (an alias whose anchor went with it). Nothing is written — the note keeps its original bytes.',
+      recovery:
+        'Read the block with obsidian_get_note (format "content"), repair the YAML between the `---` fences, then retry the delete.',
+    },
+    {
       reason: 'note_missing',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'The vault path does not resolve to an existing note.',
       recovery:
@@ -97,6 +106,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     },
     {
       reason: 'no_active_file',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
       recovery:
@@ -104,6 +114,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     },
     {
       reason: 'periodic_unsupported',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic` and this vault runs Local REST API v5.0.2 or later without the companion periodic-notes extension, so the `/periodic/` routes are not served at all.',
       recovery:
@@ -111,12 +122,14 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     },
     {
       reason: 'periodic_not_found',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic`, the `/periodic/` routes are served on this vault, and no note exists for the requested period.',
       recovery: 'Create the periodic note first or pass an explicit path target.',
     },
     {
       reason: 'periodic_disabled',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
       recovery:
@@ -124,6 +137,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     },
     {
       reason: 'path_is_directory',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied path names a folder rather than a note file.',
       recovery:
@@ -131,6 +145,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     },
     {
       reason: 'path_traversal',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The path contains a `.` or `..` segment, which is rejected to prevent vault escape.',
       recovery:
@@ -191,7 +206,15 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     const note = await svc.getNoteJson(ctx, target);
     // Delivered bytes — not note.stat.size (see ObsidianService.tryGetSize).
     const previousSizeInBytes = Buffer.byteLength(note.content, 'utf8');
-    const newContent = deleteFrontmatterKey(note.content, input.key);
+    const edit = deleteFrontmatterKey(note.content, input.key);
+    if (!edit.ok) {
+      throw ctx.fail(
+        'frontmatter_invalid',
+        `Cannot delete \`${input.key}\` from ${note.path}: its frontmatter block is not safely editable — ${edit.problem}`,
+        { path: note.path, ...ctx.recoveryFor('frontmatter_invalid') },
+      );
+    }
+    const newContent = edit.content;
     let currentSizeInBytes = previousSizeInBytes;
     if (newContent !== note.content) {
       await svc.writeNote(ctx, target, newContent, 'markdown');
