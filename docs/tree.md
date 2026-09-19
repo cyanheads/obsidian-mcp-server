@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-09-13 17:44:31
+Generated on: 2026-09-19 15:38:41
 
 ```text
 obsidian-mcp-server/
@@ -14,6 +14,8 @@ obsidian-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -180,14 +182,19 @@ obsidian-mcp-server/
 ├── tests/
 │   ├── config/
 │   │   └── server-config.test.ts
+│   ├── integration/
+│   │   └── delete-note-confirmation.test.ts
 │   ├── resources/
 │   │   ├── obsidian-status.test.ts
 │   │   ├── obsidian-tags.test.ts
 │   │   └── obsidian-vault-note.test.ts
 │   ├── services/
 │   │   ├── frontmatter-ops.test.ts
+│   │   ├── obsidian-service-base-url.test.ts
+│   │   ├── obsidian-service-close.test.ts
 │   │   ├── obsidian-service-error-containment.test.ts
 │   │   ├── obsidian-service-path-policy.test.ts
+│   │   ├── obsidian-service-tls.test.ts
 │   │   ├── obsidian-service.test.ts
 │   │   ├── path-policy.test.ts
 │   │   └── section-extractor.test.ts

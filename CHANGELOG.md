@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.5.4](changelog/3.5.x/3.5.4.md) — 2026-09-19 · 🛡️ Security
+
+TLS certificate verification is now scoped to each Obsidian request instead of relaxed process-wide on Bun, frontmatter/tag edits refuse to write rather than destroy content on unsafe YAML, and mcp-ts-core moves to ^0.13.6.
+
 ## [3.5.3](changelog/3.5.x/3.5.3.md) — 2026-09-13
 
 The .mcpb bundle now passes install-time settings instead of literal ${OBSIDIAN_*} text, and plugin installs no longer blank out exported OBSIDIAN_* vars; empty or placeholder ${...} env values read as unset; dev skills move to framework-skills/ so plugin installs stop loading them; Bun floor rises to >=1.4.0.
