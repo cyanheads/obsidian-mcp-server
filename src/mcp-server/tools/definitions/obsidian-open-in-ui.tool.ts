@@ -45,6 +45,7 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
   errors: [
     {
       reason: 'path_forbidden',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.Forbidden,
       when: 'The path is outside OBSIDIAN_READ_PATHS, or — when the file does not exist and `failIfMissing: false` would have Obsidian create it — outside OBSIDIAN_WRITE_PATHS or blocked by OBSIDIAN_READ_ONLY=true.',
       recovery:
@@ -59,12 +60,14 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
     },
     {
       reason: 'ambiguous_path',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.Conflict,
       when: 'The parent directory contains multiple files whose names differ only in case (case-sensitive filesystems only).',
       recovery: 'Retry with one of the exact paths listed in `matches` on the error data.',
     },
     {
       reason: 'path_is_directory',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied path names a folder rather than a file.',
       recovery:
@@ -72,6 +75,7 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
     },
     {
       reason: 'path_traversal',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The path contains a `.` or `..` segment, which is rejected to prevent vault escape.',
       recovery:

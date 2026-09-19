@@ -259,6 +259,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
     },
     {
       reason: 'context_length_too_large',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The Local REST API exhausted its string capacity building one context window per match, so the whole text search failed.',
       recovery:
@@ -273,6 +274,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
     },
     {
       reason: 'logic_invalid',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The Local REST API rejected the JSONLogic tree — an unrecognized operator, or an operand it could not evaluate (an uncompilable `regexp` pattern). A mis-arity operator is not rejected: it evaluates to false and the search returns zero hits.',
       recovery:
@@ -280,6 +282,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
     },
     {
       reason: 'omnisearch_unreachable',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'Omnisearch was reachable at startup but is now unreachable (Obsidian quit, plugin disabled, or mobile session).',
       retryable: true,

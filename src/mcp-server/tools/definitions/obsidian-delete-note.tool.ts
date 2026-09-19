@@ -38,6 +38,7 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
   errors: [
     {
       reason: 'path_forbidden',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.Forbidden,
       when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes.',
       recovery:
@@ -47,10 +48,12 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
       reason: 'cancelled',
       code: JsonRpcErrorCode.InvalidRequest,
       when: 'User declined, cancelled, or answered false to the confirmation request.',
+      severity: 'notice',
       recovery: 'Re-run the tool when the user is ready to confirm deletion.',
     },
     {
       reason: 'note_missing',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'The vault path does not resolve to an existing note.',
       recovery:
@@ -58,6 +61,7 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
     },
     {
       reason: 'no_active_file',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
       recovery:
@@ -65,6 +69,7 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
     },
     {
       reason: 'periodic_unsupported',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic` and this vault runs Local REST API v5.0.2 or later without the companion periodic-notes extension, so the `/periodic/` routes are not served at all.',
       recovery:
@@ -72,12 +77,14 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
     },
     {
       reason: 'periodic_not_found',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic`, the `/periodic/` routes are served on this vault, and no note exists for the requested period.',
       recovery: 'Pass an explicit path target — periodic notes must already exist.',
     },
     {
       reason: 'periodic_disabled',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
       recovery:
@@ -85,6 +92,7 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
     },
     {
       reason: 'path_is_directory',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied path names a folder rather than a note file. Deleting a folder is not offered — the upstream removes it and everything inside it in one unrecoverable step.',
       recovery:
@@ -92,6 +100,7 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
     },
     {
       reason: 'path_traversal',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The path contains a `.` or `..` segment, which is rejected to prevent vault escape.',
       recovery:

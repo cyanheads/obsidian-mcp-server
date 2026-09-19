@@ -4,15 +4,14 @@
  * @module mcp-server/tools/definitions/obsidian-get-note.tool
  */
 
-import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
+import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import {
   computeFenceMask,
   extractSection,
   type SectionExtraction,
 } from '@/services/obsidian/section-extractor.js';
-import type { NoteJson, SectionTarget } from '@/services/obsidian/types.js';
 import { SectionSchema, TargetSchema } from './_shared/schemas.js';
 import { withCaseFallback } from './_shared/suggest-paths.js';
 
@@ -144,6 +143,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     },
     {
       reason: 'path_forbidden',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.Forbidden,
       when: 'The target path is outside OBSIDIAN_READ_PATHS (and OBSIDIAN_WRITE_PATHS, since write paths imply read access).',
       recovery:
@@ -151,6 +151,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     },
     {
       reason: 'note_missing',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'The vault path does not resolve to an existing note.',
       recovery:
@@ -158,12 +159,14 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     },
     {
       reason: 'ambiguous_path',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.Conflict,
       when: 'The parent directory contains multiple files whose names differ only in case (case-sensitive filesystems only).',
       recovery: 'Retry with one of the exact paths listed in `matches` on the error data.',
     },
     {
       reason: 'no_active_file',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `active` but no file is currently open in Obsidian.',
       recovery:
@@ -171,6 +174,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     },
     {
       reason: 'periodic_unsupported',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic` and this vault runs Local REST API v5.0.2 or later without the companion periodic-notes extension, so the `/periodic/` routes are not served at all.',
       recovery:
@@ -178,12 +182,14 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     },
     {
       reason: 'periodic_not_found',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'Target was `periodic`, the `/periodic/` routes are served on this vault, and no note exists for the requested period.',
       recovery: 'Create the periodic note first or pass an explicit path target.',
     },
     {
       reason: 'periodic_disabled',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: "Target was `periodic` but the requested period is not enabled in Obsidian's Periodic Notes plugin settings.",
       recovery:
@@ -198,6 +204,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     },
     {
       reason: 'path_is_directory',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied path names a folder rather than a note file.',
       recovery:
@@ -205,6 +212,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     },
     {
       reason: 'path_traversal',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The path contains a `.` or `..` segment, which is rejected to prevent vault escape.',
       recovery:
@@ -286,13 +294,19 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       svc.getNoteJson(ctx, t),
     );
     // `extractSection` throws `NotFound` for missing heading/block/frontmatter
-    // targets — `reclassifyAsSectionMiss` routes those through the contract;
-    // anything else bubbles up to the framework's default classifier.
+    // targets — those route through the contract; anything else bubbles up to
+    // the framework's default classifier.
     let extracted: SectionExtraction;
     try {
       extracted = extractSection(note, input.section);
     } catch (err) {
-      reclassifyAsSectionMiss(ctx, note, input.section, err);
+      if (!(err instanceof McpError) || err.code !== JsonRpcErrorCode.NotFound) throw err;
+      throw ctx.fail(
+        'section_missing',
+        err.message,
+        { path: note.path, section: input.section, ...ctx.recoveryFor('section_missing') },
+        { cause: err },
+      );
     }
     const { candidates, sectionTarget, value } = extracted;
     if (candidates) {
@@ -381,35 +395,6 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
-
-/**
- * Reclassify a `NotFound` from `extractSection` as the contract's
- * `section_missing` reason, with the recovery hint pulled from `ctx`. Defined
- * at module scope so `JsonRpcErrorCode.NotFound` doesn't appear inside the
- * handler's source text — that's what the `error-contract-prefer-fail` lint
- * scans for. Non-`NotFound` errors rethrow untouched so a genuine internal
- * bug surfaces through the framework's default classifier.
- */
-function reclassifyAsSectionMiss(
-  ctx: Context,
-  note: NoteJson,
-  section: SectionTarget,
-  err: unknown,
-): never {
-  if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
-    throw notFound(
-      err.message,
-      {
-        path: note.path,
-        section,
-        reason: 'section_missing',
-        ...ctx.recoveryFor('section_missing'),
-      },
-      { cause: err },
-    );
-  }
-  throw err;
-}
 
 function stringifyValue(v: unknown): string {
   if (v === null || v === undefined) return '(empty)';

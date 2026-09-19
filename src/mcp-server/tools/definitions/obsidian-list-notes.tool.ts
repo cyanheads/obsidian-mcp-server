@@ -147,6 +147,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
     },
     {
       reason: 'path_forbidden',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.Forbidden,
       when: 'The supplied `path` is outside OBSIDIAN_READ_PATHS (root listings always pass; specific subdirectories must be readable).',
       recovery:
@@ -154,6 +155,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
     },
     {
       reason: 'directory_missing',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.NotFound,
       when: 'No listable directory at the supplied `path` — either it does not exist, or it exists and currently holds no files. Sub-directories that disappear mid-walk are silently skipped, so only the root path surfaces this error.',
       recovery:
@@ -161,6 +163,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
     },
     {
       reason: 'path_is_file',
+      thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied `path` names a file rather than a directory.',
       recovery:

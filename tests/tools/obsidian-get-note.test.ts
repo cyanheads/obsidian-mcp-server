@@ -319,6 +319,46 @@ describe('obsidian_get_note / format: section', () => {
       data: { reason: 'section_required' },
     });
   });
+
+  it('carries section_missing to both wire surfaces when the heading is absent', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(
+        200,
+        {
+          path: 'Note.md',
+          content: '# Present\nbody',
+          frontmatter: {},
+          tags: [],
+          stat: { ctime: 0, mtime: 0, size: 0 },
+        },
+        { headers: { 'content-type': 'application/json' } },
+      );
+
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'section',
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Absent' },
+    });
+
+    expect(res.isError).toBe(true);
+    const error = (
+      res.structuredContent as {
+        error: { code: number; data: { reason: string; path: string; section: unknown } };
+      }
+    ).error;
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({
+      reason: 'section_missing',
+      path: 'Note.md',
+      section: { type: 'heading', target: 'Absent' },
+    });
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain("Heading 'Absent' not found");
+    expect(text).toContain('format "document-map"');
+    expect(text).toContain('reason section_missing');
+  });
 });
 
 describe('obsidian_get_note / section heading resolution', () => {
