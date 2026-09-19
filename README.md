@@ -179,6 +179,7 @@ Vault-note and tag data are also reachable via tools — `obsidian_get_note` for
 ### `obsidian://vault/{+path}` <sub>resource</sub>
 
 - The `{+path}` segment captures everything after `/vault/`, including slashes
+- Paths may be sent literally or percent-encoded — `Folder/Test Note.md` and `Folder/Test%20Note.md` resolve to the same note, as do non-ASCII names and a bare `%`
 - Returns the same shape as `obsidian_get_note` with `format: "full"` — content, frontmatter, tags, stat
 - Gated by `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` like the tool equivalent
 
@@ -230,8 +231,7 @@ Obsidian-specific:
 - Section-aware editing across headings, block references, and frontmatter fields via `PATCH`-with-target operations
 - Search across three modes — text, JSONLogic, and (when reachable) BM25-ranked Omnisearch — cursor-paginated per the MCP 2025-11-25 spec
 - Tag reconciliation across both representations: frontmatter `tags:` array and inline `#tag` syntax
-- Folder-scoped read/write permissions via `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` and a global `OBSIDIAN_READ_ONLY` kill switch; opt-in command-palette pair gated by `OBSIDIAN_ENABLE_COMMANDS`
-- Server-level `instructions` on `initialize` report the active deployment — path policy, read-only mode, command-palette toggle
+- Folder-scoped read/write permissions via `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` and a global `OBSIDIAN_READ_ONLY` kill switch; opt-in command-palette pair gated by `OBSIDIAN_ENABLE_COMMANDS`. Server-level `instructions` on `initialize` report the active policy to the caller
 
 Agent-friendly output:
 
@@ -315,7 +315,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 - The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin, **v4.0.0 through v5.x**, installed and enabled in your vault. Generate an API key in **Settings → Community Plugins → Local REST API** and copy it into `OBSIDIAN_API_KEY`. Plugin v6.0 removes the markdown-patch 1.x wire format this server pins for section-targeted writes and the document map.
 - Periodic-note targets (`target: { "type": "periodic" }`) work across that whole range: natively on plugin **v5.0.1 and earlier**, and on **v5.0.2 and later** — which moved the `/periodic/` routes out of the plugin — once the companion [periodic-notes API extension](https://github.com/coddingtonbear/obsidian-local-rest-api-periodic-notes) is installed. Without that extension on v5.0.2+, periodic targets fail with a `periodic_unsupported` error naming it; `obsidian://status` lists the registered extensions if you want to check first. Every other target type is unaffected.
 - An MCP client that can answer an input request (elicitation). `obsidian_delete_note` always asks for confirmation before deleting, so a client without that support can read and write notes but cannot delete one.
-- This server defaults to `http://127.0.0.1:27123` for simplicity. Enable **"Non-encrypted (HTTP) Server"** in the plugin settings to use it. To use the always-on HTTPS port instead, set `OBSIDIAN_BASE_URL=https://127.0.0.1:27124`; the plugin's self-signed cert is handled by `OBSIDIAN_VERIFY_SSL=false` (the default).
+- This server defaults to `http://127.0.0.1:27123` for simplicity. Enable **"Non-encrypted (HTTP) Server"** in the plugin settings to use it. To use the always-on HTTPS port instead, set `OBSIDIAN_BASE_URL=https://127.0.0.1:27124`; the plugin's self-signed cert is handled by `OBSIDIAN_VERIFY_SSL=false` (the default), which relaxes verification for this server's requests to that endpoint only.
 
 ### Installation
 
@@ -349,8 +349,8 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `OBSIDIAN_API_KEY` | **Required.** Bearer token for the Obsidian Local REST API plugin. | — |
-| `OBSIDIAN_BASE_URL` | Base URL of the Local REST API plugin. Use `https://127.0.0.1:27124` for the always-on HTTPS port (self-signed cert). | `http://127.0.0.1:27123` |
-| `OBSIDIAN_VERIFY_SSL` | Verify the TLS certificate. Default `false` because the plugin uses a self-signed cert. On Node, the dispatcher's `rejectUnauthorized` option handles this without any process-wide change. On Bun, the runtime ignores that option, so the service additionally sets `NODE_TLS_REJECT_UNAUTHORIZED=0` — that fallback is scoped to Bun only. | `false` |
+| `OBSIDIAN_BASE_URL` | Base URL of the Local REST API plugin. Use `https://127.0.0.1:27124` for the always-on HTTPS port (self-signed cert). A trailing slash is stripped at startup. | `http://127.0.0.1:27123` |
+| `OBSIDIAN_VERIFY_SSL` | Verify the TLS certificate. Default `false` because the plugin uses a self-signed cert. The relaxation is applied per request, to an `https:` `OBSIDIAN_BASE_URL` only — every other HTTPS connection the process makes still verifies normally, on both Bun and Node. | `false` |
 | `OBSIDIAN_REQUEST_TIMEOUT_MS` | Per-request timeout in milliseconds. | `30000` |
 | `OBSIDIAN_ENABLE_COMMANDS` | Opt-in flag for the command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`). Off by default — Obsidian commands are opaque and can be destructive. | `false` |
 | `OBSIDIAN_READ_PATHS` | Comma-separated vault-relative folder allowlist for read operations. Prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault. Write paths are implicitly readable. | unset |
@@ -361,7 +361,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | `MCP_HTTP_HOST` | Host for the HTTP server. | `127.0.0.1` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
 | `MCP_HTTP_ENDPOINT_PATH` | Endpoint path for the JSON-RPC handler. | `/mcp` |
-| `MCP_SESSION_MODE` | Session handling for the HTTP transport: `stateless`, `stateful`, or `auto`. Pinned to `stateful` — `obsidian_delete_note` confirms via an elicitation round, which `stateless` disables. | `stateful` |
+| `MCP_SESSION_MODE` | Session handling for the HTTP transport: `stateless`, `stateful`, or `auto`. Defaults to `stateful` here — `obsidian_delete_note` confirms via an elicitation round, and under `stateless` a 2025-era client's round is refused (`client_capability_missing`). | `stateful` |
 | `MCP_PUBLIC_URL` | Public origin override for TLS-terminating reverse-proxy deployments (landing page, Server Card, RFC 9728 metadata). | unset |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_AUTH_SECRET_KEY` | **Required when `MCP_AUTH_MODE=jwt`.** ≥32-char shared secret used to verify incoming JWTs. | — |
