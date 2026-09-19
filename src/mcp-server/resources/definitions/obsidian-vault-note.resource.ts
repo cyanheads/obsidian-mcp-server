@@ -61,7 +61,25 @@ export const obsidianVaultNote = resource('obsidian://vault/{+path}', {
 
   async handler(params, ctx) {
     const svc = getObsidianService();
-    const note = await svc.getNoteJson(ctx, { type: 'path', path: params.path });
+    const path = decodeCapturedPath(params.path);
+    const note = await svc.getNoteJson(ctx, { type: 'path', path });
     return note;
   },
 });
+
+/**
+ * The template captures `{+path}` from the percent-encoded URI, so a note named
+ * `Test Note.md` arrives as `Test%20Note.md`. Decodes each run of well-formed
+ * `%XX` escapes as UTF-8 and leaves any other `%` literal, so a filename
+ * containing a bare `%` resolves instead of throwing `URIError`. Traversal is
+ * still checked downstream, on the decoded path.
+ */
+function decodeCapturedPath(captured: string): string {
+  return captured.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      return run;
+    }
+  });
+}
