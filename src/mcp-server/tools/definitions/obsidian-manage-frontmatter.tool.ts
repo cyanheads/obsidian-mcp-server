@@ -24,7 +24,14 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     target: TargetSchema.describe('Where the note lives.'),
     key: z.string().min(1).describe('Frontmatter field name.'),
     value: z
-      .unknown()
+      .union([
+        z.string(),
+        z.number(),
+        z.boolean(),
+        z.array(z.unknown()),
+        z.record(z.string(), z.unknown()),
+        z.null(),
+      ])
       .optional()
       .describe(
         'Required when `operation` is `"set"`. JSON-typed value to write — strings, numbers, booleans, arrays, and objects all accepted.',
