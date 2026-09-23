@@ -7,7 +7,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
-import { parseAtxHeading } from '@/services/obsidian/section-extractor.js';
+import { scanHeadings } from '@/services/obsidian/section-extractor.js';
 import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schemas.js';
 
 export const obsidianWriteNote = tool('obsidian_write_note', {
@@ -130,6 +130,22 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
         'Retry with a distinct full Parent::Child heading path from `candidates` on the error data; when every candidate is the same path, rename the repeated headings first.',
     },
     {
+      reason: 'heading_outside_section',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'On Local REST API v5.0 and later, the new body of a heading section carries a heading at or above that section’s own level, which would have to sit outside the section.',
+      recovery:
+        'Append the heading at the parent section or at the end of the note with obsidian_append_to_note, or write it one level below the target section or deeper.',
+    },
+    {
+      reason: 'patch_rejected',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The section exists but the plugin refused the new content for it — table rows for a block that is not a table, a row with the wrong cell count, or content of the wrong shape.',
+      recovery:
+        'Read the target with obsidian_get_note format section, then send content that fits it — rows matching the table columns, or a value of the field’s own type.',
+    },
+    {
       reason: 'path_is_directory',
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
@@ -168,7 +184,6 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
         operation: 'replace',
         targetType: input.section.type,
         target: input.section.target,
-        targetDelimiter: input.section.type === 'heading' ? '::' : undefined,
         contentType: input.contentType,
         applyIfContentPreexists: true,
       });
@@ -218,18 +233,18 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
 });
 
 /**
- * If `content` opens with an ATX heading whose text — read by the same parser
- * the section scan uses — matches the leaf of `headingTarget` (delimited by
- * `::`), drop that heading line plus a single blank line. Upstream
- * PATCH-replace operates on the section *body*, so a caller-supplied heading
- * line would otherwise be embedded as a duplicate.
+ * If `content` opens with a heading whose text — read by the same scan the
+ * section reads use — matches the leaf of `headingTarget` (delimited by `::`),
+ * drop that heading (both lines of a setext heading) plus a single blank line.
+ * Upstream PATCH-replace operates on the section *body*, so a caller-supplied
+ * heading line would otherwise be embedded as a duplicate.
  */
 function stripLeadingHeading(content: string, headingTarget: string): string {
   const leaf = headingTarget.split('::').pop()?.trim();
   if (!leaf) return content;
-  const lines = content.split('\n');
-  if (parseAtxHeading(lines[0] ?? '')?.text !== leaf) return content;
-  lines.shift();
+  const [first] = scanHeadings(content);
+  if (first?.start !== 0 || first.text !== leaf) return content;
+  const lines = content.slice(first.end).split('\n');
   if (lines[0]?.trim() === '') lines.shift();
   return lines.join('\n');
 }

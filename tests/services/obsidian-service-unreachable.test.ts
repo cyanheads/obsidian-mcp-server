@@ -85,18 +85,23 @@ const RETRY_SAFE: ReadonlyArray<readonly [string, Call]> = [
 
 const SINGLE_ATTEMPT: ReadonlyArray<readonly [string, Call]> = [
   ['POST', (s, c) => s.searchText(c, 'q')],
-  [
-    'PATCH',
-    (s, c) =>
-      s.patchNote(c, { type: 'path', path: 'N.md' }, 'x', {
-        operation: 'append',
-        targetType: 'block',
-        target: 'b1',
-        contentType: 'markdown',
-      }),
-  ],
   ['HEAD (tryGetSize)', (s, c) => s.tryGetSize(c, { type: 'path', path: 'N.md' })],
 ];
+
+const patchBlock: Call = (s, c) =>
+  s.patchNote(c, { type: 'path', path: 'N.md' }, 'x', {
+    operation: 'append',
+    targetType: 'block',
+    target: 'b1',
+    contentType: 'markdown',
+  });
+
+/** The plugin's `GET /` report, which a PATCH reads once to pick its markdown-patch format. */
+const pluginReport = () =>
+  mockResponse(JSON.stringify({ status: 'OK', service: 's', versions: { self: '5.2.0' } }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
 
 function serviceOver(fetchImpl: ObsidianFetch): ObsidianService {
   return new ObsidianService(makeTestConfig({ baseUrl: BASE_URL }), fetchImpl);
@@ -203,6 +208,34 @@ describe('ObsidianService connection failure (issue #136)', () => {
       data: { reason: 'obsidian_unreachable' },
     });
     expect(calls).toHaveLength(1);
+  });
+
+  it('PATCH throws typed on its first attempt', async () => {
+    const { calls, fetchImpl } = sequencedFetch(pluginReport, REFUSED.bun());
+
+    await expect(patchBlock(serviceOver(fetchImpl), createMockContext())).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'obsidian_unreachable' },
+    });
+    expect(calls.map((c) => c.init.method)).toEqual(['GET', 'PATCH']);
+  });
+
+  /**
+   * The `GET /` a PATCH reads its markdown-patch format from is retry-safe, so
+   * an unreachable plugin spends that read's budget and the PATCH is never
+   * sent.
+   */
+  it('PATCH to an unreachable plugin fails on the format read, never reaching the PATCH', async () => {
+    const { calls, fetchImpl } = sequencedFetch(REFUSED.bun());
+
+    await expect(patchBlock(serviceOver(fetchImpl), createMockContext())).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'obsidian_unreachable' },
+    });
+    expect(calls).toHaveLength(FULL_BUDGET);
+    expect(calls.every((c) => c.init.method === 'GET' && new URL(c.url).pathname === '/')).toBe(
+      true,
+    );
   });
 
   it('builds the same message and data from the Bun and the Node shape, retried or not', async () => {

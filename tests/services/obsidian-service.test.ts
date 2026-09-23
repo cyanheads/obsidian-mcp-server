@@ -20,6 +20,7 @@ import {
 import {
   documentMapV2,
   type HeadingTree,
+  instructionOf,
   makeTestConfig,
   mockResponse,
   noteJson,
@@ -27,6 +28,7 @@ import {
   type ReplyFn,
   rejectionOf,
   repeatKey,
+  servePluginVersion,
   setupHarness,
   type TestHarness,
 } from '../helpers.js';
@@ -210,12 +212,24 @@ function documentMap(headings: string[]): {
   return { headings, blocks: [], frontmatterFields: [] };
 }
 
-describe('ObsidianService.patchNote header building', () => {
+/**
+ * Answer the reads a heading write makes on plugin v4.x before its PATCH: the
+ * version report, the flat 1.x map (asserting its format pin), and the note
+ * the repeat count scans.
+ */
+function serveV1HeadingReads(headings: string[], content: string): void {
+  servePluginVersion(pool, '4.2.0');
+  pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
+    expect(lowerCased(opts.headers)['markdown-patch-version']).toBe('1');
+    return { statusCode: 200, data: documentMap(headings) };
+  });
+  pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, noteJson('N.md', content));
+}
+
+describe('ObsidianService.patchNote header building (plugin v4.x)', () => {
   it('emits Operation, Target-Type, URL-encoded Target, Target-Delimiter, and option flags', async () => {
     let seenHeaders: Record<string, string> = {};
-    pool
-      .intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, documentMapV2({ Top: { 'Sub Title': {} } }));
+    serveV1HeadingReads(['Top', 'Top::Sub Title'], '# Top\n## Sub Title\n');
     pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
       seenHeaders = (opts.headers as Record<string, string>) ?? {};
       return { statusCode: 200, data: '' };
@@ -225,7 +239,6 @@ describe('ObsidianService.patchNote header building', () => {
       operation: 'append',
       targetType: 'heading',
       target: 'Top::Sub Title',
-      targetDelimiter: '::',
       createTargetIfMissing: true,
       applyIfContentPreexists: true,
       trimTargetWhitespace: true,
@@ -250,15 +263,12 @@ describe('ObsidianService.patchNote header building', () => {
   });
 
   /**
-   * Local REST API v5 rejects header-driven PATCH targeting outright unless the
-   * request pins a markdown-patch version, so the pin is what keeps every
-   * section-targeted write working on the current plugin line.
+   * Plugin v4.x ignores the header; stating the format anyway keeps a 1.x
+   * request unambiguous on any plugin that reads it.
    */
-  it('pins Markdown-Patch-Version: 1 on every PATCH', async () => {
+  it('pins Markdown-Patch-Version: 1 on every 1.x PATCH', async () => {
     let seenHeaders: Record<string, string> = {};
-    pool
-      .intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, documentMapV2({ Top: { Child: {} } }));
+    serveV1HeadingReads(['Top', 'Top::Child'], '# Top\n## Child\n');
     pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
       seenHeaders = (opts.headers as Record<string, string>) ?? {};
       return { statusCode: 200, data: '' };
@@ -268,7 +278,6 @@ describe('ObsidianService.patchNote header building', () => {
       operation: 'append',
       targetType: 'heading',
       target: 'Top::Child',
-      targetDelimiter: '::',
       contentType: 'markdown',
     });
 
@@ -279,6 +288,7 @@ describe('ObsidianService.patchNote header building', () => {
 
   it('sends Reject-If-Content-Preexists by default to preserve idempotency under retries', async () => {
     let seenHeaders: Record<string, string> = {};
+    servePluginVersion(pool, '4.2.0');
     pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
       seenHeaders = (opts.headers as Record<string, string>) ?? {};
       return { statusCode: 200, data: '' };
@@ -302,14 +312,46 @@ describe('ObsidianService.patchNote header building', () => {
   });
 });
 
-describe('ObsidianService.getDocumentMap', () => {
-  /**
-   * Plugin v5 returns the nested markdown-patch 2.x heading tree by default,
-   * which does not satisfy the flat `string[]` this server's document-map
-   * projection declares. Pinning the version is what keeps the flat shape.
-   */
+describe('ObsidianService.patchNote on the 1.x header protocol', () => {
+  it('sends heading content byte-for-byte — heading lines, CRLF, and edge blank lines untouched', async () => {
+    const content = '\n### Sub\r\ntext\r\n\n';
+    let seenBody: string | undefined;
+    serveV1HeadingReads(['Top', 'Top::Child'], '# Top\n## Child\n');
+    pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
+      seenBody = opts.body;
+      return { statusCode: 200, data: '' };
+    });
+
+    await service.patchNote(ctx, { type: 'path', path: 'N.md' }, content, {
+      operation: 'append',
+      targetType: 'heading',
+      target: 'Top::Child',
+      contentType: 'markdown',
+    });
+
+    expect(seenBody).toBe(content);
+  });
+});
+
+describe('ObsidianService.getDocumentMap (plugin v4.x)', () => {
+  it('returns a flat 1.x map as the plugin sent it', async () => {
+    servePluginVersion(pool, '4.2.0');
+    pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, {
+      headings: ['Top', 'Top::Child', '::Untitled child'],
+      blocks: ['abc123', 'def456'],
+      frontmatterFields: ['title', 'tags'],
+    });
+
+    await expect(service.getDocumentMap(ctx, { type: 'path', path: 'N.md' })).resolves.toEqual({
+      headings: ['Top', 'Top::Child', '::Untitled child'],
+      blocks: ['abc123', 'def456'],
+      frontmatterFields: ['title', 'tags'],
+    });
+  });
+
   it('pins Markdown-Patch-Version: 1 so the flat `::`-joined map comes back', async () => {
     let seenHeaders: Record<string, string> = {};
+    servePluginVersion(pool, '4.2.0');
     pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
       seenHeaders = (opts.headers as Record<string, string>) ?? {};
       return { statusCode: 200, data: documentMap(['Top', 'Top::Child']) };
@@ -334,22 +376,33 @@ describe('ObsidianService.getDocumentMap', () => {
  * a locator its PATCH targeting rejects.
  */
 describe('ObsidianService.patchNote heading-leaf resolution', () => {
-  /** Capture the `Target` header of a single PATCH, decoded. */
+  /**
+   * Capture the target of a single PATCH as a `::`-joined locator, whichever
+   * format carried it: the 1.x `Target` header, or the 2.0 instruction's
+   * `target` (an array for headings).
+   */
   function capturePatchTarget(): { seen: () => string } {
     let target = '';
     pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
-      const headers = (opts.headers as Record<string, string>) ?? {};
-      target = decodeURIComponent(headers.target ?? headers.Target ?? '');
+      const header = lowerCased(opts.headers).target;
+      if (header !== undefined) {
+        target = decodeURIComponent(header);
+      } else {
+        const sent = instructionOf(opts).target as string | string[];
+        target = Array.isArray(sent) ? sent.join('::') : sent;
+      }
       return { statusCode: 200, data: '' };
     });
     return { seen: () => target };
   }
 
   /**
-   * Answer the one read a heading write makes before its PATCH: the
-   * markdown-patch 2.0 document map. Any other read fails the test.
+   * Answer the reads a heading write makes on plugin v5.x before its PATCH:
+   * the version report and the markdown-patch 2.0 document map. Any other
+   * read fails the test.
    */
   function serveMap(headings: HeadingTree): void {
+    servePluginVersion(pool, '5.2.0');
     pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
       const headers = lowerCased(opts.headers);
       expect(headers.accept).toBe('application/vnd.olrapi.document-map+json');
@@ -363,7 +416,6 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
       operation: 'append',
       targetType: 'heading',
       target,
-      targetDelimiter: '::',
       contentType: 'markdown',
       ...extra,
     });
@@ -417,6 +469,7 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
 
   it('expands a leaf and counts its repeats from a single read', async () => {
     let reads = 0;
+    servePluginVersion(pool, '5.2.0');
     pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
       reads++;
       return { statusCode: 200, data: documentMapV2({ Top: { Child: {} } }) };
@@ -434,6 +487,7 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
    * No document-map GET is intercepted either, so one would fail the test.
    */
   it('skips the map fetch for block targets', async () => {
+    servePluginVersion(pool, '5.2.0');
     const patched = capturePatchTarget();
 
     await expect(
@@ -448,6 +502,7 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
   });
 
   it('skips the map fetch for frontmatter targets', async () => {
+    servePluginVersion(pool, '5.2.0');
     const patched = capturePatchTarget();
 
     await expect(
@@ -594,13 +649,17 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
     });
 
     /**
-     * Plugin v4.x ignores `Markdown-Patch-Version` and serves the flat 1.x map,
-     * which lists a repeated path once. The resolver expands against it and
-     * counts repeats in the note body instead.
+     * Plugin v4.x serves only the flat 1.x map, which lists a repeated path
+     * once. The resolver expands against it and counts repeats in the note body
+     * instead.
      */
     describe('on a plugin that serves only the flat 1.x map', () => {
       function serveFlatMapThenNote(headings: string[], content: string): void {
-        pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, documentMap(headings));
+        servePluginVersion(pool, '4.2.0');
+        pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
+          expect(lowerCased(opts.headers)['markdown-patch-version']).toBe('1');
+          return { statusCode: 200, data: documentMap(headings) };
+        });
         pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
           expect(lowerCased(opts.headers).accept).toBe('application/vnd.olrapi.note+json');
           return { statusCode: 200, data: noteJson('N.md', content) };
@@ -617,6 +676,30 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
 
       it('rejects a path the note body repeats', async () => {
         serveFlatMapThenNote(['Root', 'Root::Dup'], '# Root\n## Dup\na\n## Dup\n');
+
+        await expect(patch('Root::Dup')).rejects.toMatchObject({
+          data: { reason: 'ambiguous_section', candidates: ['Root::Dup', 'Root::Dup'] },
+        });
+      });
+
+      /** The plugin's parser reads none of these second `## Dup` lines as a heading. */
+      it.each([
+        ['a heading line after an HTML line', '# Root\n## Dup\na\n\n<br>\n## Dup\n'],
+        ['a heading line continuing a list item', '# Root\n## Dup\na\n\n- item\n  ## Dup\n'],
+        [
+          'a heading line inside an HTML comment',
+          '# Root\n## Dup\na\n\n<!--\n## Dup\n\nold\n-->\n',
+        ],
+      ])('writes a path the note body holds once, beside %s', async (_label, content) => {
+        serveFlatMapThenNote(['Root', 'Root::Dup'], content);
+        const patched = capturePatchTarget();
+
+        await expect(patch('Root::Dup')).resolves.toBe('Root::Dup');
+        expect(patched.seen()).toBe('Root::Dup');
+      });
+
+      it('rejects a path the note body repeats through a setext heading', async () => {
+        serveFlatMapThenNote(['Root', 'Root::Dup'], '# Root\n## Dup\na\n\nDup\n---\n');
 
         await expect(patch('Root::Dup')).rejects.toMatchObject({
           data: { reason: 'ambiguous_section', candidates: ['Root::Dup', 'Root::Dup'] },
@@ -743,13 +826,12 @@ describe('ObsidianService error classification', () => {
     expect(err?.message).not.toContain('plugin-said-gk29xb');
   });
 
-  it('classifies 400 with "could not be applied" body as section_target_missing', async () => {
-    pool
-      .intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, documentMapV2({ Elsewhere: {} }));
-    pool
-      .intercept({ path: '/vault/N.md', method: 'PATCH' })
-      .reply(400, { message: 'patch could not be applied to the target' });
+  it('classifies the 1.x invalid-target 400 as section_target_missing', async () => {
+    serveV1HeadingReads(['Elsewhere'], '# Elsewhere\n');
+    pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply(400, {
+      errorCode: 40080,
+      message: 'The patch you provided could not be applied to the target content.\ninvalid-target',
+    });
 
     await expect(
       service.patchNote(ctx, { type: 'path', path: 'N.md' }, 'body', {
@@ -1078,6 +1160,7 @@ describe('ObsidianService directory guard on note reads', () => {
   });
 
   it('getDocumentMap rejects a folder listing', async () => {
+    servePluginVersion(pool, '5.2.0');
     pool
       .intercept({ path: '/vault/Inbox', method: 'GET' })
       .reply(200, listing, { headers: listingHeaders });
@@ -1770,6 +1853,7 @@ describe('ObsidianService retry policy', () => {
 
     it('patchNote (PATCH) append: does not retry on 503', async () => {
       let attempts = 0;
+      servePluginVersion(pool, '5.2.0');
       pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, documentMapV2({}));
       queueReplies('/vault/N.md', 'PATCH', 4, () => {
         attempts++;
@@ -1789,6 +1873,7 @@ describe('ObsidianService retry policy', () => {
 
     it('patchNote (PATCH) prepend: does not retry on raw network errors', async () => {
       let attempts = 0;
+      servePluginVersion(pool, '5.2.0');
       pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, documentMapV2({}));
       queueReplies('/vault/N.md', 'PATCH', 4, () => {
         attempts++;

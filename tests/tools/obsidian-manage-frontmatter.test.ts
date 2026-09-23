@@ -7,7 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianManageFrontmatter } from '@/mcp-server/tools/definitions/obsidian-manage-frontmatter.tool.js';
-import { setupHarness } from '../helpers.js';
+import { instructionOf, servePluginVersion, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -70,11 +70,56 @@ describe('obsidian_manage_frontmatter / get', () => {
 });
 
 describe('obsidian_manage_frontmatter / set', () => {
-  it('PATCHes the frontmatter field with JSON content type and refetches', async () => {
+  it('PATCHes a 2.0 frontmatter instruction on plugin v5.x and reports it on both surfaces', async () => {
     const pool = harness.current().pool;
     pool
       .intercept({ path: '/vault/N.md', method: 'HEAD' })
       .reply(200, '', { headers: { 'content-length': '50' } });
+    servePluginVersion(pool, '5.2.0');
+
+    let instruction: Record<string, unknown> = {};
+    let contentType = '';
+    pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
+      instruction = instructionOf(opts);
+      contentType = opts.headers['Content-Type'] ?? opts.headers['content-type'] ?? '';
+      return { statusCode: 200, data: '' };
+    });
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('---\ntags:\n  - a\n---\nbody', { tags: ['a'] }), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const res = await runToolContract(obsidianManageFrontmatter, {
+      operation: 'set',
+      target: { type: 'path', path: 'N.md' },
+      key: 'tags',
+      value: ['a'],
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(contentType).toBe('application/vnd.olrapi.patch-instruction+json');
+    expect(instruction).toEqual({
+      targetType: 'frontmatter',
+      target: 'tags',
+      operation: 'replace',
+      value: ['a'],
+      createTargetIfMissing: true,
+      rejectIfContentPreexists: true,
+    });
+    expect(res.structuredContent).toMatchObject({
+      result: { operation: 'set', path: 'N.md', key: 'tags', frontmatter: { tags: ['a'] } },
+    });
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('tags');
+  });
+
+  it('PATCHes the frontmatter field with JSON content type and refetches (plugin v4.x)', async () => {
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'HEAD' })
+      .reply(200, '', { headers: { 'content-length': '50' } });
+    servePluginVersion(pool, '4.2.0');
 
     let seenHeaders: Record<string, string> = {};
     let seenBody = '';

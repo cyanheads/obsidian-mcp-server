@@ -189,12 +189,61 @@ describe('#throwForStatus / upstream text never reaches the client', () => {
     const err = await throwsMcpError(() =>
       replyToAppend(400, {
         errorCode: LEAK.errorCode,
-        message: `could not be applied to the target content of ${LEAK.notePath}: ${LEAK.noteBody}`,
+        message: `could not be applied to the target content of ${LEAK.notePath}: ${LEAK.noteBody}\ninvalid-target`,
       }),
     );
 
     expect((err.data as { reason?: string }).reason).toBe('section_target_missing');
     expectContained(err, /document-map/);
+  });
+
+  it('contains the upstream body on the section_target_missing 404 branch', async () => {
+    const err = await throwsMcpError(() =>
+      replyToAppend(404, {
+        errorCode: 40400,
+        message: `Not Found\ncould not resolve heading target ["${LEAK.noteBody}"] in ${LEAK.notePath}`,
+      }),
+    );
+
+    expect((err.data as { reason?: string }).reason).toBe('section_target_missing');
+    expectContained(err, /document-map/);
+  });
+
+  it.each([
+    ['a 1.x reason token', 400, 40080, `content-not-mergeable (while processing ${LEAK.notePath})`],
+    [
+      'a 2.0 engine message',
+      400,
+      40080,
+      `block "${LEAK.noteBody}" is not a table in ${LEAK.fsPath}`,
+    ],
+    ['a malformed 2.0 instruction', 400, 40081, `value: ${LEAK.noteBody}`],
+    ['an unrecognized refusal', 400, 40080, `${LEAK.noteBody} at ${LEAK.fsPath}`],
+  ])(
+    'contains the upstream body on the patch_rejected branch (%s)',
+    async (_l, status, code, detail) => {
+      const err = await throwsMcpError(() =>
+        replyToAppend(status, {
+          errorCode: code,
+          message: `The patch you provided could not be applied to the target content.\n${detail}`,
+        }),
+      );
+
+      expect((err.data as { reason?: string }).reason).toBe('patch_rejected');
+      expectContained(err, /could not apply the patch to x\.md/);
+    },
+  );
+
+  it('contains the upstream body on the content_preexists 409 branch', async () => {
+    const err = await throwsMcpError(() =>
+      replyToAppend(409, {
+        errorCode: 40900,
+        message: `Conflict\nthe target already contains the content to append: ${LEAK.noteBody}`,
+      }),
+    );
+
+    expect((err.data as { reason?: string }).reason).toBe('content_preexists');
+    expectContained(err, /applyIfContentPreexists/);
   });
 
   it('contains the upstream body on the 404 command branch', async () => {

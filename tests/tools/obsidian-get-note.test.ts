@@ -7,7 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianGetNote } from '@/mcp-server/tools/definitions/obsidian-get-note.tool.js';
-import { setupHarness } from '../helpers.js';
+import { repeatKey, servePluginVersion, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -86,11 +86,11 @@ describe('obsidian_get_note / path names a folder', () => {
     ],
   ] as const;
 
-  it.each(inputs)('format %s rejects with path_is_directory', async (_label, args) => {
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/Inbox', method: 'GET' })
-      .reply(200, listing, asFolder);
+  it.each(inputs)('format %s rejects with path_is_directory', async (label, args) => {
+    const { pool } = harness.current();
+    // The document map reads the plugin's version first, to pick its markdown-patch format.
+    if (label === 'document-map') servePluginVersion(pool, '5.2.0');
+    pool.intercept({ path: '/vault/Inbox', method: 'GET' }).reply(200, listing, asFolder);
 
     await expect(
       obsidianGetNote.handler(
@@ -156,7 +156,8 @@ describe('obsidian_get_note / format: full', () => {
 });
 
 describe('obsidian_get_note / format: document-map', () => {
-  it('returns headings, blocks, and frontmatter fields', async () => {
+  it('returns headings, blocks, and frontmatter fields (plugin v4.x)', async () => {
+    servePluginVersion(harness.current().pool, '4.2.0');
     harness
       .current()
       .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
@@ -182,6 +183,156 @@ describe('obsidian_get_note / format: document-map', () => {
     expect(out.result.headings).toEqual(['Top', 'Sub']);
     expect(out.result.blocks).toEqual(['abc']);
     expect(out.result.frontmatterFields).toEqual(['title']);
+  });
+
+  /**
+   * Both maps plugin 5.2.0 served for one note, recorded live: the flat 1.x
+   * map (`Markdown-Patch-Version: 1`) and the 2.0 tree. The note carries a
+   * repeated heading, a repeated block id, setext headings, an untitled
+   * heading, and an integer-like frontmatter key and block id. Its
+   * `## 2024` under `# Top` is left out here and pinned on its own below.
+   */
+  const RECORDED_V1_MAP = {
+    headings: [
+      'Top',
+      'Top::Child',
+      'Top::Child::Deep',
+      'Setext Parent',
+      'Setext Parent::Setext Child',
+      '::Under untitled',
+      'Other',
+    ],
+    blocks: ['123456', 'intro1', 'li1'],
+    frontmatterFields: ['2024', 'title', 'tags'],
+  };
+  const RECORDED_V2_MAP = {
+    version: 'db5b8f',
+    frontmatterFields: ['title', '2024', 'tags'],
+    headings: {
+      Top: { Child: { Deep: {} }, [repeatKey('Child', 1)]: {} },
+      'Setext Parent': { 'Setext Child': {} },
+      '': { 'Under untitled': {} },
+      Other: {},
+    },
+    blocks: ['intro1', 'li1', '123456', repeatKey('intro1', 1)],
+  };
+
+  /** The map read, then — when `note` is given — the note read that orders its headings. */
+  const mapResult = async (version: string, reply: unknown, note?: string) => {
+    const { pool } = harness.current();
+    servePluginVersion(pool, version);
+    pool.intercept({ path: '/vault/Note.md', method: 'GET' }).reply(200, reply);
+    if (note !== undefined) {
+      pool.intercept({ path: '/vault/Note.md', method: 'GET' }).reply(200, {
+        path: 'Note.md',
+        content: note,
+        frontmatter: {},
+        tags: [],
+        stat: { ctime: 0, mtime: 0, size: 0 },
+      });
+    }
+    return await runToolContract(obsidianGetNote, {
+      format: 'document-map',
+      target: { type: 'path', path: 'Note.md' },
+    });
+  };
+  const textOf = (res: Awaited<ReturnType<typeof runToolContract>>) =>
+    res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+
+  const EXPECTED = { result: { format: 'document-map', path: 'Note.md', ...RECORDED_V1_MAP } };
+
+  it.each([
+    ['plugin v4.x, from the flat 1.x map', '4.2.0', RECORDED_V1_MAP],
+    ['plugin v5.x, from the 2.0 tree', '5.2.0', RECORDED_V2_MAP],
+  ])('returns one map for the note on %s', async (_label, version, reply) => {
+    const res = await mapResult(version, reply);
+
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toEqual(EXPECTED);
+    const text = textOf(res);
+    expect(text).toContain('**Headings (7)**');
+    expect(text).toContain('- Setext Parent::Setext Child');
+    expect(text).toContain('- ::Under untitled');
+    expect(text).toContain('**Blocks (3)**');
+    expect(text).toContain('- ^123456');
+    expect(text).toContain('**Frontmatter fields (3)**');
+  });
+
+  /**
+   * The recorded note's `## 2024` under `# Top`. The 2.0 tree is a JSON object,
+   * so it reaches the client ahead of `## Child`, its sibling above it in the
+   * note; the listing follows the note, as the 1.x map does.
+   */
+  it('lists an integer-named heading in note order on plugin v5.x', async () => {
+    const note = [
+      '---',
+      'title: Map fixture',
+      '2024: numeric key',
+      'tags:',
+      '  - a',
+      '---',
+      '# Top',
+      'intro ^intro1',
+      '',
+      '## Child',
+      '- a ^li1',
+      '- b',
+      '',
+      '### Deep',
+      'deep text',
+      '',
+      '## Child',
+      'second child',
+      '',
+      '## 2024',
+      'numbered',
+      '',
+      '# Other',
+      'dup id ^intro1',
+      '',
+    ].join('\n');
+    const res = await mapResult(
+      '5.2.0',
+      {
+        ...RECORDED_V2_MAP,
+        headings: {
+          Top: { '2024': {}, Child: { Deep: {} }, [repeatKey('Child', 1)]: {} },
+          Other: {},
+        },
+      },
+      note,
+    );
+
+    expect((res.structuredContent as typeof EXPECTED).result.headings).toEqual([
+      'Top',
+      'Top::Child',
+      'Top::Child::Deep',
+      'Top::2024',
+      'Other',
+    ]);
+    expect(textOf(res)).toContain('- Top::Child::Deep\n- Top::2024\n- Other');
+  });
+
+  it('returns empty lists on plugin v5.x for a note with no headings, blocks, or frontmatter', async () => {
+    const res = await mapResult('5.2.0', {
+      version: 'e3b0c4',
+      frontmatterFields: [],
+      headings: {},
+      blocks: [],
+    });
+
+    expect(res.structuredContent).toEqual({
+      result: {
+        format: 'document-map',
+        path: 'Note.md',
+        headings: [],
+        blocks: [],
+        frontmatterFields: [],
+      },
+    });
+    const text = textOf(res);
+    expect(text).toContain('**Headings (0)**');
+    expect(text).toContain('**Frontmatter fields (0)**');
   });
 });
 
@@ -489,6 +640,66 @@ describe('obsidian_get_note / section heading resolution', () => {
     const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
     expect(text).toContain('*Candidates:* Root::Dup, Root::Dup');
     expect(text).toContain('## Dup\nfirst');
+  });
+
+  /**
+   * The second `## Dup` sits in the HTML block the `<br>` line opens, so the
+   * plugin's document map — and every write — sees one `Root::Dup` section
+   * running to `not a heading`. The read addresses that same span.
+   */
+  it('reads the span a write edits past a heading line inside an HTML block', async () => {
+    mockNote('# Root\n## Dup\nfirst\n\n<br>\n## Dup\nnot a heading\n');
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'section',
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Root::Dup' },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const structured = res.structuredContent as {
+      notice?: string;
+      result: Record<string, unknown>;
+    };
+    expect(structured.result).toEqual({
+      format: 'section',
+      path: 'Note.md',
+      section: { type: 'heading', target: 'Root::Dup' },
+      sectionTarget: 'Root::Dup',
+      valueText: '## Dup\nfirst\n\n<br>\n## Dup\nnot a heading',
+    });
+    expect(structured.notice).toBeUndefined();
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('## Dup\nfirst\n\n<br>\n## Dup\nnot a heading');
+    expect(text).toContain('*Resolved:* Root::Dup');
+    expect(text).not.toContain('*Candidates:*');
+    expect(text).not.toContain('ambiguous');
+  });
+
+  it('reads a setext heading section byte for byte', async () => {
+    mockNote('# Root\nDup\n---\nbody');
+    const result = await readSection('Root::Dup');
+    expect(result.valueText).toBe('Dup\n---\nbody');
+    expect(result.sectionTarget).toBe('Root::Dup');
+    expect(result.candidates).toBeUndefined();
+  });
+
+  it('fails with section_missing on both surfaces for a heading line inside a list item', async () => {
+    mockNote('# Root\n- item\n  ## Nested\nmore');
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'section',
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Root::Nested' },
+    });
+
+    expect(res.isError).toBe(true);
+    const { error } = res.structuredContent as {
+      error: { code: number; data: { reason: string } };
+    };
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data.reason).toBe('section_missing');
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain("Heading 'Root::Nested' not found");
+    expect(text).toContain('reason section_missing');
   });
 
   it('resolves the path below a frontmatter block', async () => {

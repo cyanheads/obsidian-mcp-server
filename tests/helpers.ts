@@ -149,6 +149,26 @@ export function documentMapV2(headings: HeadingTree) {
   return { version: 'abc123', frontmatterFields: [], headings, blocks: [] };
 }
 
+/**
+ * Answer the plugin's `GET /` capability report with `self` as the installed
+ * Local REST API version. A section write or document-map read reads it once
+ * per service to pick the markdown-patch format: 5.x and later speak 2.0, 4.x
+ * the 1.x header protocol. `self: undefined` omits `versions` entirely.
+ */
+export function servePluginVersion(pool: TestHarness['pool'], self: string | undefined): void {
+  pool.intercept({ path: '/', method: 'GET' }).reply(200, {
+    status: 'OK',
+    service: 'Obsidian Local REST API',
+    authenticated: true,
+    ...(self === undefined ? {} : { versions: { obsidian: '1.13.7', self } }),
+  });
+}
+
+/** A PATCH request's markdown-patch 2.0 instruction body, parsed. */
+export function instructionOf(opts: DispatchOpts): Record<string, unknown> {
+  return JSON.parse(opts.body ?? 'null') as Record<string, unknown>;
+}
+
 export type PathMatcher = string | ((path: string) => boolean);
 
 interface InterceptMatcher {

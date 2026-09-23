@@ -6,21 +6,56 @@
  * @module tests/tools/obsidian-write-note.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianWriteNote } from '@/mcp-server/tools/definitions/obsidian-write-note.tool.js';
-import { documentMapV2, type HeadingTree, repeatKey, setupHarness } from '../helpers.js';
+import {
+  documentMapV2,
+  type HeadingTree,
+  instructionOf,
+  noteJson,
+  repeatKey,
+  servePluginVersion,
+  setupHarness,
+} from '../helpers.js';
 
 const harness = setupHarness();
 
 const cl = (n: number) => ({ headers: { 'content-length': String(n) } });
 
-/** Answer the document-map read a heading-targeted write makes before its PATCH. */
+/** `tree` as ATX heading lines, one level per nesting depth, repeat suffixes dropped. */
+function noteFor(tree: HeadingTree, depth = 1): string {
+  return Object.entries(tree)
+    .map(([key, children]) => {
+      const text = key.replace(/\u{FC750}[\u{F6440}-\u{F644F}]+$/u, '');
+      return `${'#'.repeat(depth)} ${text}\nbody\n${noteFor(children, depth + 1)}`;
+    })
+    .join('');
+}
+
+/** `tree` as the flat 1.x map's `::`-joined paths, repeats listed once. */
+function flatPaths(tree: HeadingTree, parent?: string): string[] {
+  const paths = Object.entries(tree).flatMap(([key, children]) => {
+    const text = key.replace(/\u{FC750}[\u{F6440}-\u{F644F}]+$/u, '');
+    const path = parent === undefined ? text : `${parent}::${text}`;
+    return [path, ...flatPaths(children, path)];
+  });
+  return [...new Set(paths)];
+}
+
+/**
+ * Answer the reads a heading-targeted write makes on plugin v4.x before its
+ * 1.x PATCH: the version report, the flat map, and the note it counts repeats in.
+ */
 function serveMap(headings: HeadingTree): void {
-  harness
-    .current()
-    .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
-    .reply(200, documentMapV2(headings));
+  const pool = harness.current().pool;
+  servePluginVersion(pool, '4.2.0');
+  pool
+    .intercept({ path: '/vault/Note.md', method: 'GET' })
+    .reply(200, { headings: flatPaths(headings), blocks: [], frontmatterFields: [] });
+  pool
+    .intercept({ path: '/vault/Note.md', method: 'GET' })
+    .reply(200, noteJson('Note.md', noteFor(headings)));
 }
 
 describe('obsidian_write_note (whole file)', () => {
@@ -245,6 +280,40 @@ describe('obsidian_write_note (section)', () => {
     expect(body).toBe('new body');
   });
 
+  it.each([
+    ['indented', '   ## Section A\n\nbody', 'body'],
+    ['carrying trailing spaces', '## Section A   \n\nbody', 'body'],
+    ['with no body after it', '## Section A', ''],
+    ['followed by two blank lines, only one of which goes', '## Section A\n\n\nbody', '\nbody'],
+  ])('strips a leading heading line %s', async (_label, content, expected) => {
+    const body = await writtenBody('Top::Section A', { Top: { 'Section A': {} } }, content);
+    expect(body).toBe(expected);
+  });
+
+  it.each([
+    ['below frontmatter', '---\na: 1\n---\n## Section A\nbody'],
+    ['on the second line', 'intro\n## Section A\nbody'],
+    ['inside a fence', '```\n## Section A\n```\nbody'],
+  ])('leaves a heading line that names the target %s', async (_label, content) => {
+    const body = await writtenBody('Top::Section A', { Top: { 'Section A': {} } }, content);
+    expect(body).toBe(content);
+  });
+
+  it('strips a leading setext heading that names the target', async () => {
+    const body = await writtenBody(
+      'Top::Section A',
+      { Top: { 'Section A': {} } },
+      'Section A\n---\n\nbody',
+    );
+    expect(body).toBe('body');
+  });
+
+  it('keeps a four-space-indented `#` line, which is code rather than a heading', async () => {
+    const content = '    ## Section A\nbody';
+    const body = await writtenBody('Top::Section A', { Top: { 'Section A': {} } }, content);
+    expect(body).toBe(content);
+  });
+
   it('rejects a heading path that repeats in the note without writing', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
@@ -287,6 +356,105 @@ describe('obsidian_write_note (section)', () => {
       createMockContext({ errors: obsidianWriteNote.errors }),
     );
     expect(seenContentType).toBe('application/json');
+  });
+});
+
+/** Plugin v5.x speaks markdown-patch 2.0: a JSON instruction body with an array heading target. */
+describe('obsidian_write_note (section, plugin v5.x)', () => {
+  const textOf = (res: Awaited<ReturnType<typeof runToolContract>>) =>
+    res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+
+  /**
+   * HEAD before the write, the version report, the 2.0 map, and — for content
+   * carrying a heading — the note the section's level is read from.
+   */
+  function serveReads(note?: string) {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
+    servePluginVersion(pool, '5.2.0');
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, documentMapV2({ Top: { 'Section A': {} } }));
+    if (note !== undefined) {
+      pool
+        .intercept({ path: '/vault/Note.md', method: 'GET' })
+        .reply(200, noteJson('Note.md', note));
+    }
+    return pool;
+  }
+
+  function capture(pool: ReturnType<typeof serveReads>): () => Record<string, unknown> {
+    let instruction: Record<string, unknown> = {};
+    pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
+      instruction = instructionOf(opts);
+      return { statusCode: 200, data: '' };
+    });
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(290));
+    return () => instruction;
+  }
+
+  it('replaces the section body through a 2.0 instruction and reports it on both surfaces', async () => {
+    const sent = capture(serveReads());
+
+    const res = await runToolContract(obsidianWriteNote, {
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Section A' },
+      content: '## Section A\n\nbody line 1\nbody line 2',
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(sent()).toEqual({
+      targetType: 'heading',
+      target: ['Top', 'Section A'],
+      operation: 'replace',
+      content: 'body line 1\nbody line 2',
+    });
+    expect(res.structuredContent).toEqual({
+      path: 'Note.md',
+      sectionTargeted: true,
+      sectionTarget: 'Top::Section A',
+      created: false,
+      previousSizeInBytes: 300,
+      currentSizeInBytes: 290,
+    });
+    expect(textOf(res)).toContain('Top::Section A');
+  });
+
+  it('keeps a subsection at the level the caller wrote', async () => {
+    const sent = capture(serveReads('# Top\n## Section A\nold\n'));
+
+    await obsidianWriteNote.handler(
+      obsidianWriteNote.input.parse({
+        target: { type: 'path', path: 'Note.md' },
+        section: { type: 'heading', target: 'Top::Section A' },
+        content: '## Section A\n\nintro\n\n### Detail\nx',
+      }),
+      createMockContext({ errors: obsidianWriteNote.errors }),
+    );
+
+    // `### Detail` is one level under the level-2 section, which is how 2.0 counts it.
+    expect(sent().content).toBe('intro\n\n# Detail\nx');
+  });
+
+  it('rejects a body whose heading would close the section, without writing', async () => {
+    serveReads('# Top\n## Section A\nold\n');
+    // No PATCH intercept — a write here would surface "No mock intercept".
+
+    const res = await runToolContract(obsidianWriteNote, {
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Top::Section A' },
+      content: '## Different Heading\n\nbody',
+    });
+
+    expect(res.isError).toBe(true);
+    const { error } = res.structuredContent as {
+      error: { data: { reason: string; recovery: { hint: string } } };
+    };
+    expect(error.data.reason).toBe('heading_outside_section');
+    expect(error.data.recovery.hint).toContain("obsidian_append_to_note with `section: 'Top'`");
+    const text = textOf(res);
+    expect(text).toContain("Heading '## Different Heading' in the content is level 2");
+    expect(text).toContain('heading_outside_section');
   });
 });
 

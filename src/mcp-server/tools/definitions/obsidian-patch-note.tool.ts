@@ -1,7 +1,8 @@
 /**
  * @fileoverview obsidian_patch_note — surgical edit (`append` / `prepend` /
- * `replace`) of a heading, block reference, or frontmatter field. Uses the
- * upstream Local REST API v3 PATCH protocol.
+ * `replace`) of a heading, block reference, or frontmatter field, through the
+ * Local REST API's PATCH endpoint in whichever markdown-patch format the
+ * installed plugin speaks.
  * @module mcp-server/tools/definitions/obsidian-patch-note.tool
  */
 
@@ -17,7 +18,7 @@ import {
 
 export const obsidianPatchNote = tool('obsidian_patch_note', {
   description:
-    'Edit a heading, block reference, or frontmatter field in place — append to, prepend to, or replace the target\'s body. Use `obsidian_get_note` with `format: "document-map"` to discover available targets first. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too.',
+    'Edit a heading, block reference, or frontmatter field in place — append to, prepend to, or replace the target\'s body. On Local REST API v5.0 and later, content appended or prepended to a heading is separated from the section’s existing content by a blank line, except a list item appended to a section that ends in a list and has no sub-headings, or prepended to one that opens with a list, which continues that list. Use `obsidian_get_note` with `format: "document-map"` to discover available targets first. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -124,6 +125,22 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
         'Pass `patchOptions.applyIfContentPreexists: true` to force-apply over preexisting content, or change the content to something not already present.',
     },
     {
+      reason: 'heading_outside_section',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'On Local REST API v5.0 and later, the content of a heading write carries a heading at or above the target section’s own level, which would have to sit outside the section.',
+      recovery:
+        'Append the heading at the parent section or at the end of the note with obsidian_append_to_note, or write it one level below the target section or deeper.',
+    },
+    {
+      reason: 'patch_rejected',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The target exists but the plugin refused the content for it — table rows for a block that is not a table, a row with the wrong cell count, a frontmatter value that cannot merge, or content of the wrong shape.',
+      recovery:
+        'Read the target with obsidian_get_note format section, then send content that fits it — rows matching the table columns, or a value of the field’s own type.',
+    },
+    {
       reason: 'path_is_directory',
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
@@ -156,7 +173,6 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
       operation: input.operation,
       targetType: input.section.type,
       target: input.section.target,
-      targetDelimiter: input.section.type === 'heading' ? '::' : undefined,
       createTargetIfMissing: input.patchOptions?.createTargetIfMissing,
       applyIfContentPreexists: input.patchOptions?.applyIfContentPreexists,
       trimTargetWhitespace: input.patchOptions?.trimTargetWhitespace,

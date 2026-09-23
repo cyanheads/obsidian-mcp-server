@@ -14,7 +14,7 @@ import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schema
 
 export const obsidianAppendToNote = tool('obsidian_append_to_note', {
   description:
-    'Append content to a note. **Without `section`: appends to the end of the file, or creates the file if it does not exist (your content becomes the full file).** With `section`: appends to the end of that heading/block/frontmatter — use `obsidian_get_note` with `format: "document-map"` to discover available targets. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
+    'Append content to a note. **Without `section`: appends to the end of the file, or creates the file if it does not exist (your content becomes the full file).** With `section`: appends to the end of that heading/block/frontmatter (on Local REST API v5.0 and later, content appended to a heading is separated from the section’s existing content by a blank line, except a list item appended to a section that ends in a list and has no sub-headings, which continues that list) — use `obsidian_get_note` with `format: "document-map"` to discover available targets. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -131,6 +131,22 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
         'Change the content to something not already present at the target, or use obsidian_patch_note with `patchOptions.applyIfContentPreexists: true` if a duplicate is intended.',
     },
     {
+      reason: 'heading_outside_section',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'On Local REST API v5.0 and later, content appended to a heading carries a heading at or above that section’s own level, which would have to sit outside the section.',
+      recovery:
+        'Append the heading at the parent section or at the end of the note (no `section`), or write it one level below the target section or deeper.',
+    },
+    {
+      reason: 'patch_rejected',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The section exists but the plugin refused the content for it — table rows for a block that is not a table, a row with the wrong cell count, a frontmatter value that cannot merge, or content of the wrong shape.',
+      recovery:
+        'Read the target with obsidian_get_note format section, then send content that fits it — rows matching the table columns, or a value of the field’s own type.',
+    },
+    {
       reason: 'path_is_directory',
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
@@ -165,7 +181,6 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
         operation: 'append',
         targetType: input.section.type,
         target: input.section.target,
-        targetDelimiter: input.section.type === 'heading' ? '::' : undefined,
         createTargetIfMissing: input.createTargetIfMissing,
         contentType: input.contentType,
       });

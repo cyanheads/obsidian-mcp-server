@@ -6,10 +6,18 @@
  * @module tests/tools/obsidian-append-to-note.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianAppendToNote } from '@/mcp-server/tools/definitions/obsidian-append-to-note.tool.js';
-import { documentMapV2, repeatKey, setupHarness } from '../helpers.js';
+import {
+  documentMapV2,
+  instructionOf,
+  noteJson,
+  repeatKey,
+  servePluginVersion,
+  setupHarness,
+} from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -95,16 +103,68 @@ describe('obsidian_append_to_note (whole file)', () => {
 });
 
 describe('obsidian_append_to_note (section)', () => {
-  it('PATCHes with operation=append and reports both sizes', async () => {
+  it('PATCHes a 2.0 append instruction on plugin v5.x and reports both sizes', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(200));
+    servePluginVersion(pool, '5.2.0');
     pool
       .intercept({ path: '/vault/Note.md', method: 'GET' })
       .reply(200, documentMapV2({ Daily: {} }));
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, noteJson('Note.md', '# Daily\nNotes for today.\n'));
+
+    let instruction: Record<string, unknown> = {};
+    pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
+      instruction = instructionOf(opts);
+      return { statusCode: 200, data: '' };
+    });
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(218));
+
+    const out = await obsidianAppendToNote.handler(
+      obsidianAppendToNote.input.parse({
+        target: { type: 'path', path: 'Note.md' },
+        section: { type: 'heading', target: 'Daily' },
+        content: '- new task',
+        createTargetIfMissing: true,
+      }),
+      createMockContext({ errors: obsidianAppendToNote.errors }),
+    );
+
+    expect(instruction).toEqual({
+      targetType: 'heading',
+      target: ['Daily'],
+      operation: 'append',
+      content: '- new task',
+      createTargetIfMissing: true,
+      rejectIfContentPreexists: true,
+    });
+    expect(out).toEqual({
+      path: 'Note.md',
+      sectionTargeted: true,
+      sectionTarget: 'Daily',
+      created: false,
+      previousSizeInBytes: 200,
+      currentSizeInBytes: 218,
+    });
+  });
+
+  it('PATCHes with 1.x headers on plugin v4.x', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(200));
+    servePluginVersion(pool, '4.2.0');
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, { headings: ['Daily'], blocks: [], frontmatterFields: [] });
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, noteJson('Note.md', '# Daily\n- monday\n'));
 
     let seenHeaders: Record<string, string> = {};
+    let seenBody = '';
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
       seenHeaders = (opts.headers as Record<string, string>) ?? {};
+      seenBody = opts.body ?? '';
       return { statusCode: 200, data: '' };
     });
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(218));
@@ -123,6 +183,7 @@ describe('obsidian_append_to_note (section)', () => {
     expect(seenHeaders['create-target-if-missing'] ?? seenHeaders['Create-Target-If-Missing']).toBe(
       'true',
     );
+    expect(seenBody).toBe('- new task');
     expect(out).toEqual({
       path: 'Note.md',
       sectionTargeted: true,
@@ -141,14 +202,17 @@ describe('obsidian_append_to_note (section)', () => {
   it('expands a bare heading leaf to its full path and reports the resolved target', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(200));
+    servePluginVersion(pool, '5.2.0');
     pool
       .intercept({ path: '/vault/Note.md', method: 'GET' })
       .reply(200, documentMapV2({ Sandbox: { 'Section A': {} } }));
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, noteJson('Note.md', '# Sandbox\n## Section A\n- old task\n'));
 
-    let seenTarget = '';
+    let seenTarget: unknown;
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
-      const headers = (opts.headers as Record<string, string>) ?? {};
-      seenTarget = decodeURIComponent(headers.target ?? headers.Target ?? '');
+      seenTarget = instructionOf(opts).target;
       return { statusCode: 200, data: '' };
     });
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(212));
@@ -162,14 +226,67 @@ describe('obsidian_append_to_note (section)', () => {
       createMockContext({ errors: obsidianAppendToNote.errors }),
     );
 
-    expect(seenTarget).toBe('Sandbox::Section A');
+    expect(seenTarget).toEqual(['Sandbox', 'Section A']);
     expect(out.sectionTarget).toBe('Sandbox::Section A');
+  });
+
+  /**
+   * Plugin v5.x separates a plain heading append from the section's content by
+   * a blank line; a list item appended to a section ending in a list goes out
+   * as a `within` splice on that list instead, so the list stays tight.
+   */
+  it('continues the list a section ends with, on both surfaces (plugin v5.x)', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(30));
+    servePluginVersion(pool, '5.2.0');
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, documentMapV2({ Log: { Today: {} } }));
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, noteJson('Note.md', '# Log\n## Today\n- one\n- two\n'));
+    let instruction: Record<string, unknown> = {};
+    pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
+      instruction = instructionOf(opts);
+      return { statusCode: 200, data: '' };
+    });
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(38));
+
+    const res = await runToolContract(obsidianAppendToNote, {
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Today' },
+      content: '- three\n',
+      createTargetIfMissing: true,
+    });
+
+    expect(instruction).toEqual({
+      targetType: 'heading',
+      target: ['Log', 'Today'],
+      operation: 'append',
+      scope: 'content',
+      within: -1,
+      content: '\n- three',
+      rejectIfContentPreexists: true,
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toEqual({
+      path: 'Note.md',
+      sectionTargeted: true,
+      sectionTarget: 'Log::Today',
+      created: false,
+      previousSizeInBytes: 30,
+      currentSizeInBytes: 38,
+    });
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('Section targeted:* true → Log::Today');
+    expect(text).toMatch(/Size:\*?\s*30 → 38 bytes/);
   });
 
   it('rejects a root-level heading that repeats in the note without appending', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(200));
     // # Daily / - monday / # Daily / - tuesday
+    servePluginVersion(pool, '5.2.0');
     pool
       .intercept({ path: '/vault/Note.md', method: 'GET' })
       .reply(200, documentMapV2({ Daily: {}, [repeatKey('Daily', 1)]: {} }));
@@ -187,6 +304,36 @@ describe('obsidian_append_to_note (section)', () => {
     ).rejects.toMatchObject({
       data: { reason: 'ambiguous_section', candidates: ['Daily', 'Daily'] },
     });
+  });
+
+  it('rejects a heading that would leave the section as heading_outside_section on both surfaces (plugin v5.x)', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(200));
+    servePluginVersion(pool, '5.2.0');
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, documentMapV2({ Daily: { Tasks: {} } }));
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, noteJson('Note.md', '# Daily\n## Tasks\n- a\n'));
+    // No PATCH intercept — a write here would surface "No mock intercept".
+
+    const res = await runToolContract(obsidianAppendToNote, {
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Daily::Tasks' },
+      content: '## Notes\ntext',
+    });
+
+    expect(res.isError).toBe(true);
+    const { error } = res.structuredContent as {
+      error: { code: number; data: { reason: string; recovery: { hint: string } } };
+    };
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data.reason).toBe('heading_outside_section');
+    expect(error.data.recovery.hint).toContain("obsidian_append_to_note with `section: 'Daily'`");
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain("Heading '## Notes' in the content is level 2");
+    expect(text).toContain('heading_outside_section');
   });
 
   it('throws note_missing when the pre-write HEAD shows the file does not exist', async () => {

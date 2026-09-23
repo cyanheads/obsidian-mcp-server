@@ -20,8 +20,30 @@ import {
 import { httpStatusToErrorCode, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Agent, type Dispatcher, type RequestInit, fetch as undiciFetch } from 'undici';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
+import {
+  canonicalContent,
+  flattenDocumentMap,
+  flattenHeadingTree,
+  hasIntegerKey,
+  inNoteOrder,
+  isIntegerKey,
+  type PatchFormat,
+  patchFormatFor,
+  type RawDocumentMapV2,
+  relativeHeadingLevels,
+  v1PatchHeaders,
+  v2Instruction,
+  type Within,
+} from './patch-instruction.js';
 import { PathPolicy } from './path-policy.js';
-import { listHeadingPaths } from './section-extractor.js';
+import {
+  atxHeadingMarkers,
+  firstBlockKind,
+  isIsolatedBlockId,
+  listHeadingPaths,
+  sectionBody,
+  sectionLevel,
+} from './section-extractor.js';
 import type {
   ApiExtension,
   DocumentMap,
@@ -31,7 +53,7 @@ import type {
   ObsidianCommand,
   ObsidianTag,
   OmnisearchHit,
-  PatchHeaders,
+  PatchInstruction,
   StructuredSearchHit,
   TextSearchHit,
   VaultStatus,
@@ -116,21 +138,6 @@ interface ResolvedSpan {
   subject: 'body' | 'filename';
 }
 
-/**
- * Upstream document map as markdown-patch 2.0 serializes it. Its `headings`
- * nest by containment, and every repeat of a sibling heading keeps its own key
- * (see `DUPLICATE_SUFFIX`), so the tree holds each occurrence that the flat
- * 1.x map collapses. Plugin v4.x predates `Markdown-Patch-Version` and answers
- * with the flat 1.x `string[]` whatever the header asks for.
- */
-interface RawDocumentMapV2 {
-  headings: HeadingTree | string[];
-}
-
-interface HeadingTree {
-  [text: string]: HeadingTree;
-}
-
 interface RawStructuredSearchHit {
   filename: string;
   result: unknown;
@@ -174,33 +181,20 @@ const DOCUMENT_MAP_ACCEPT = 'application/vnd.olrapi.document-map+json';
 const JSONLOGIC_CT = 'application/vnd.olrapi.jsonlogic+json';
 
 /**
- * The markdown-patch wire format this client speaks, pinned explicitly on every
- * request whose shape depends on it: header-driven PATCH targeting and the
- * document map.
- *
- * Local REST API v5.0.0 made format 2.0 the default, rejects header-driven
- * PATCH targeting outright unless a version is pinned, and returns the document
- * map's `headings` as a nested tree instead of `::`-joined paths. Plugin v4.x
- * predates the header and only ever reads named headers it knows, so the pin is
- * inert there — one unconditional value covers the whole supported plugin
- * range, and no future default flip can move the format underneath this client.
- *
- * Format 1.x carries `Deprecation: true; sunset-version="6.0"` upstream; the
- * migration to 2.0 is tracked in #102.
+ * The header naming the markdown-patch format a request speaks, sent on every
+ * request whose shape depends on it: section-targeted PATCHes and the document
+ * map. Which value goes out is negotiated per plugin install
+ * (`#markdownPatchFormat`), and stating it rather than inheriting the plugin's
+ * default keeps a future default flip from moving the format underneath this
+ * client. Plugin v4.x predates the header and ignores it.
  */
 const MARKDOWN_PATCH_VERSION_HEADER = 'Markdown-Patch-Version';
-const MARKDOWN_PATCH_VERSION = '1';
+
+/** Content type of a markdown-patch 2.0 JSON instruction body. */
+const PATCH_INSTRUCTION_CT = 'application/vnd.olrapi.patch-instruction+json';
 
 /** Delimiter joining ancestor headings into a single PATCH heading target. */
 const HEADING_DELIMITER = '::';
-
-/**
- * The suffix markdown-patch 2.0 appends to the key of the second and later
- * occurrences of a sibling heading: U+FC750, then the occurrence index minus
- * one in hex, each digit written as one of U+F6440–U+F644F. The plugin refuses
- * a note whose own heading text ends this way, so stripping it is exact.
- */
-const DUPLICATE_SUFFIX = /\u{FC750}[\u{F6440}-\u{F644F}]+$/u;
 
 /**
  * Methods safe to retry on transient errors. POST/PATCH are excluded — a
@@ -265,6 +259,13 @@ export class ObsidianService {
    * again rather than inheriting a transient outage forever.
    */
   #capabilities: Promise<VaultStatus | undefined> | undefined;
+
+  /**
+   * The markdown-patch format the installed plugin speaks, read once from its
+   * capability report. Holds the in-flight promise so concurrent writes share
+   * one read; a failed read is evicted so the next write tries again.
+   */
+  #patchFormat: Promise<PatchFormat> | undefined;
 
   /**
    * @param config - Validated server config (api key, base URL, TLS, timeouts).
@@ -434,25 +435,41 @@ export class ObsidianService {
   }
 
   /**
-   * Apply a header-targeted PATCH. Returns the section locator the edit was
-   * actually applied to — identical to `headers.target` unless a bare heading
-   * leaf was expanded to its full `Parent::Child` path (see
-   * `#resolveHeadingTarget`), which callers echo back so an agent can see where
-   * the write landed.
+   * Apply a section-targeted PATCH in the markdown-patch format the plugin
+   * speaks: a 2.0 JSON instruction on Local REST API 5.x and later, 1.x
+   * request headers on 4.x and for the table-row writes 2.0 cannot express
+   * (`#wireFormat`). Returns the section locator the edit was actually
+   * applied to — identical to `instruction.target` unless a bare heading leaf
+   * was expanded to its full `Parent::Child` path (see `#resolveHeadingTarget`),
+   * which callers echo back so an agent can see where the write landed.
    */
   async patchNote(
     ctx: Context,
     target: NoteTarget,
     content: string,
-    headers: PatchHeaders,
+    instruction: PatchInstruction,
   ): Promise<string> {
     const safe = await this.#gateAsWrite(ctx, target);
-    const resolvedTarget = await this.#resolveHeadingTarget(ctx, safe, headers);
     const url = this.#targetToPath(safe);
+    const format = await this.#wireFormat(ctx, safe, instruction);
+    const resolvedTarget = await this.#resolveHeadingTarget(ctx, safe, instruction, format);
+    const resolved = { ...instruction, target: resolvedTarget };
+    if (format === '1') {
+      await this.#request(ctx, url, {
+        method: 'PATCH',
+        headers: v1PatchHeaders(resolved),
+        body: content,
+      });
+      return resolvedTarget;
+    }
+    const continuation = await this.#listContinuation(ctx, safe, resolved, content);
+    const body = continuation
+      ? v2Instruction(resolved, continuation.content, continuation.within)
+      : v2Instruction(resolved, await this.#sectionRelativeContent(ctx, safe, resolved, content));
     await this.#request(ctx, url, {
       method: 'PATCH',
-      headers: this.#buildPatchHeaders({ ...headers, target: resolvedTarget }),
-      body: content,
+      headers: { 'Content-Type': PATCH_INSTRUCTION_CT, [MARKDOWN_PATCH_VERSION_HEADER]: '2' },
+      body: JSON.stringify(body),
     });
     return resolvedTarget;
   }
@@ -750,18 +767,190 @@ export class ObsidianService {
     return (await res.json()) as NoteJson;
   }
 
-  /** Raw document-map fetch — bypasses path-policy. Caller must gate. */
+  /**
+   * Raw document-map fetch — bypasses path-policy. Caller must gate. On 2.0 the
+   * nested map is flattened to the 1.x shape this server has always returned.
+   *
+   * Headings are listed in note order. Both formats build their headings from
+   * object keys, so JavaScript lists an integer-like name (`2025`) ahead of its
+   * siblings — the 2.0 tree at every depth, the 1.x map at the top level. Only
+   * then is the note read, and its heading scan (`listHeadingPaths`, the same
+   * parse the map uses) supplies the order.
+   */
   async #rawGetDocumentMap(ctx: Context, target: NoteTarget): Promise<DocumentMap> {
     const url = this.#targetToPath(target);
+    const format = await this.#markdownPatchFormat(ctx);
+    if (format === '1') {
+      const map = await this.#fetchDocumentMap<DocumentMap>(ctx, url, format);
+      if (!map.headings.some(isIntegerKey)) return map;
+      return { ...map, headings: await this.#inNoteOrder(ctx, target, map.headings) };
+    }
+    const raw = await this.#fetchDocumentMap<RawDocumentMapV2>(ctx, url, format);
+    const map = flattenDocumentMap(raw);
+    if (!hasIntegerKey(raw.headings)) return map;
+    return { ...map, headings: await this.#inNoteOrder(ctx, target, map.headings) };
+  }
+
+  /** `paths` in the order the note's own headings run, read from the note. */
+  async #inNoteOrder(ctx: Context, target: NoteTarget, paths: string[]): Promise<string[]> {
+    const { content } = await this.#rawGetNoteJson(ctx, target);
+    return inNoteOrder(paths, listHeadingPaths(content));
+  }
+
+  /** The document map in `format`'s own shape: flat `::`-joined paths for 1.x, the nested tree for 2.0. */
+  async #fetchDocumentMap<T extends DocumentMap | RawDocumentMapV2>(
+    ctx: Context,
+    url: string,
+    format: PatchFormat,
+  ): Promise<T> {
     const res = await this.#request(ctx, url, {
       method: 'GET',
-      headers: {
-        Accept: DOCUMENT_MAP_ACCEPT,
-        [MARKDOWN_PATCH_VERSION_HEADER]: MARKDOWN_PATCH_VERSION,
-      },
+      headers: { Accept: DOCUMENT_MAP_ACCEPT, [MARKDOWN_PATCH_VERSION_HEADER]: format },
       noteRead: true,
     });
-    return (await res.json()) as DocumentMap;
+    return (await res.json()) as T;
+  }
+
+  /**
+   * The markdown-patch format the installed plugin speaks, from `versions.self`
+   * in its `GET /` capability report: 2.0 from Local REST API 5.0 on, 1.x
+   * before. Read once per service. A report that cannot be read fails the
+   * calling write with its classified error — the format is never guessed.
+   *
+   * The report is shared with `#vaultCapabilities`: whichever reads it first
+   * serves the other.
+   */
+  async #markdownPatchFormat(ctx: Context): Promise<PatchFormat> {
+    this.#patchFormat ??= this.#negotiatePatchFormat(ctx);
+    const pending = this.#patchFormat;
+    try {
+      return await pending;
+    } catch (err) {
+      if (this.#patchFormat === pending) this.#patchFormat = undefined;
+      throw err;
+    }
+  }
+
+  /**
+   * The format one PATCH goes out in: the plugin's (`#markdownPatchFormat`),
+   * except for two table-row writes that 2.0 cannot express, which go out as
+   * 1.x — plugin 5.x still accepts it.
+   *
+   * - Rows under a heading. 2.0 takes table rows only through a block target
+   *   (a heading write carries its payload in `content`, never `value`); the
+   *   1.x engine appends them to the table that ends the section.
+   * - Rows through an isolated block id — `^id` on its own line after a blank
+   *   line, the way Obsidian places a table's id. 2.0 resolves the id to that
+   *   marker line's own paragraph rather than the table above it, so the write
+   *   fails upstream with "block … is not a table" (markdown-patch 2.0.0,
+   *   `patchTableRows`); the 1.x engine resolves it to the table. Telling the
+   *   shapes apart needs the note, so a block row write on 2.0 reads it once.
+   */
+  async #wireFormat(
+    ctx: Context,
+    target: NoteTarget,
+    instruction: PatchInstruction,
+  ): Promise<PatchFormat> {
+    const format = await this.#markdownPatchFormat(ctx);
+    if (
+      format === '1' ||
+      instruction.targetType === 'frontmatter' ||
+      instruction.contentType !== 'json'
+    ) {
+      return format;
+    }
+    if (instruction.targetType === 'heading') return '1';
+    const { content } = await this.#rawGetNoteJson(ctx, target);
+    return isIsolatedBlockId(content, instruction.target) ? '1' : format;
+  }
+
+  async #negotiatePatchFormat(ctx: Context): Promise<PatchFormat> {
+    const status = (await this.#capabilities) ?? (await this.getStatus(ctx));
+    this.#capabilities ??= Promise.resolve(status);
+    return patchFormatFor(status.versions?.self);
+  }
+
+  /**
+   * The body block a 2.0 heading append or prepend continues, with the content
+   * reduced for a literal splice — or `undefined` for every other write, which
+   * goes out as a plain content write.
+   *
+   * 2.0 separates a plain heading append from the section's last block with a
+   * blank line (a prepend from its first), which turns a tight list loose when
+   * the content is one more item (issue #145). When the content opens with a
+   * list item and the section's own body ends (prepend: opens) with a list,
+   * the write addresses that list `within` the section, and 2.0 splices the
+   * item flush against it, as 1.x placed it. The write stays plain when:
+   *
+   * - the content carries an ATX heading, which a literal splice would neither
+   *   re-level nor check against the section (`#sectionRelativeContent`);
+   * - an append's section has sub-headings, below which a plain append lands;
+   * - the section already holds the content and duplicates are refused — a
+   *   `within` write searches only the list, the plain one the whole section.
+   *
+   * The note is read only once the content qualifies.
+   */
+  async #listContinuation(
+    ctx: Context,
+    target: NoteTarget,
+    instruction: PatchInstruction,
+    content: string,
+  ): Promise<{ content: string; within: Within } | undefined> {
+    const { operation } = instruction;
+    if (instruction.targetType !== 'heading' || instruction.contentType === 'json') return;
+    if (operation === 'replace') return;
+    const reduced = canonicalContent(content);
+    if (firstBlockKind(reduced) !== 'list' || atxHeadingMarkers(reduced).markers.length > 0) return;
+
+    const { content: note } = await this.#rawGetNoteJson(ctx, target);
+    const body = sectionBody(note, instruction.target);
+    if (!body || (operation === 'append' && body.subsections)) return;
+    if ((operation === 'append' ? body.blocks.at(-1) : body.blocks[0]) !== 'list') return;
+    if (!instruction.applyIfContentPreexists && body.content.includes(reduced.trim())) return;
+    return { content: reduced, within: operation === 'append' ? -1 : 0 };
+  }
+
+  /**
+   * Heading content with its `#` levels rewritten to the section-relative ones
+   * markdown-patch 2.0 reads (see `relativeHeadingLevels`), so the note gets
+   * the levels the caller wrote, as it did under 1.x. The section's level comes
+   * from the note itself, read only when the content carries an ATX heading.
+   * Every other payload passes through as written.
+   */
+  async #sectionRelativeContent(
+    ctx: Context,
+    target: NoteTarget,
+    instruction: PatchInstruction,
+    content: string,
+  ): Promise<string> {
+    if (instruction.targetType !== 'heading' || instruction.contentType === 'json') return content;
+    const fragment = atxHeadingMarkers(content);
+    if (fragment.markers.length === 0) return content;
+
+    const { content: note } = await this.#rawGetNoteJson(ctx, target);
+    const level = sectionLevel(note, instruction.target);
+    const relative = relativeHeadingLevels(fragment, level);
+    if (relative.ok) return relative.content;
+
+    /**
+     * The recovery names the calls that do work, so it is built here: the
+     * parent section and the target's level are only known from this note.
+     */
+    const display = displayPath(this.#targetToPath(target));
+    const parent = instruction.target.split(HEADING_DELIMITER).slice(0, -1).join(HEADING_DELIMITER);
+    const elsewhere = parent
+      ? `Append it to the parent section with obsidian_append_to_note with \`section: '${parent}'\`, or to the end of the note with obsidian_append_to_note without \`section\``
+      : 'Append it to the end of the note with obsidian_append_to_note without `section`';
+    throw validationError(
+      `Heading '${relative.heading}' in the content is level ${relative.level}, so it cannot sit inside section '${instruction.target}' (level ${level}) of ${display}: a section write keeps its content inside the section.`,
+      {
+        path: display,
+        reason: 'heading_outside_section',
+        recovery: {
+          hint: `${elsewhere}; to keep it inside '${instruction.target}', write it at level ${level + 1} or deeper.`,
+        },
+      },
+    );
   }
 
   /**
@@ -778,27 +967,27 @@ export class ObsidianService {
    * in the note is listed once, at its last occurrence — the PATCH would land
    * on the last repeat while a section read returns the first. A write to a
    * repeated path is rejected as ambiguous. The count comes from the plugin's
-   * own parse (`#headingIndex`), not a local scan: the two disagree on
-   * headings inside list items, HTML blocks, and setext underlines, and a local
-   * count there rejected writes the PATCH would have landed correctly.
+   * own parse (`#headingIndex`) wherever the plugin serves one, so the map the
+   * PATCH resolves against is also the one that counts its repeats.
    */
   async #resolveHeadingTarget(
     ctx: Context,
     target: NoteTarget,
-    headers: PatchHeaders,
+    instruction: PatchInstruction,
+    format: PatchFormat,
   ): Promise<string> {
-    if (headers.targetType !== 'heading') return headers.target;
-    const { headings, occurrences } = await this.#headingIndex(ctx, target);
-    const resolved = headers.target.includes(HEADING_DELIMITER)
-      ? headers.target
-      : this.#expandHeadingLeaf(target, headers.target, headings);
+    if (instruction.targetType !== 'heading') return instruction.target;
+    const { headings, occurrences } = await this.#headingIndex(ctx, target, format);
+    const resolved = instruction.target.includes(HEADING_DELIMITER)
+      ? instruction.target
+      : this.#expandHeadingLeaf(target, instruction.target, headings);
 
     const repeats = occurrences.filter((p) => p === resolved);
     if (repeats.length <= 1) return resolved;
 
     const display = displayPath(this.#targetToPath(target));
     const named =
-      resolved === headers.target ? `'${resolved}'` : `'${headers.target}' (${resolved})`;
+      resolved === instruction.target ? `'${resolved}'` : `'${instruction.target}' (${resolved})`;
     throw conflict(
       `Heading ${named} occurs ${repeats.length} times in ${display}, so a section write cannot tell which one to edit.`,
       {
@@ -818,28 +1007,35 @@ export class ObsidianService {
    * (what a leaf expands against), and `occurrences` lists every heading,
    * repeats included (what the repeat count reads).
    *
-   * Both come from the markdown-patch 2.0 document map, whose tree keeps a key
-   * per repeat; flattened with the repeat suffixes stripped and collapsed, it
-   * is the 1.x `headings` array exactly, since both formats read the same
-   * parser's top-level heading tokens. Plugin v4.x ignores the version header
-   * and answers with the 1.x array, which cannot count repeats, so there the
-   * note body is fetched and scanned locally (`listHeadingPaths`).
+   * On 2.0 both come from the document map, whose tree keeps a key per repeat;
+   * flattened with the repeat suffixes stripped and collapsed, it is the 1.x
+   * `headings` array exactly, since both formats read the same parser's
+   * top-level heading tokens. Plugin v4.x serves only the 1.x array, which
+   * cannot count repeats, so there the note body is fetched and scanned
+   * locally (`listHeadingPaths`), which finds headings with the same `marked`
+   * lexing the map does.
+   *
+   * Both lists run in note order, as `#rawGetDocumentMap` explains, so the
+   * `candidates` an ambiguity error names, and the first one its hint offers,
+   * follow the note.
    */
   async #headingIndex(
     ctx: Context,
     target: NoteTarget,
+    format: PatchFormat,
   ): Promise<{ headings: string[]; occurrences: string[] }> {
-    const res = await this.#request(ctx, this.#targetToPath(target), {
-      method: 'GET',
-      headers: { Accept: DOCUMENT_MAP_ACCEPT, [MARKDOWN_PATCH_VERSION_HEADER]: '2' },
-      noteRead: true,
-    });
-    const map = (await res.json()) as RawDocumentMapV2;
-    if (Array.isArray(map.headings)) {
+    const url = this.#targetToPath(target);
+    if (format === '1') {
+      const map = await this.#fetchDocumentMap<DocumentMap>(ctx, url, format);
       const { content } = await this.#rawGetNoteJson(ctx, target);
-      return { headings: map.headings, occurrences: listHeadingPaths(content) };
+      const occurrences = listHeadingPaths(content);
+      return { headings: inNoteOrder(map.headings, occurrences), occurrences };
     }
-    const occurrences = flattenHeadingTree(map.headings);
+    const map = await this.#fetchDocumentMap<RawDocumentMapV2>(ctx, url, format);
+    const flat = flattenHeadingTree(map.headings);
+    const occurrences = hasIntegerKey(map.headings)
+      ? await this.#inNoteOrder(ctx, target, flat)
+      : flat;
     return { headings: [...new Set(occurrences)].filter(Boolean), occurrences };
   }
 
@@ -891,31 +1087,6 @@ export class ObsidianService {
         return `/periodic/${target.period}/`;
       }
     }
-  }
-
-  #buildPatchHeaders(p: PatchHeaders): Record<string, string> {
-    const headers: Record<string, string> = {
-      [MARKDOWN_PATCH_VERSION_HEADER]: MARKDOWN_PATCH_VERSION,
-      Operation: p.operation,
-      'Target-Type': p.targetType,
-      Target: encodeURIComponent(p.target),
-      'Content-Type': p.contentType === 'json' ? 'application/json' : 'text/markdown',
-    };
-    if (p.targetDelimiter) headers['Target-Delimiter'] = p.targetDelimiter;
-    if (p.createTargetIfMissing) headers['Create-Target-If-Missing'] = 'true';
-    /**
-     * Sense inversion: markdown-patch 1.0 (shipped with Local REST API v4.0.0)
-     * renamed `Apply-If-Content-Preexists` to `Reject-If-Content-Preexists`
-     * and flipped the default — patches now apply regardless of duplicates
-     * unless the caller opts into rejection. We keep `applyIfContentPreexists`
-     * on the public schema for caller stability and translate here: a falsy
-     * value (the public default) sends the new Reject header to preserve the
-     * historical idempotent-by-default behavior. Replace operations are
-     * exempt at the plugin layer regardless of this flag.
-     */
-    if (!p.applyIfContentPreexists) headers['Reject-If-Content-Preexists'] = 'true';
-    if (p.trimTargetWhitespace) headers['Trim-Target-Whitespace'] = 'true';
-    return headers;
   }
 
   /**
@@ -1103,6 +1274,8 @@ export class ObsidianService {
    * The cache never expires, and does not need to: it is read only to word an
    * error on a call that already failed. Installing the missing extension
    * mid-session makes the route resolve, so no 404 arrives to be classified.
+   * A report the markdown-patch negotiation already read (`#markdownPatchFormat`)
+   * seeds it, so the two share one `GET /`.
    */
   async #vaultCapabilities(ctx: Context): Promise<VaultStatus | undefined> {
     this.#capabilities ??= this.#probeCapabilities(ctx);
@@ -1188,6 +1361,18 @@ export class ObsidianService {
       ...callerIdentifier(path),
       ...(reason !== undefined ? { reason, ...ctx.recoveryFor(reason) } : {}),
     });
+    const contentPreexists = () =>
+      validationError(
+        `The supplied content already appears at the target in ${display}. Pass \`applyIfContentPreexists: true\` to force-apply, or change the content.`,
+        data('content_preexists'),
+        { cause },
+      );
+    const sectionTargetMissing = () =>
+      validationError(
+        `Section target not found in ${display}. Use \`obsidian_get_note\` with \`format: "document-map"\` to list available headings, blocks, and frontmatter fields, then retry with one of those locators.`,
+        data('section_target_missing'),
+        { cause },
+      );
 
     switch (res.status) {
       case 401:
@@ -1203,6 +1388,19 @@ export class ObsidianService {
           { cause },
         );
       case 404: {
+        /**
+         * A markdown-patch 2.0 PATCH whose section is not in the note answers
+         * 404 like a missing note, told apart only by the engine's wording —
+         * as does a `within` write whose body block the note no longer has.
+         * The 1.x format reports the same miss as a 400 (below).
+         */
+        if (
+          /\bcould not resolve (?:heading|block|frontmatter) target\b|`within` index -?\d+ is out of range\b/i.test(
+            upstreamMsg,
+          )
+        ) {
+          throw sectionTargetMissing();
+        }
         if (path.startsWith('/active/')) {
           throw notFound(
             'No file is currently active in Obsidian — open a file in the app first.',
@@ -1288,22 +1486,26 @@ export class ObsidianService {
         // Content-preexists is a more specific case nested inside the broader
         // "could not be applied" family — branch on it first so retries with
         // identical content surface the right reason and recovery (toggle
-        // `applyIfContentPreexists`) instead of misleading section-miss copy.
+        // `applyIfContentPreexists`) instead of the general patch-rejection copy.
         if (/content-already-preexists-in-target/i.test(upstreamMsg)) {
-          throw validationError(
-            `The supplied content already appears at the target in ${display}. Pass \`applyIfContentPreexists: true\` to force-apply, or change the content.`,
-            data('content_preexists'),
-            { cause },
-          );
+          throw contentPreexists();
         }
-        // The Local REST API returns a "could not be applied to the target
-        // content" / "invalid-target" message when a PATCH names a section that
-        // doesn't exist. Translate to actionable guidance.
-        const isTargetMiss = /\bcould not be applied\b|\binvalid-target\b/i.test(upstreamMsg);
-        if (isTargetMiss) {
+        // The 1.x engine names a section the note lacks with the `invalid-target`
+        // reason token; 2.0 answers the same miss with a 404 (above).
+        if (/\binvalid-target\b/i.test(upstreamMsg)) {
+          throw sectionTargetMissing();
+        }
+        /**
+         * Every other patch refusal: the content does not fit a target that
+         * exists. Each shape gets this file's own sentence, picked from the 1.x
+         * reason token or the 2.0 engine's wording; the upstream text itself is
+         * read only to choose, per the containment invariant above.
+         */
+        const rejection = patchRejection(upstreamMsg, body?.errorCode);
+        if (rejection !== undefined) {
           throw validationError(
-            `Section target not found in ${display}. Use \`obsidian_get_note\` with \`format: "document-map"\` to list available headings, blocks, and frontmatter fields, then retry with one of those locators.`,
-            data('section_target_missing'),
+            `The Local REST API could not apply the patch to ${display}${rejection ? `: ${rejection}` : ''}.`,
+            data('patch_rejected'),
             { cause },
           );
         }
@@ -1325,6 +1527,10 @@ export class ObsidianService {
         );
       }
       default: {
+        // markdown-patch 2.0 refuses duplicate content with a 409; 1.x with the 400 above.
+        if (res.status === 409 && /\balready contains the content\b/i.test(upstreamMsg)) {
+          throw contentPreexists();
+        }
         /**
          * Unhandled 4xx and all 5xx. `httpStatusToErrorCode` supplies the same
          * canonical mapping `httpErrorFromResponse` would (the whole 5xx range
@@ -1401,19 +1607,6 @@ export function encodeVaultPath(path: string): string {
     }
   }
   return segments.map((seg) => encodeURIComponent(seg)).join('/');
-}
-
-/**
- * Every heading in a markdown-patch 2.0 heading tree as its `::`-joined full
- * path, in tree order, one entry per occurrence. A top-level untitled heading
- * is `""`, and its children read `::Child`, as the 1.x map writes them.
- */
-function flattenHeadingTree(tree: HeadingTree, parent?: string): string[] {
-  return Object.entries(tree).flatMap(([key, children]) => {
-    const text = key.replace(DUPLICATE_SUFFIX, '');
-    const path = parent === undefined ? text : `${parent}${HEADING_DELIMITER}${text}`;
-    return [path, ...flattenHeadingTree(children, path)];
-  });
 }
 
 /**
@@ -1704,6 +1897,41 @@ function atLeastVersion(version: string | undefined, floor: readonly number[]): 
 /** The period segment of a `/periodic/…` request path, for message copy. */
 function periodOf(urlPath: string): string {
   return /^\/periodic\/(daily|weekly|monthly|quarterly|yearly)\//.exec(urlPath)?.[1] ?? 'periodic';
+}
+
+/**
+ * Why the plugin refused a patch, in this file's words: `''` for a refusal it
+ * cannot place more precisely, `undefined` when the response is not a patch
+ * refusal at all. A refusal is the plugin's `PatchFailed` (40080, both
+ * formats) or 2.0's `InvalidPatchInstruction` (40081), recognized by code or by
+ * `PatchFailed`'s fixed wording. The detail is chosen from the 1.x engine's
+ * reason token or the 2.0 engine's message; neither is ever returned.
+ */
+function patchRejection(upstreamMsg: string, errorCode: unknown): string | undefined {
+  const refused =
+    errorCode === 40080 || errorCode === 40081 || /\bcould not be applied\b/i.test(upstreamMsg);
+  if (!refused) return;
+  if (/\bis not a table\b/i.test(upstreamMsg)) {
+    return 'the target block is not a table, so it cannot take table rows';
+  }
+  /**
+   * The 1.x engine reports a row whose cell count does not match the table
+   * under this same token — its table writer rethrows every failure as "not a
+   * table" — so the sentence names both.
+   */
+  if (/content-type-invalid-for-target/i.test(upstreamMsg)) {
+    return "the target block is not a table, or a row's cell count does not match the table's column count";
+  }
+  if (/table-content-incorrect-column-count|\bcell\(s\);.*\bcolumn\(s\)/i.test(upstreamMsg)) {
+    return "a row's cell count does not match the table's column count";
+  }
+  if (/content-not-mergeable|\bnot mergeable\b|\bcannot be merged\b/i.test(upstreamMsg)) {
+    return "the value cannot be merged with the field's current value — append and prepend need two lists, two objects, or two strings";
+  }
+  if (errorCode === 40081 || /\bcontent-type-invalid\b/i.test(upstreamMsg)) {
+    return 'the content does not have the shape this target takes';
+  }
+  return '';
 }
 
 /** The request path with its query string dropped — the route alone. */
