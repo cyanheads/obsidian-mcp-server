@@ -33,7 +33,14 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { makeTestConfig, mockResponse, setupHarness, type TestHarness } from '../helpers.js';
+import {
+  makeTestConfig,
+  mockResponse,
+  nodeFetchRejection,
+  sequencedFetch,
+  setupHarness,
+  type TestHarness,
+} from '../helpers.js';
 
 const harness = setupHarness();
 let pool: TestHarness['pool'];
@@ -438,6 +445,188 @@ describe('#throwForStatus / the requested URL rides the cause (issue #122)', () 
 
     expect(causeOf(err)).toContain('https://obsidian.test//tags/');
     expect(err.message).toBe('Not found: /tags/');
+  });
+});
+
+/**
+ * Issue #130. The caller's identifier rides `data` under the name of the input
+ * it echoes: `path` on the routes that address a note, `commandId` on a
+ * command, and nothing at all on a route that carries no caller identifier —
+ * where `path` used to hold the literal route string. The key follows the
+ * route, never the status branch, so every branch is driven on every route.
+ *
+ * Each route is scripted with four identical replies: the GET routes are
+ * retry-safe, and a 5xx there is transient, so the error that reaches the
+ * assertion is the one `withRetry` surfaces after its last attempt.
+ */
+describe('#throwForStatus / the identifier key follows the route (issue #130)', () => {
+  const STATUSES = [400, 401, 403, 404, 405, 500] as const;
+
+  type Identifier = { path: string } | { commandId: string } | Record<string, never>;
+
+  const ROUTES: ReadonlyArray<
+    readonly [
+      label: string,
+      method: string,
+      route: (p: string) => boolean,
+      call: () => Promise<unknown>,
+      identifier: Identifier,
+    ]
+  > = [
+    [
+      '/vault/<path>',
+      'POST',
+      (p) => p === '/vault/Folder/x.md',
+      () => service.appendToNote(ctx, { type: 'path', path: 'Folder/x.md' }, 'c'),
+      { path: 'Folder/x.md' },
+    ],
+    [
+      '/open/<path>',
+      'POST',
+      (p) => p.startsWith('/open/'),
+      () => service.openInUi(ctx, 'Folder/x.md'),
+      { path: 'Folder/x.md' },
+    ],
+    [
+      '/active/',
+      'POST',
+      (p) => p === '/active/',
+      () => service.appendToNote(ctx, { type: 'active' }, 'c'),
+      { path: '(active file)' },
+    ],
+    [
+      '/periodic/<period>/<date>/',
+      'POST',
+      (p) => p === '/periodic/daily/2026/04/28/',
+      () =>
+        service.appendToNote(ctx, { type: 'periodic', period: 'daily', date: '2026-04-28' }, 'c'),
+      { path: 'daily note for 2026-04-28' },
+    ],
+    [
+      '/commands/<id>/',
+      'POST',
+      (p) => p === '/commands/app%3Azq7f31-cmd/',
+      () => service.executeCommand(ctx, 'app:zq7f31-cmd'),
+      { commandId: 'app:zq7f31-cmd' },
+    ],
+    ['/commands/', 'GET', (p) => p === '/commands/', () => service.listCommands(ctx), {}],
+    ['/tags/', 'GET', (p) => p === '/tags/', () => service.listTags(ctx), {}],
+    [
+      '/search/',
+      'POST',
+      (p) => p === '/search/',
+      () => service.searchJsonLogic(ctx, { '==': [1, 1] }),
+      {},
+    ],
+    [
+      '/search/simple/',
+      'POST',
+      (p) => p.startsWith('/search/simple/'),
+      () => service.searchText(ctx, 'q'),
+      {},
+    ],
+    ['/', 'GET', (p) => p === '/', () => service.getStatus(ctx), {}],
+  ];
+
+  const CASES = ROUTES.flatMap(([label, ...rest]) =>
+    STATUSES.map((status) => [label, status, ...rest] as const),
+  );
+
+  it.each(CASES)(
+    '%s on HTTP %i carries exactly its own identifier',
+    async (_label, status, method, route, call, identifier) => {
+      for (let i = 0; i < 4; i++) {
+        pool
+          .intercept({ path: route, method })
+          .reply(status, status >= 500 ? POISONED_500 : POISONED_400, {
+            headers: { 'content-type': 'application/json' },
+          });
+      }
+
+      const err = await throwsMcpError(call);
+      const data = err.data as Record<string, unknown>;
+
+      expect(data.path).toBe('path' in identifier ? identifier.path : undefined);
+      expect(data.commandId).toBe('commandId' in identifier ? identifier.commandId : undefined);
+      if (!('path' in identifier)) expect(Object.hasOwn(data, 'path')).toBe(false);
+      if (!('commandId' in identifier)) expect(Object.hasOwn(data, 'commandId')).toBe(false);
+      for (const marker of MARKERS)
+        expect(JSON.stringify(clientSurface(err))).not.toContain(marker);
+    },
+  );
+
+  it('keeps reason, recovery, and the command message on the command_unknown 404', async () => {
+    pool
+      .intercept({ path: '/commands/app%3Azq7f31-cmd/', method: 'POST' })
+      .reply(404, POISONED_400, { headers: { 'content-type': 'application/json' } });
+    const contractCtx = createMockContext({
+      errors: [
+        {
+          reason: 'command_unknown',
+          code: JsonRpcErrorCode.NotFound,
+          when: 'The command ID is not registered.',
+          recovery: 'Call obsidian_list_commands to discover the registered command IDs.',
+        },
+      ],
+    });
+
+    const err = await throwsMcpError(() => service.executeCommand(contractCtx, 'app:zq7f31-cmd'));
+
+    expect(err.message).toBe(
+      'Unknown Obsidian command: app:zq7f31-cmd. Use `obsidian_list_commands` to discover valid command IDs.',
+    );
+    expect(err.data).toEqual({
+      commandId: 'app:zq7f31-cmd',
+      reason: 'command_unknown',
+      recovery: { hint: 'Call obsidian_list_commands to discover the registered command IDs.' },
+    });
+  });
+
+  it('keeps status, retryAfter, and retryable on the default branch of a route with no identifier', async () => {
+    pool.intercept({ path: '/search/', method: 'POST' }).reply(501, POISONED_500, {
+      headers: { 'content-type': 'application/json', 'retry-after': '3' },
+    });
+
+    const err = await throwsMcpError(() => service.searchJsonLogic(ctx, { '==': [1, 1] }));
+
+    expect(err.data).toEqual({ status: 501, retryAfter: '3', retryable: false });
+  });
+});
+
+/**
+ * Issues #133 and #136. A `fetch` that rejects before any response never
+ * reaches `#throwForStatus`, but the same invariant holds: the runtime's own
+ * text — which names the host and port it tried, and on Node carries OpenSSL's
+ * wording — rides as `cause`, and the client sees a server-authored message.
+ * Retry-safe and single-attempt paths are both driven, since the retry
+ * wrapper rebuilds the message and `data` on the way out.
+ */
+describe('fetch rejections / runtime text never reaches the client', () => {
+  const runtimeText = `connect ECONNREFUSED ${LEAK.fsPath} (${LEAK.notePath})`;
+
+  it.each([
+    ['refused, single attempt', 'ECONNREFUSED', (s: ObsidianService) => s.searchText(ctx, 'q')],
+    ['refused, retried', 'ECONNREFUSED', (s: ObsidianService) => s.listTags(ctx)],
+    [
+      'certificate, HEAD',
+      'DEPTH_ZERO_SELF_SIGNED_CERT',
+      (s: ObsidianService) => s.tryGetSize(ctx, { type: 'path', path: 'x.md' }),
+    ],
+  ] as const)('%s', async (_label, code, call) => {
+    const rejection = nodeFetchRejection(code, runtimeText);
+    const svc = new ObsidianService(makeTestConfig(), sequencedFetch(rejection).fetchImpl);
+
+    const err = await throwsMcpError(() => call(svc));
+
+    for (const marker of [...MARKERS, 'obsidian.test', 'fetch failed', 'ECONNREFUSED']) {
+      expect(JSON.stringify(clientSurface(err))).not.toContain(marker);
+    }
+    expect(err.message).toMatch(/Obsidian Local REST API/);
+    expect(err.data).toMatchObject({
+      reason: expect.any(String),
+      recovery: { hint: expect.any(String) },
+    });
+    expect(err.cause === rejection || (err.cause as Error).cause === rejection).toBe(true);
   });
 });
 

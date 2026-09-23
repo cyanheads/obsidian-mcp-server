@@ -5,7 +5,8 @@
  * @module tests/tools/obsidian-execute-command.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianExecuteCommand } from '@/mcp-server/tools/definitions/obsidian-execute-command.tool.js';
 import { setupHarness } from '../helpers.js';
@@ -33,6 +34,28 @@ describe('obsidian_execute_command', () => {
 
     expect(seenPath).toBe('/commands/editor%3Asave-file/');
     expect(out).toEqual({ commandId: 'editor:save-file', executed: true });
+  });
+});
+
+describe('obsidian_execute_command / command_unknown', () => {
+  it('names the command under commandId on both wire surfaces', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/commands/nonexistent%3Azzz/', method: 'POST' })
+      .reply(404, { errorCode: 40400, message: 'Not Found' });
+
+    const res = await runToolContract(obsidianExecuteCommand, { commandId: 'nonexistent:zzz' });
+
+    expect(res.isError).toBe(true);
+    const error = (
+      res.structuredContent as { error: { code: number; data: Record<string, unknown> } }
+    ).error;
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({ reason: 'command_unknown', commandId: 'nonexistent:zzz' });
+    expect(Object.hasOwn(error.data, 'path')).toBe(false);
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('Unknown Obsidian command: nonexistent:zzz');
+    expect(text).toContain('obsidian_list_commands');
   });
 });
 
