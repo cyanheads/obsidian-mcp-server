@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [3.5.5](changelog/3.5.x/3.5.5.md) — 2026-09-22
 
-TLS certificate rejection and an unreachable Local REST API now surface as typed, actionable errors instead of a hintless InternalError, and multi-word text search, tag matching, and repeated heading paths are fixed to match Obsidian's own behavior.
+TLS certificate rejection and an unreachable Local REST API now surface as typed, actionable errors instead of a hintless InternalError, multi-word text search and inline tag matching are fixed, and a section write to a repeated heading path is rejected instead of landing on the wrong occurrence.
 
 ## [3.5.4](changelog/3.5.x/3.5.4.md) — 2026-09-19 · 🛡️ Security
 
