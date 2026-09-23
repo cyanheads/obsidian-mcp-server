@@ -418,9 +418,15 @@ const REFERENCE_LINK = /\[[^[\]\n]+\]\[[^[\]\n]*\]/;
  * the note when none follows. The whole closing line is hidden, so the tag in
  * `<!-- a --> #rd` is not one. A line opening with `<!-->` or `<!--->` closes
  * on itself.
+ *
+ * The prefix gives every whitespace character exactly one owner — a list
+ * marker takes the one it requires, the next marker's indent takes the rest,
+ * and the tail after the last marker takes what follows it — so the lookbehind
+ * cannot backtrack exponentially over a long run of markers. The `(?=<!--)`
+ * gate runs it only where a comment opens.
  */
 const HTML_BLOCK =
-  /(?<=(?:^|\n)(?:[ \t]*(?:>[ \t]?|(?:[-+*]|\d{1,9}[.)])[ \t]+))*[ ]{0,3})<!--(?:-?>[^\n]*|[\s\S]*?-->[^\n]*|[\s\S]*)/;
+  /(?=<!--)(?<=(?:^|\n)(?:[ \t]*(?:>|(?:[-+*]|\d{1,9}[.)])[ \t]))*(?:(?<=>)[ \t]?[ ]{0,3}|(?<=(?:[-+*]|\d[.)])[ \t])[ \t]*|[ ]{0,3}))<!--(?:-?>[^\n]*|[\s\S]*?-->[^\n]*|[\s\S]*)/;
 /**
  * An **inline comment** anywhere else: `<!--`, then text that does not open
  * with `>` or `->` and holds no `--`, then `-->`, within one paragraph.

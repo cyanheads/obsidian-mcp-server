@@ -1135,6 +1135,20 @@ describe('inline tags — boundary, HTML comments, and math (Obsidian readback)'
     expect(r.applied).toEqual(['wip']);
     expect(r.content).toBe('keep <!-- #wip --> and $#wip$ but goes\n');
   });
+
+  /**
+   * The HTML-block prefix test walks back over quote and list markers before
+   * `<!--`. Whitespace after a marker must belong to exactly one marker, or a
+   * line of markers that fails to reach line start backtracks exponentially.
+   */
+  it.each([
+    ['blockquote markers', '\t>'],
+    ['list markers', '\t-\t'],
+    ['tab-separated list markers', '\t\t*'],
+  ])('scans a long run of %s before a comment in linear time', (_label, marker) => {
+    const input = `a${marker.repeat(30)}\t<!-- #xy --> #xz`;
+    expect(listTagsFromContent(input, {}).inline).toEqual(['xz']);
+  });
 });
 
 describe('reconcileTags / remove inline — link spans', () => {
