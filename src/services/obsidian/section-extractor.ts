@@ -178,12 +178,11 @@ export function sectionBody(content: string, path: string): SectionBody | undefi
   };
 }
 
-/** The `marked` token type of the first top-level block in `markdown`, or `undefined` when it has none. */
-export function firstBlockKind(markdown: string): string | undefined {
-  for (const { token } of topLevelTokens(normalizeLineEndings(markdown).normalized)) {
-    if (token.type !== 'space') return token.type;
-  }
-  return;
+/** The `marked` token type of each top-level block in `markdown`, in order. */
+export function blockKinds(markdown: string): string[] {
+  return [...topLevelTokens(normalizeLineEndings(markdown).normalized)].flatMap(({ token }) =>
+    token.type === 'space' ? [] : [token.type],
+  );
 }
 
 /** A top-level block token and its offset in the text it was lexed from. */
@@ -347,16 +346,18 @@ export function listHeadingPaths(content: string): string[] {
 
 /**
  * The level of the heading at full path `path` in `content` — its first
- * occurrence — or, for a path the note does not have, the level markdown-patch
- * 2.0 gives it when `createTargetIfMissing` creates it: one below the deepest
- * existing ancestor for each missing segment, counted from 0 when no ancestor
- * exists.
+ * occurrence. For a path the note does not have: with `create`, the level
+ * markdown-patch 2.0 gives it when `createTargetIfMissing` creates it — one
+ * below the deepest existing ancestor for each missing segment, counted from 0
+ * when no ancestor exists — and without, `undefined`.
  */
-export function sectionLevel(content: string, path: string): number {
+export function sectionLevel(content: string, path: string, create: boolean): number | undefined {
   const headings = scanHeadings(content);
   const paths = headingPaths(headings);
+  const own = headings[paths.indexOf(path)];
+  if (own || !create) return own?.level;
   const segments = path.split(HEADING_DELIMITER);
-  for (let depth = segments.length; depth >= 1; depth--) {
+  for (let depth = segments.length - 1; depth >= 1; depth--) {
     const found = headings[paths.indexOf(segments.slice(0, depth).join(HEADING_DELIMITER))];
     if (found) return found.level + segments.length - depth;
   }

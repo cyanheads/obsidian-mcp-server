@@ -227,7 +227,8 @@ describe('sectionLevel', () => {
     ['a setext heading', 'A::Setext', 2],
     ['a heading three segments down', 'A::Setext::Deep', 4],
   ])('reads %s from the note', (_label, path, level) => {
-    expect(sectionLevel(note, path)).toBe(level);
+    expect(sectionLevel(note, path, false)).toBe(level);
+    expect(sectionLevel(note, path, true)).toBe(level);
   });
 
   it.each([
@@ -235,8 +236,13 @@ describe('sectionLevel', () => {
     ['two missing segments', 'B::X::Y', 3],
     ['a missing top-level path', 'Nowhere', 1],
     ['a missing path with no existing ancestor', 'Q::R', 2],
-  ])('counts %s from the deepest existing ancestor', (_label, path, level) => {
-    expect(sectionLevel(note, path)).toBe(level);
+  ])('counts %s from the deepest existing ancestor when it is created', (_label, path, level) => {
+    expect(sectionLevel(note, path, true)).toBe(level);
+  });
+
+  it('has no level for a missing path the write will not create', () => {
+    expect(sectionLevel(note, 'A::C::New', false)).toBeUndefined();
+    expect(sectionLevel(note, 'Nowhere', false)).toBeUndefined();
   });
 });
 

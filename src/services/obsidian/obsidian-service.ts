@@ -38,7 +38,7 @@ import {
 import { PathPolicy } from './path-policy.js';
 import {
   atxHeadingMarkers,
-  firstBlockKind,
+  blockKinds,
   isIsolatedBlockId,
   listHeadingPaths,
   sectionBody,
@@ -882,6 +882,9 @@ export class ObsidianService {
    * the write addresses that list `within` the section, and 2.0 splices the
    * item flush against it, as 1.x placed it. The write stays plain when:
    *
+   * - a prepend's content ends in anything but a list — its last block meets
+   *   the section's list, and flush against it a paragraph or HTML block would
+   *   take that list in;
    * - the content carries an ATX heading, which a literal splice would neither
    *   re-level nor check against the section (`#sectionRelativeContent`);
    * - an append's section has sub-headings, below which a plain append lands;
@@ -900,7 +903,9 @@ export class ObsidianService {
     if (instruction.targetType !== 'heading' || instruction.contentType === 'json') return;
     if (operation === 'replace') return;
     const reduced = canonicalContent(content);
-    if (firstBlockKind(reduced) !== 'list' || atxHeadingMarkers(reduced).markers.length > 0) return;
+    const blocks = blockKinds(reduced);
+    if (blocks[0] !== 'list' || (operation === 'prepend' && blocks.at(-1) !== 'list')) return;
+    if (atxHeadingMarkers(reduced).markers.length > 0) return;
 
     const { content: note } = await this.#rawGetNoteJson(ctx, target);
     const body = sectionBody(note, instruction.target);
@@ -915,7 +920,9 @@ export class ObsidianService {
    * markdown-patch 2.0 reads (see `relativeHeadingLevels`), so the note gets
    * the levels the caller wrote, as it did under 1.x. The section's level comes
    * from the note itself, read only when the content carries an ATX heading.
-   * Every other payload passes through as written.
+   * Every other payload passes through as written, and so does content for a
+   * section the note lacks and the write will not create, which the plugin
+   * then reports missing.
    */
   async #sectionRelativeContent(
     ctx: Context,
@@ -928,7 +935,12 @@ export class ObsidianService {
     if (fragment.markers.length === 0) return content;
 
     const { content: note } = await this.#rawGetNoteJson(ctx, target);
-    const level = sectionLevel(note, instruction.target);
+    const level = sectionLevel(
+      note,
+      instruction.target,
+      instruction.createTargetIfMissing === true,
+    );
+    if (level === undefined) return content;
     const relative = relativeHeadingLevels(fragment, level);
     if (relative.ok) return relative.content;
 

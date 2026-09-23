@@ -7,8 +7,8 @@
 import { Lexer, type Tokens } from 'marked';
 import { describe, expect, it } from 'vitest';
 import {
+  blockKinds,
   extractSection,
-  firstBlockKind,
   listHeadingPaths,
   sectionBody,
 } from '@/services/obsidian/section-extractor.js';
@@ -1174,18 +1174,20 @@ describe('sectionBody', () => {
   });
 });
 
-describe('firstBlockKind', () => {
+describe('blockKinds', () => {
   it.each([
-    ['a bullet item', '- a', 'list'],
-    ['an ordered item', '3. a', 'list'],
-    ['a task item after blank lines', '\n\n- [ ] a', 'list'],
-    ['a paragraph', 'text\n- a', 'paragraph'],
-    ['a thematic break', '---', 'hr'],
-    ['a fence', '```\n- a\n```', 'code'],
-    ['a heading', '## H\n- a', 'heading'],
-    ['nothing', '', undefined],
-  ])('reads %s', (_label, md, kind) => {
-    expect(firstBlockKind(md)).toBe(kind);
+    ['a bullet item', '- a', ['list']],
+    ['an ordered item', '3. a', ['list']],
+    ['a task item after blank lines', '\n\n- [ ] a', ['list']],
+    ['a paragraph a list interrupts', 'text\n- a', ['paragraph', 'list']],
+    ['a list, then a paragraph', '- a\n\ntext\n', ['list', 'paragraph']],
+    ['a list, then an HTML block', '- a\n\n<div>x</div>', ['list', 'html']],
+    ['a thematic break', '---', ['hr']],
+    ['a fence', '```\n- a\n```', ['code']],
+    ['a heading', '## H\n- a', ['heading', 'list']],
+    ['nothing', '', []],
+  ])('reads %s', (_label, md, kinds) => {
+    expect(blockKinds(md)).toEqual(kinds);
   });
 });
 
@@ -1194,7 +1196,7 @@ describe('firstBlockKind', () => {
  * each shape at 5k, 20k, and 80k characters, including the ones built to
  * stress the lexer, stays inside the budget.
  */
-describe('sectionBody and firstBlockKind / cost', () => {
+describe('sectionBody and blockKinds / cost', () => {
   const BUDGET_MS = 1_000;
   const fill = (unit: string, size: number) =>
     unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
@@ -1220,7 +1222,7 @@ describe('sectionBody and firstBlockKind / cost', () => {
     const md = `# T\n## A\n${build(size)}`;
     const started = performance.now();
     sectionBody(md, 'T::A');
-    firstBlockKind(md);
+    blockKinds(md);
     expect(performance.now() - started).toBeLessThan(BUDGET_MS);
   });
 });

@@ -303,6 +303,25 @@ describe('markdown-patch 2.0 on Local REST API 5.x', () => {
       });
     });
 
+    it('leaves a section the write would not create to the plugin, which reports it missing', async () => {
+      servePluginVersion(pool, '5.2.0');
+      serveMapV2({ Top: { Child: {} } });
+      serveNote('# Top\n## Child\nbody\n');
+      let sent = '';
+      pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
+        sent = String(instructionOf(opts).content);
+        return {
+          statusCode: 404,
+          data: { message: 'could not resolve heading target ["Top","Nope"]', errorCode: 40400 },
+        };
+      });
+
+      await expect(
+        service.patchNote(ctx, NOTE, '## Peer\nmore\n', heading('Top::Nope')),
+      ).rejects.toMatchObject({ data: { reason: 'section_target_missing' } });
+      expect(sent).toBe('## Peer\nmore\n');
+    });
+
     it.each([
       ['plain text', 'just text\n'],
       ['a `#` line inside a fence', '```\n## not a heading\n```\n'],
@@ -725,6 +744,20 @@ describe('a list item written beside the list its section ends or opens with, on
   ])('prepends a list item to a section opening with %s as the plain write', async (_l, note) => {
     await expect(send(note, '- zero', { operation: 'prepend' })).resolves.toEqual(
       plain('prepend', '- zero'),
+    );
+  });
+
+  /**
+   * A prepend's last block is the one that meets the section's list. Spliced
+   * flush, a paragraph there takes in an ordered list that does not start at
+   * 1, and an HTML block takes in whatever follows it up to a blank line.
+   */
+  it.each([
+    ['a paragraph', '# T\n## A\n3. three\n4. four\n', '- zero\n\nA paragraph.'],
+    ['an HTML block', LIST, '- zero\n\n<div>x</div>'],
+  ])('prepends a list item followed by %s as the plain write', async (_l, note, content) => {
+    await expect(send(note, content, { operation: 'prepend' })).resolves.toEqual(
+      plain('prepend', content),
     );
   });
 
