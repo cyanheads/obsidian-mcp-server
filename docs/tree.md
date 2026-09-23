@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-09-19 15:38:41
+Generated on: 2026-09-22 22:38:48
 
 ```text
 obsidian-mcp-server/
@@ -182,6 +182,19 @@ obsidian-mcp-server/
 ├── tests/
 │   ├── config/
 │   │   └── server-config.test.ts
+│   ├── fixtures/
+│   │   └── simple-search/
+│   │       ├── adjacent.json
+│   │       ├── dup-token.json
+│   │       ├── far.json
+│   │       ├── keyrename.json
+│   │       ├── medium.json
+│   │       ├── overlap.json
+│   │       ├── probe-body.md
+│   │       ├── repeated.json
+│   │       ├── simulate.ts
+│   │       ├── surrogate.json
+│   │       └── three-word.json
 │   ├── integration/
 │   │   └── delete-note-confirmation.test.ts
 │   ├── resources/
@@ -195,9 +208,11 @@ obsidian-mcp-server/
 │   │   ├── obsidian-service-error-containment.test.ts
 │   │   ├── obsidian-service-path-policy.test.ts
 │   │   ├── obsidian-service-tls.test.ts
+│   │   ├── obsidian-service-unreachable.test.ts
 │   │   ├── obsidian-service.test.ts
 │   │   ├── path-policy.test.ts
-│   │   └── section-extractor.test.ts
+│   │   ├── section-extractor.test.ts
+│   │   └── simple-search-simulator.test.ts
 │   ├── tools/
 │   │   ├── obsidian-append-to-note.test.ts
 │   │   ├── obsidian-delete-note.test.ts
@@ -211,6 +226,7 @@ obsidian-mcp-server/
 │   │   ├── obsidian-open-in-ui.test.ts
 │   │   ├── obsidian-patch-note.test.ts
 │   │   ├── obsidian-replace-in-note.test.ts
+│   │   ├── obsidian-search-notes-locations.test.ts
 │   │   ├── obsidian-search-notes.test.ts
 │   │   ├── obsidian-write-note.test.ts
 │   │   ├── path-error-contracts.test.ts

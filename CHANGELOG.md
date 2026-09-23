@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.5.5](changelog/3.5.x/3.5.5.md) — 2026-09-22
+
+TLS certificate rejection and an unreachable Local REST API now surface as typed, actionable errors instead of a hintless InternalError, and multi-word text search, tag matching, and repeated heading paths are fixed to match Obsidian's own behavior.
+
 ## [3.5.4](changelog/3.5.x/3.5.4.md) — 2026-09-19 · 🛡️ Security
 
 TLS certificate verification is now scoped to each Obsidian request instead of relaxed process-wide on Bun, frontmatter/tag edits refuse to write rather than destroy content on unsafe YAML, and mcp-ts-core moves to ^0.13.6.
