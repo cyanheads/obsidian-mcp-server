@@ -1,11 +1,13 @@
 /**
- * @fileoverview Client-side section extraction from a NoteJson body.
- * The upstream Local REST API exposes section *targeting* for PATCH but not
- * section-extracted GET, so we slice the markdown ourselves for `format: 'section'`.
+ * @fileoverview Client-side section extraction from a NoteJson body for
+ * `format: 'section'`. Headings are found the way the plugin's markdown-patch
+ * finds them for its document map and PATCH targeting, so a section read
+ * covers the span a section write edits, sliced from the note's own bytes.
  * @module services/obsidian/section-extractor
  */
 
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { getDefaults, Lexer, type Token, Tokenizer, type Tokens } from 'marked';
 import { splice } from './frontmatter-ops.js';
 import type { NoteJson, SectionTarget } from './types.js';
 
@@ -55,64 +57,262 @@ function extractFrontmatterField(note: NoteJson, key: string): unknown {
   return note.frontmatter[key];
 }
 
-/** An ATX heading line's level and text. */
-export interface AtxHeading {
-  /** Number of leading `#` characters. */
+/** A heading as the plugin's parser reads it, located in the note's own bytes. */
+export interface Heading {
+  /**
+   * Offset just past the heading's last line — its underline, for a setext
+   * heading — and that line's ending, or the note's length.
+   */
+  end: number;
+  /** 1–6: the `#` count of an ATX heading, 1 or 2 for a setext `=` or `-` underline. */
   level: number;
-  /** Heading text with the closing `#` run and surrounding whitespace removed. Empty for an untitled heading. */
+  /** Offset of the heading's first byte: its `#` line (indent included), or a setext heading's first text line. */
+  start: number;
+  /**
+   * Heading text as the document map keys it: the parser's text, trimmed.
+   * Empty for an untitled heading; a multi-line setext heading keeps its
+   * newlines.
+   */
   text: string;
 }
 
-/** One ATX heading found in the note body. */
-interface HeadingLine extends AtxHeading {
-  /** Zero-based index of the heading's line in the note. */
-  index: number;
+/**
+ * The frontmatter block markdown-patch strips before it lexes: an opening
+ * `---` line, then either a `---` line at once or YAML and a closing `---`
+ * line, with CRLF, LF, or lone-CR endings. `splice` — the boundary block
+ * extraction and the body-scoped writers use — also closes on a `---` with
+ * more text after it on its line; the heading scan follows the plugin here so
+ * its paths match the plugin's map.
+ */
+const PLUGIN_FRONTMATTER =
+  /^---(?:\r\n|\r|\n)(?:---(?:\r\n|\r|\n|$)|[\s\S]*?(?:\r\n|\r|\n)---(?:\r\n|\r|\n|$))/;
+
+/**
+ * Every heading in `content`, in document order, found the way the plugin's
+ * markdown-patch 2.0 finds them for its document map and PATCH targeting: the
+ * frontmatter-stripped body, line endings normalized, lexed with `marked`, and
+ * each top-level `heading` token located by accumulating token `raw` lengths.
+ * That reads setext headings and skips `#` lines inside fences, HTML blocks,
+ * list items, and blockquotes, exactly as the map does. Offsets are mapped
+ * back to `content`, so a slice between them is the note's own bytes, CRs
+ * included.
+ */
+export function scanHeadings(content: string): Heading[] {
+  const { normalized, at } = pluginBody(content);
+  return [...topLevelTokens(normalized)].flatMap((top) => {
+    const heading = headingOf(normalized, top);
+    return heading ? [{ ...heading, start: at(heading.start), end: at(heading.end) }] : [];
+  });
 }
 
 /**
- * Up to three spaces of indent, one to six `#`, then whitespace or the end of
- * the line. The `s` flag lets `.` take the `\r` a CRLF line keeps after the
- * split on `\n`, so `##\r` is an untitled heading and `## Foo\r` reads `Foo`.
+ * The body markdown-patch lexes — `content` past its frontmatter, line endings
+ * read as `\n` — and a map from an offset in it back to `content`.
  */
-const ATX_HEADING = /^ {0,3}(#{1,6})(?:\s(.*))?$/s;
+function pluginBody(content: string): { at: (offset: number) => number; normalized: string } {
+  const bodyStart = PLUGIN_FRONTMATTER.exec(content)?.[0].length ?? 0;
+  const { normalized, toOriginal } = normalizeLineEndings(content.slice(bodyStart));
+  return { normalized, at: (offset) => bodyStart + toOriginal(offset) };
+}
 
 /**
- * Parse one line as an ATX heading, or return `undefined` when it is not one.
+ * The top-level token at `offset` in `normalized` as a heading, its offsets in
+ * `normalized`: `end` is just past its last line and that line's ending — or
+ * `undefined` when the token is not a heading.
+ */
+function headingOf(normalized: string, { token, offset }: TopLevelToken): Heading | undefined {
+  if (token.type !== 'heading') return;
+  const { depth, text } = token as Tokens.Heading;
+  const lineEnd = normalized.indexOf('\n', offset + token.raw.trimEnd().length);
+  return {
+    level: depth,
+    text: text.trim(),
+    start: offset,
+    end: lineEnd === -1 ? normalized.length : lineEnd + 1,
+  };
+}
+
+/** A section's own body, as markdown-patch 2.0 models it for a `within` write. */
+export interface SectionBody {
+  /**
+   * `marked` token type of each top-level block in the section's direct body —
+   * below its heading line and above its first sub-heading — in order: the
+   * blocks a 2.0 `within` index counts (`paragraph`, `list`, `table`, `code`, …).
+   */
+  blocks: string[];
+  /**
+   * The section's `content` scope in the note's own bytes: below its heading
+   * line through its last subsection. What 2.0's `rejectIfContentPreexists`
+   * searches on a plain heading write.
+   */
+  content: string;
+  /** Whether sub-headings follow the direct body — a plain append lands below them. */
+  subsections: boolean;
+}
+
+/**
+ * The body of the heading at full path `path` (its first occurrence), read
+ * from one lex of the note, or `undefined` when the note has no such heading.
+ * 2.0 assigns a section every top-level token between its heading and the
+ * next heading of any level; a `space` token is not a block.
+ */
+export function sectionBody(content: string, path: string): SectionBody | undefined {
+  const { normalized, at } = pluginBody(content);
+  const tokens = [...topLevelTokens(normalized)];
+  const headings = tokens.flatMap((top, index) => {
+    const heading = headingOf(normalized, top);
+    return heading ? [{ ...heading, index }] : [];
+  });
+  const h = headingPaths(headings).indexOf(path);
+  const heading = headings[h];
+  if (!heading) return;
+  const next = headings[h + 1];
+  const closing = headings.find((other, i) => i > h && other.level <= heading.level);
+  return {
+    blocks: tokens
+      .slice(heading.index + 1, next?.index)
+      .filter(({ token }) => token.type !== 'space')
+      .map(({ token }) => token.type),
+    content: content.slice(at(heading.end), at(closing?.start ?? normalized.length)),
+    subsections: next !== undefined && next.level > heading.level,
+  };
+}
+
+/** The `marked` token type of the first top-level block in `markdown`, or `undefined` when it has none. */
+export function firstBlockKind(markdown: string): string | undefined {
+  for (const { token } of topLevelTokens(normalizeLineEndings(markdown).normalized)) {
+    if (token.type !== 'space') return token.type;
+  }
+  return;
+}
+
+/** A top-level block token and its offset in the text it was lexed from. */
+interface TopLevelToken {
+  offset: number;
+  token: Token;
+}
+
+/**
+ * The top-level block tokens `marked` reads in `markdown` (line endings
+ * already `\n`), each with its offset — the running sum of the `raw` lengths
+ * before it, which cover the input exactly.
+ */
+function* topLevelTokens(markdown: string): Generator<TopLevelToken> {
+  const tokenizer = new HeadingScanTokenizer();
+  const lexer = new Lexer({ ...getDefaults(), tokenizer });
+  const { rules } = tokenizer;
+  tokenizer.rules = { ...rules, block: { ...rules.block, paragraph: PARAGRAPH } };
+  let offset = 0;
+  for (const token of lexer.blockTokens(markdown)) {
+    yield { offset, token };
+    offset += token.raw.length;
+  }
+}
+
+/**
+ * `marked`'s GFM paragraph rule, changed in cost and not in outcome. At every
+ * line a paragraph runs on to, the stock rule asks whether a table starts
+ * there, and its table pattern goes on through every following row before the
+ * answer comes back — a scan of the rest of the note per paragraph, so a note
+ * of pipe lines over one-dash lines (`| a | b |` / `| - |`, repeated) lexes in
+ * quadratic time. The rows cannot change the answer (the pattern accepts none
+ * of them), so here the check ends after the header and delimiter lines.
+ * Built from the stock rule's own source, so it follows the installed
+ * `marked`; a source that no longer embeds the table pattern fails at load.
+ */
+const PARAGRAPH = ((): RegExp => {
+  const { paragraph, table } = Lexer.rules.block.gfm;
+  /** The table pattern as `marked` embeds it: every `^` outside a class dropped. */
+  const embedded = table.source.replace(/(^|[^[])\^/g, '$1');
+  const rows = embedded.indexOf('(?:\\n((?:');
+  const bounded = `${embedded.slice(0, rows)}(?:\\n|$)`;
+  const source = paragraph.source.replace(embedded, () => bounded);
+  if (rows === -1 || source === paragraph.source) {
+    throw new Error("marked's GFM paragraph rule no longer embeds its table rule as expected.");
+  }
+  return new RegExp(source, paragraph.flags);
+})();
+
+/**
+ * `marked`'s tokenizer, changed in cost and not in the top-level tokens'
+ * types and extents — all the heading scan reads.
  *
- * This is the ATX heading test the plugin's document map applies (its markdown
- * parser, `marked`), so every ATX locator the map emits names a heading this
- * scan finds under the same text. It follows CommonMark's ATX rules with the
- * parser's two measured differences: any whitespace separates the `#` run
- * from the text, and a closing `#` run is stripped only when a space — not a
- * tab — precedes it (`## Foo\t##` keeps `Foo\t##`). A bare `##`, `## ##`, and
- * `##   ` are untitled headings; `#hashtag`, seven `#`, and a four-space
- * indent are not headings.
+ * - `table`: the GFM table rule matches every following row before it checks
+ *   the header and delimiter lines, so a line that looks like a header over
+ *   one that looks like a delimiter but fails the column check (`t` over `-`,
+ *   `a|b` over `-`) costs a scan of the rest of the note, repeated at each
+ *   such pair. The header and delimiter lines decide the outcome on their
+ *   own, so the rule runs on those two lines first and on the whole source
+ *   only when they pass.
+ * - `blockquote`: the stock rule lexes a blockquote's content to find where
+ *   it ends, and each nested level lexes it again, so `>` nested a thousand
+ *   deep costs a thousand passes over every line after it. A run of lines
+ *   that each open with `>` and that ends the note or meets an empty line is
+ *   the whole blockquote whatever the lines hold, so its extent is known
+ *   without lexing it. The token then carries no child tokens, which nothing
+ *   here reads. Any other shape — a lazy continuation line — goes to the
+ *   stock rule, which still costs a pass per nesting level.
  */
-export function parseAtxHeading(line: string): AtxHeading | undefined {
-  const m = ATX_HEADING.exec(line);
-  if (!m) return;
-  let text = (m[2] ?? '').trim();
-  if (text.endsWith('#')) {
-    const open = text.replace(/#+$/, '');
-    if (open === '' || open.endsWith(' ')) text = open.trim();
+class HeadingScanTokenizer extends Tokenizer {
+  override table(src: string): Tokens.Table | undefined {
+    const headerEnd = src.indexOf('\n');
+    const delimiterEnd = headerEnd === -1 ? -1 : src.indexOf('\n', headerEnd + 1);
+    if (delimiterEnd !== -1 && !super.table(src.slice(0, delimiterEnd + 1))) return;
+    return super.table(src);
   }
-  return { level: (m[1] ?? '').length, text };
+
+  override blockquote(src: string): Tokens.Blockquote | undefined {
+    const { blockquoteStart, blockquoteSetextReplace, blockquoteSetextReplace2 } = this.rules.other;
+    let end = -1;
+    let next = 0;
+    while (next < src.length) {
+      const newline = src.indexOf('\n', next);
+      const lineEnd = newline === -1 ? src.length : newline;
+      if (!blockquoteStart.test(src.slice(next, lineEnd))) break;
+      end = lineEnd;
+      next = lineEnd + 1;
+    }
+    /**
+     * A run of `>` lines that ends the note or meets an empty line is the whole
+     * blockquote: only a non-empty line can continue it lazily.
+     */
+    if (end === -1 || (next < src.length && src[next] !== '\n')) return super.blockquote(src);
+    const raw = src.slice(0, end);
+    const text = raw
+      .replace(blockquoteSetextReplace, '\n    $1')
+      .replace(blockquoteSetextReplace2, '');
+    return { type: 'blockquote', raw, text, tokens: [] };
+  }
 }
 
 /**
- * Collect every ATX heading in the note body, in document order. Setext
- * headings are not markdown this extractor recognizes, and lines inside a
- * fenced code block or a frontmatter block are excluded.
+ * `text` with every `\r\n` and lone `\r` read as `\n` — what `marked` lexes —
+ * and a map from an offset in that text back to the same position in `text`.
+ * A collapsed `\r\n` maps to its `\r`.
  */
-function scanHeadings(lines: string[], bodyStart: number): HeadingLine[] {
-  const inFence = computeFenceMask(lines, bodyStart);
-  const headings: HeadingLine[] = [];
-  for (let i = bodyStart; i < lines.length; i++) {
-    if (inFence[i]) continue;
-    const heading = parseAtxHeading(lines[i] ?? '');
-    if (heading) headings.push({ index: i, ...heading });
-  }
-  return headings;
+function normalizeLineEndings(text: string): {
+  normalized: string;
+  toOriginal: (offset: number) => number;
+} {
+  /** Offsets in `normalized` of each `\n` that stands for a `\r\n`, ascending. */
+  const collapsed: number[] = [];
+  const normalized = text.replace(/\r\n?/g, (ending: string, at: number) => {
+    if (ending.length === 2) collapsed.push(at - collapsed.length);
+    return '\n';
+  });
+  return {
+    normalized,
+    toOriginal: (offset) => {
+      let lo = 0;
+      let hi = collapsed.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if ((collapsed[mid] ?? 0) < offset) lo = mid + 1;
+        else hi = mid;
+      }
+      return offset + lo;
+    },
+  };
 }
 
 /**
@@ -124,7 +324,7 @@ function scanHeadings(lines: string[], bodyStart: number): HeadingLine[] {
  * (`::Request body`, `Top::::Child`), and a top-level untitled heading's own
  * path is `""`, which the map omits.
  */
-function headingPaths(headings: readonly HeadingLine[]): string[] {
+function headingPaths(headings: ReadonlyArray<Pick<Heading, 'level' | 'text'>>): string[] {
   const stack: Array<{ level: number; path: string }> = [];
   return headings.map(({ level, text }) => {
     while ((stack.at(-1)?.level ?? 0) >= level) stack.pop();
@@ -136,15 +336,96 @@ function headingPaths(headings: readonly HeadingLine[]): string[] {
 }
 
 /**
- * Full `::`-joined path of every ATX heading in `content`, in document order,
- * repeats included. Deduplicated and with the `""` entry dropped, this is the
- * document map's `headings` array for a note whose headings are all top-level
- * ATX lines. The plugin's parser also reads setext headings, and reads no
- * heading in a line that continues a list item or sits inside an HTML block;
- * this line scan does neither.
+ * Full `::`-joined path of every heading in `content`, in document order,
+ * repeats included — the markdown-patch 2.0 map's heading tree, flattened.
+ * Deduplicated and with the `""` entry dropped, it is the 1.x map's `headings`
+ * array.
  */
 export function listHeadingPaths(content: string): string[] {
-  return headingPaths(scanHeadings(content.split('\n'), frontmatterEndLine(content)));
+  return headingPaths(scanHeadings(content));
+}
+
+/**
+ * The level of the heading at full path `path` in `content` — its first
+ * occurrence — or, for a path the note does not have, the level markdown-patch
+ * 2.0 gives it when `createTargetIfMissing` creates it: one below the deepest
+ * existing ancestor for each missing segment, counted from 0 when no ancestor
+ * exists.
+ */
+export function sectionLevel(content: string, path: string): number {
+  const headings = scanHeadings(content);
+  const paths = headingPaths(headings);
+  const segments = path.split(HEADING_DELIMITER);
+  for (let depth = segments.length; depth >= 1; depth--) {
+    const found = headings[paths.indexOf(segments.slice(0, depth).join(HEADING_DELIMITER))];
+    if (found) return found.level + segments.length - depth;
+  }
+  return segments.length;
+}
+
+/**
+ * True when `blockId` is referenced in `content` by an isolated marker: a
+ * `^blockId` line on its own, after a blank line (or at the body's start), so
+ * the parser reads it as its own paragraph and the id names the block above.
+ * A marker line with no blank line above it continues that block instead (a
+ * table row, a paragraph line, a list item), and a line inside a fence or
+ * indented as code is not a marker.
+ */
+export function isIsolatedBlockId(content: string, blockId: string): boolean {
+  const lines = content.split('\n').map((line) => line.replace(/\r$/, ''));
+  const bodyStart = frontmatterEndLine(content);
+  const inFence = computeFenceMask(lines, bodyStart);
+  const marker = `^${blockId}`;
+  return lines.some(
+    (line, i) =>
+      i >= bodyStart &&
+      !inFence[i] &&
+      line.trim() === marker &&
+      !/^(?: {4}|\t)/.test(line) &&
+      (i === bodyStart || (lines[i - 1] ?? '').trim() === ''),
+  );
+}
+
+/** The `#` run opening a top-level ATX heading in a markdown fragment. */
+export interface AtxHeadingMarker {
+  /** Length of the `#` run — the heading's level. */
+  hashes: number;
+  /** The heading's line, trimmed, for messages. */
+  line: string;
+  /** Offset of the run's first `#` in the fragment's `normalized` text. */
+  start: number;
+}
+
+/** A markdown fragment with its line endings read as `\n`, and its ATX heading markers. */
+export interface AtxHeadingFragment {
+  markers: AtxHeadingMarker[];
+  normalized: string;
+}
+
+/** An ATX heading's opening: up to three spaces or tabs, then its `#` run. */
+const ATX_OPENING = /^([ \t]{0,3})(#+)/;
+
+/**
+ * The `#` run of every top-level ATX heading in `markdown`, found as
+ * markdown-patch 2.0 finds the headings it re-levels in written content: line
+ * endings normalized, lexed with `marked`, and each top-level `heading` token
+ * whose raw text opens with a `#` run. A setext heading, a `#` line inside a
+ * fence or HTML block, and a hashtag carry none.
+ */
+export function atxHeadingMarkers(markdown: string): AtxHeadingFragment {
+  const { normalized } = normalizeLineEndings(markdown);
+  const markers: AtxHeadingMarker[] = [];
+  for (const { token, offset } of topLevelTokens(normalized)) {
+    const opening = token.type === 'heading' ? ATX_OPENING.exec(token.raw) : null;
+    if (!opening) continue;
+    const [, indent = '', hashes = ''] = opening;
+    markers.push({
+      hashes: hashes.length,
+      line: token.raw.trim().split('\n')[0] ?? '',
+      start: offset + indent.length,
+    });
+  }
+  return { markers, normalized };
 }
 
 /**
@@ -153,7 +434,7 @@ export function listHeadingPaths(content: string): string[] {
  * the walk leaves the previous match's subtree. Returns the index of the heading
  * the last segment matched, or -1.
  */
-function walkSegments(headings: readonly HeadingLine[], parts: readonly string[]): number {
+function walkSegments(headings: readonly Heading[], parts: readonly string[]): number {
   let cursor = 0;
   let parentLevel = 0;
   let matched = -1;
@@ -199,8 +480,7 @@ function extractHeading(content: string, target: string): SectionExtraction {
     throw notFound('Empty heading target.', { target });
   }
 
-  const lines = content.split('\n');
-  const headings = scanHeadings(lines, frontmatterEndLine(content));
+  const headings = scanHeadings(content);
   const paths = headingPaths(headings);
 
   const exact = qualified ? paths.indexOf(parts.join(HEADING_DELIMITER)) : -1;
@@ -211,17 +491,14 @@ function extractHeading(content: string, target: string): SectionExtraction {
     throw notFound(`Heading '${target}' not found.`, { target });
   }
 
-  // Slice from the matched heading line to the next heading at the same or shallower level.
+  // Slice from the matched heading to the next heading at the same or shallower level.
   const end = headings.find((h, i) => i > matched && h.level <= hit.level);
   const candidates = qualified
     ? paths.filter((p) => p === resolved)
     : paths.filter((_, i) => headings[i]?.text === leaf);
 
   return {
-    value: lines
-      .slice(hit.index, end?.index ?? lines.length)
-      .join('\n')
-      .replace(/\n+$/, ''),
+    value: content.slice(hit.start, end?.start).replace(/\n+$/, ''),
     sectionTarget: resolved,
     ...(candidates.length > 1 ? { candidates } : {}),
   };
@@ -230,12 +507,13 @@ function extractHeading(content: string, target: string): SectionExtraction {
 /**
  * Match a block by its `^blockId` reference. Returns the line containing the
  * reference plus any preceding lines belonging to the same paragraph (until a
- * blank line or an ATX heading, untitled ones included).
+ * blank line or a heading line — a setext underline, an untitled heading).
  */
 function extractBlock(content: string, blockId: string): string {
   const lines = content.split('\n');
   const bodyStart = frontmatterEndLine(content);
   const inFence = computeFenceMask(lines, bodyStart);
+  const isHeading = headingLineMask(content, lines);
   const escaped = blockId.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
   const ref = new RegExp(`(^|\\s)\\^${escaped}\\s*$`);
   for (let i = bodyStart; i < lines.length; i++) {
@@ -244,7 +522,7 @@ function extractBlock(content: string, blockId: string): string {
       let start = i;
       while (start > bodyStart) {
         const prev = lines[start - 1] ?? '';
-        if (prev.trim() === '' || parseAtxHeading(prev)) break;
+        if (prev.trim() === '' || isHeading[start - 1]) break;
         start--;
       }
       return lines.slice(start, i + 1).join('\n');
@@ -254,11 +532,28 @@ function extractBlock(content: string, blockId: string): string {
 }
 
 /**
+ * Mark the indices of `lines` (`content` split on `\n`) that a heading
+ * occupies: an ATX heading's line, or a setext heading's text lines and
+ * underline.
+ */
+function headingLineMask(content: string, lines: readonly string[]): boolean[] {
+  const headings = scanHeadings(content);
+  let h = 0;
+  let lineStart = 0;
+  return lines.map((line) => {
+    const lineEnd = lineStart + line.length;
+    while ((headings[h]?.end ?? Number.POSITIVE_INFINITY) <= lineStart) h++;
+    const onHeading = (headings[h]?.start ?? Number.POSITIVE_INFINITY) <= lineEnd;
+    lineStart = lineEnd + 1;
+    return onHeading;
+  });
+}
+
+/**
  * Return the line index where the document body starts, skipping a leading YAML
  * frontmatter block. Returns 0 when no frontmatter is present. Without this
- * guard, heading and block extraction would scan inside the frontmatter and
- * falsely match YAML comment lines or include the fence in a paragraph
- * walk-back.
+ * guard, block extraction would scan inside the frontmatter and falsely match a
+ * reference there or include the fence in a paragraph walk-back.
  *
  * The boundary comes from `splice` rather than a second line scan, so the read
  * path and every body-scoped write path agree on where the body starts —
