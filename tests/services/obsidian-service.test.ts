@@ -11,10 +11,22 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { encodeVaultPath, ObsidianService } from '@/services/obsidian/obsidian-service.js';
 import {
+  loadCapture,
+  PROBE_BODY,
+  type RawHit,
+  seededRandom,
+  simulateSimpleSearch,
+} from '../fixtures/simple-search/simulate.js';
+import {
+  documentMapV2,
+  type HeadingTree,
   makeTestConfig,
   mockResponse,
+  noteJson,
   type PathMatcher,
   type ReplyFn,
+  rejectionOf,
+  repeatKey,
   setupHarness,
   type TestHarness,
 } from '../helpers.js';
@@ -201,6 +213,9 @@ function documentMap(headings: string[]): {
 describe('ObsidianService.patchNote header building', () => {
   it('emits Operation, Target-Type, URL-encoded Target, Target-Delimiter, and option flags', async () => {
     let seenHeaders: Record<string, string> = {};
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, documentMapV2({ Top: { 'Sub Title': {} } }));
     pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
       seenHeaders = (opts.headers as Record<string, string>) ?? {};
       return { statusCode: 200, data: '' };
@@ -241,6 +256,9 @@ describe('ObsidianService.patchNote header building', () => {
    */
   it('pins Markdown-Patch-Version: 1 on every PATCH', async () => {
     let seenHeaders: Record<string, string> = {};
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, documentMapV2({ Top: { Child: {} } }));
     pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply((opts) => {
       seenHeaders = (opts.headers as Record<string, string>) ?? {};
       return { statusCode: 200, data: '' };
@@ -327,6 +345,19 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
     return { seen: () => target };
   }
 
+  /**
+   * Answer the one read a heading write makes before its PATCH: the
+   * markdown-patch 2.0 document map. Any other read fails the test.
+   */
+  function serveMap(headings: HeadingTree): void {
+    pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
+      const headers = lowerCased(opts.headers);
+      expect(headers.accept).toBe('application/vnd.olrapi.document-map+json');
+      expect(headers['markdown-patch-version']).toBe('2');
+      return { statusCode: 200, data: documentMapV2(headings) };
+    });
+  }
+
   const patch = (target: string, extra: Record<string, unknown> = {}) =>
     service.patchNote(ctx, { type: 'path', path: 'N.md' }, 'body', {
       operation: 'append',
@@ -338,9 +369,7 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
     });
 
   it('expands a uniquely-matching bare leaf to its full Parent::Child path', async () => {
-    pool
-      .intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, documentMap(['Top', 'Top::Child', 'Top::Sibling']));
+    serveMap({ Top: { Child: {}, Sibling: {} } });
     const patched = capturePatchTarget();
 
     await expect(patch('Sibling')).resolves.toBe('Top::Sibling');
@@ -348,9 +377,7 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
   });
 
   it('prefers an exact map entry over expanding it as a leaf', async () => {
-    pool
-      .intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, documentMap(['Top', 'Other', 'Other::Top']));
+    serveMap({ Top: {}, Other: { Top: {} } });
     const patched = capturePatchTarget();
 
     await expect(patch('Top')).resolves.toBe('Top');
@@ -358,9 +385,7 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
   });
 
   it('rejects a leaf matching several headings instead of writing to the first', async () => {
-    pool
-      .intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, documentMap(['Top', 'Top::Child', 'Other', 'Other::Child']));
+    serveMap({ Top: { Child: {} }, Other: { Child: {} } });
     // No PATCH intercept: reaching the write would surface "No mock intercept".
 
     await expect(patch('Child')).rejects.toMatchObject({
@@ -375,19 +400,32 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
   });
 
   it('passes an unknown leaf through so Create-Target-If-Missing still creates it', async () => {
-    pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, documentMap(['Top']));
+    serveMap({ Top: {} });
     const patched = capturePatchTarget();
 
     await expect(patch('Brand New', { createTargetIfMissing: true })).resolves.toBe('Brand New');
     expect(patched.seen()).toBe('Brand New');
   });
 
-  it('skips the map fetch for a locator that already carries the delimiter', async () => {
-    // Only a PATCH is intercepted — a document-map GET would throw here.
+  it('sends a locator that already carries the delimiter unexpanded', async () => {
+    serveMap({ Top: { Child: {} }, Child: {} });
     const patched = capturePatchTarget();
 
     await expect(patch('Top::Child')).resolves.toBe('Top::Child');
     expect(patched.seen()).toBe('Top::Child');
+  });
+
+  it('expands a leaf and counts its repeats from a single read', async () => {
+    let reads = 0;
+    pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
+      reads++;
+      return { statusCode: 200, data: documentMapV2({ Top: { Child: {} } }) };
+    });
+    const patched = capturePatchTarget();
+
+    await expect(patch('Child')).resolves.toBe('Top::Child');
+    expect(patched.seen()).toBe('Top::Child');
+    expect(reads).toBe(1);
   });
 
   /**
@@ -422,7 +460,176 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
     ).resolves.toBe('status');
     expect(patched.seen()).toBe('status');
   });
+
+  /**
+   * The 1.x map the PATCH resolves against keys headings by full path, so a
+   * path that repeats is listed once, at its last position — the PATCH lands
+   * on the last occurrence while a section read returns the first. The 2.0 map
+   * keeps a key per repeat, and the resolver counts those. Each case names the
+   * note it stands for; the tree is what the plugin serves for it.
+   */
+  describe('a heading path that repeats in the note', () => {
+    it('writes a full path that occurs once', async () => {
+      // # Root / ## Dup / ## Other
+      serveMap({ Root: { Dup: {}, Other: {} } });
+      const patched = capturePatchTarget();
+
+      await expect(patch('Root::Dup')).resolves.toBe('Root::Dup');
+      expect(patched.seen()).toBe('Root::Dup');
+    });
+
+    it('writes a root-level exact map entry whose leaf also sits under a parent', async () => {
+      // # X / ## Dup / # Dup
+      serveMap({ X: { Dup: {} }, Dup: {} });
+      const patched = capturePatchTarget();
+
+      await expect(patch('Dup')).resolves.toBe('Dup');
+      expect(patched.seen()).toBe('Dup');
+    });
+
+    it('rejects a nested full path that repeats, naming every occurrence', async () => {
+      // # Root / ## Dup / ## Dup
+      serveMap({ Root: { Dup: {}, [repeatKey('Dup', 1)]: {} } });
+      // No PATCH intercept: reaching the write would surface "No mock intercept".
+
+      const err = await rejectionOf(patch('Root::Dup'));
+      expect(err.code).toBe(JsonRpcErrorCode.Conflict);
+      expect(err.message).toBe(
+        "Heading 'Root::Dup' occurs 2 times in N.md, so a section write cannot tell which one to edit.",
+      );
+      expect(err.data).toMatchObject({
+        path: 'N.md',
+        reason: 'ambiguous_section',
+        candidates: ['Root::Dup', 'Root::Dup'],
+        recovery: { hint: expect.stringContaining('obsidian_replace_in_note') },
+      });
+    });
+
+    it('rejects a root-level heading that repeats, reached as an exact map entry', async () => {
+      // # Dup / # Dup
+      serveMap({ Dup: {}, [repeatKey('Dup', 1)]: {} });
+
+      await expect(patch('Dup')).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Conflict,
+        data: { reason: 'ambiguous_section', candidates: ['Dup', 'Dup'] },
+      });
+    });
+
+    it('rejects a bare leaf whose one expansion repeats, naming both the leaf and the path', async () => {
+      // # Root / ## Dup / ## Dup
+      serveMap({ Root: { Dup: {}, [repeatKey('Dup', 1)]: {} } });
+
+      const err = await rejectionOf(patch('Dup'));
+      expect(err.message).toBe(
+        "Heading 'Dup' (Root::Dup) occurs 2 times in N.md, so a section write cannot tell which one to edit.",
+      );
+      expect(err.data).toMatchObject({
+        reason: 'ambiguous_section',
+        candidates: ['Root::Dup', 'Root::Dup'],
+      });
+    });
+
+    it('rejects a repeat three levels down', async () => {
+      // # A / ## B / ### C / ### C / ### C / ## D
+      serveMap({ A: { B: { C: {}, [repeatKey('C', 1)]: {}, [repeatKey('C', 2)]: {} }, D: {} } });
+
+      await expect(patch('A::B::C')).rejects.toMatchObject({
+        data: { reason: 'ambiguous_section', candidates: ['A::B::C', 'A::B::C', 'A::B::C'] },
+      });
+    });
+
+    it('rejects a path that repeats because its parent does', async () => {
+      // # A / ## B / # A / ## B
+      serveMap({ A: { B: {} }, [repeatKey('A', 1)]: { B: {} } });
+
+      await expect(patch('A::B')).rejects.toMatchObject({
+        data: { reason: 'ambiguous_section', candidates: ['A::B', 'A::B'] },
+      });
+    });
+
+    it('counts repeats under an untitled heading', async () => {
+      // ## / ### Request body / ### Request body
+      serveMap({ '': { 'Request body': {}, [repeatKey('Request body', 1)]: {} } });
+
+      await expect(patch('::Request body')).rejects.toMatchObject({
+        data: { reason: 'ambiguous_section', candidates: ['::Request body', '::Request body'] },
+      });
+    });
+
+    it('counts past sixteen repeats, where the suffix takes two digits', async () => {
+      const repeats = Object.fromEntries(
+        Array.from({ length: 18 }, (_, i) => [i === 0 ? 'Dup' : repeatKey('Dup', i), {}]),
+      );
+      serveMap(repeats);
+
+      const err = await rejectionOf(patch('Dup'));
+      expect(err.message).toContain("Heading 'Dup' occurs 18 times");
+    });
+
+    /**
+     * The plugin's parser reads none of these second `## Dup` lines as a
+     * heading — one continues a list item, the others sit inside an HTML
+     * block — so the map lists `Root::Dup` once and the PATCH lands on the only
+     * heading there is. A line-based scan of the body counts two.
+     */
+    it.each([
+      ['a heading line after an HTML line', '# Root\n## Dup\na\n\n<br>\n## Dup\n'],
+      ['a heading line continuing a list item', '# Root\n## Dup\na\n\n- item\n  ## Dup\n'],
+      ['a heading line inside an HTML comment', '# Root\n## Dup\na\n\n<!--\n## Dup\n\nold\n-->\n'],
+    ])('writes a path the plugin parses once, beside %s', async (_label, _note) => {
+      serveMap({ Root: { Dup: {} } });
+      const patched = capturePatchTarget();
+
+      await expect(patch('Root::Dup')).resolves.toBe('Root::Dup');
+      expect(patched.seen()).toBe('Root::Dup');
+    });
+
+    it('rejects a path that repeats through a setext heading', async () => {
+      // # Root / ## Dup / a / (blank) / Dup / ---
+      serveMap({ Root: { Dup: {}, [repeatKey('Dup', 1)]: {} } });
+
+      await expect(patch('Root::Dup')).rejects.toMatchObject({
+        data: { reason: 'ambiguous_section', candidates: ['Root::Dup', 'Root::Dup'] },
+      });
+    });
+
+    /**
+     * Plugin v4.x ignores `Markdown-Patch-Version` and serves the flat 1.x map,
+     * which lists a repeated path once. The resolver expands against it and
+     * counts repeats in the note body instead.
+     */
+    describe('on a plugin that serves only the flat 1.x map', () => {
+      function serveFlatMapThenNote(headings: string[], content: string): void {
+        pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, documentMap(headings));
+        pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
+          expect(lowerCased(opts.headers).accept).toBe('application/vnd.olrapi.note+json');
+          return { statusCode: 200, data: noteJson('N.md', content) };
+        });
+      }
+
+      it('expands a leaf against the flat map and writes a path that occurs once', async () => {
+        serveFlatMapThenNote(['Top', 'Top::Child'], '# Top\n## Child\n');
+        const patched = capturePatchTarget();
+
+        await expect(patch('Child')).resolves.toBe('Top::Child');
+        expect(patched.seen()).toBe('Top::Child');
+      });
+
+      it('rejects a path the note body repeats', async () => {
+        serveFlatMapThenNote(['Root', 'Root::Dup'], '# Root\n## Dup\na\n## Dup\n');
+
+        await expect(patch('Root::Dup')).rejects.toMatchObject({
+          data: { reason: 'ambiguous_section', candidates: ['Root::Dup', 'Root::Dup'] },
+        });
+      });
+    });
+  });
 });
+
+/** `headers` with every name lower-cased, so a lookup does not depend on the caller's casing. */
+function lowerCased(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+}
 
 describe('ObsidianService error classification', () => {
   it('classifies 401 as Unauthorized with a remediation message', async () => {
@@ -498,11 +705,15 @@ describe('ObsidianService error classification', () => {
       .intercept({ path: '/commands/unknown%3Acmd/', method: 'POST' })
       .reply(404, { message: 'no such command' });
 
-    await expect(service.executeCommand(ctx, 'unknown:cmd')).rejects.toMatchObject({
+    const err = await rejectionOf(service.executeCommand(ctx, 'unknown:cmd'));
+
+    expect(err).toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      message: expect.stringContaining('Unknown Obsidian command'),
-      data: { reason: 'command_unknown' },
+      message: expect.stringContaining('Unknown Obsidian command: unknown:cmd.'),
+      data: { reason: 'command_unknown', commandId: 'unknown:cmd' },
     });
+    // The ID is the caller's `commandId`, not a vault path.
+    expect(Object.hasOwn(err.data ?? {}, 'path')).toBe(false);
   });
 
   it('classifies 405 as ValidationError with path_is_directory reason', async () => {
@@ -533,7 +744,9 @@ describe('ObsidianService error classification', () => {
   });
 
   it('classifies 400 with "could not be applied" body as section_target_missing', async () => {
-    pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, documentMap(['Elsewhere']));
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, documentMapV2({ Elsewhere: {} }));
     pool
       .intercept({ path: '/vault/N.md', method: 'PATCH' })
       .reply(400, { message: 'patch could not be applied to the target' });
@@ -614,6 +827,125 @@ describe('ObsidianService search', () => {
     await service.searchJsonLogic(ctx, { glob: ['*.md', { var: 'path' }] });
     expect(seenContentType).toBe('application/vnd.olrapi.jsonlogic+json');
     expect(seenBody).toContain('"glob"');
+  });
+});
+
+/**
+ * Local REST API 5.1.0+ widens a body window by one code unit rather than
+ * split a surrogate pair, so a window whose left edge would land on the low
+ * half of an emoji starts one character early and every offset derived from
+ * `min(start, contextLength)` is one short. Issue #135.
+ */
+describe('ObsidianService.searchText / offsets across surrogate-pair window edges', () => {
+  const replyWith = (hits: RawHit[]) =>
+    pool
+      .intercept({ path: (p) => p.startsWith('/search/simple/'), method: 'POST' })
+      .reply(200, hits, { headers: { 'content-type': 'application/json' } });
+
+  /** Strip `match.source`, the shape a plugin older than 5.0.3 sends. */
+  const withoutSource = (hits: RawHit[]): RawHit[] =>
+    hits.map((h) => ({
+      ...h,
+      matches: h.matches.map((m) => ({
+        context: m.context,
+        match: { start: m.match.start, end: m.match.end },
+      })),
+    }));
+
+  it.each([
+    ['with match.source', (h: RawHit[]) => h],
+    ['without match.source', withoutSource],
+  ])(
+    'lands on the match when upstream widened the left edge (real capture, %s)',
+    async (_l, shape) => {
+      replyWith(shape(loadCapture('surrogate')));
+      const [hit] = await service.searchText(ctx, 'surrotok', 100);
+      const m = hit?.matches[0];
+      expect(m?.match).toEqual({ start: 2206, end: 2214, contextStart: 101, contextEnd: 109 });
+      expect(m?.context.slice(m.match.contextStart, m.match.contextEnd)).toBe('surrotok');
+      expect(PROBE_BODY.slice(2206 - 101, 2206 - 101 + (m?.context.length ?? 0))).toBe(m?.context);
+    },
+  );
+
+  it.each([
+    {
+      label: 'window opening exactly on a whole pair (no widening)',
+      body: `y😀${'x'.repeat(98)}surrotok end.`,
+    },
+    {
+      label: 'pair wholly inside the window',
+      body: `${'x'.repeat(50)}😀${'x'.repeat(60)}surrotok`,
+    },
+    {
+      label: 'right edge widened, left edge untouched',
+      body: `${'x'.repeat(120)}surrotok${'x'.repeat(99)}😀tail`,
+    },
+    { label: 'left edge clipped at the note start', body: `😀${'x'.repeat(40)}surrotok` },
+  ])('leaves the offset alone: $label', async ({ body }) => {
+    const { hits, truth } = simulateSimpleSearch([{ path: 'N.md', body }], 'surrotok', 100);
+    replyWith(hits);
+    const [hit] = await service.searchText(ctx, 'surrotok', 100);
+    const m = hit?.matches[0];
+    expect(m?.match.contextStart).toBe(truth.get('N.md')?.[0]?.contextStart);
+    expect(m?.context.slice(m.match.contextStart, m.match.contextEnd)).toBe('surrotok');
+  });
+
+  /**
+   * A body window equal to the basename, where both readings reproduce the
+   * token: the basename heuristic can only guess, and `match.source` knows.
+   */
+  it('reads the subject off match.source when the plugin sends it', async () => {
+    // body 'XYZab-ab-ab'; 'ab' at 6 with contextLength 3 → window body.slice(3, 11) = 'ab-ab-ab'.
+    replyWith([
+      {
+        filename: 'ab-ab-ab.md',
+        matches: [{ context: 'ab-ab-ab', match: { start: 6, end: 8, source: 'content' } }],
+      },
+    ]);
+    const [hit] = await service.searchText(ctx, 'ab', 3);
+    expect(hit?.matches[0]?.match).toEqual({ start: 6, end: 8, contextStart: 3, contextEnd: 5 });
+  });
+
+  it('keeps upstream-only fields such as match.source off the returned match', async () => {
+    replyWith(loadCapture('surrogate'));
+    const [hit] = await service.searchText(ctx, 'surrotok', 100);
+    expect(Object.keys(hit?.matches[0]?.match ?? {}).sort()).toEqual([
+      'contextEnd',
+      'contextStart',
+      'end',
+      'start',
+    ]);
+  });
+
+  /**
+   * Random bodies dense with astral characters, so window edges land on both
+   * halves of a pair at every `contextLength`. The seed is in the test name.
+   */
+  it.each([1, 2, 3])('derives exact offsets for every span (property, seed %i)', async (seed) => {
+    const rand = seededRandom(seed);
+    const alphabet = ['a', 'b', ' ', '😀', '𝒳', 'é', '\n', 'tok'];
+    for (let run = 0; run < 150; run++) {
+      const len = 20 + Math.floor(rand() * 200);
+      let body = '';
+      while (body.length < len) body += alphabet[Math.floor(rand() * alphabet.length)];
+      body += ' tok';
+      const contextLength = 1 + Math.floor(rand() * 12);
+      const withSource = rand() < 0.5;
+      const { hits, truth } = simulateSimpleSearch(
+        [{ path: 'Dir/probe tok.md', body }],
+        'tok',
+        contextLength,
+        { withSource },
+      );
+      replyWith(hits);
+      const [hit] = await service.searchText(ctx, 'tok', contextLength);
+      const expected = truth.get('Dir/probe tok.md') ?? [];
+      const got = hit?.matches.map((m) => m.match.contextStart);
+      expect(
+        got,
+        `seed ${seed} run ${run} body ${JSON.stringify(body)} L ${contextLength}`,
+      ).toEqual(expected.map((t) => t.contextStart));
+    }
   });
 });
 
@@ -1438,7 +1770,7 @@ describe('ObsidianService retry policy', () => {
 
     it('patchNote (PATCH) append: does not retry on 503', async () => {
       let attempts = 0;
-      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, documentMap([]));
+      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, documentMapV2({}));
       queueReplies('/vault/N.md', 'PATCH', 4, () => {
         attempts++;
         return { statusCode: 503 };
@@ -1457,7 +1789,7 @@ describe('ObsidianService retry policy', () => {
 
     it('patchNote (PATCH) prepend: does not retry on raw network errors', async () => {
       let attempts = 0;
-      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, documentMap([]));
+      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(200, documentMapV2({}));
       queueReplies('/vault/N.md', 'PATCH', 4, () => {
         attempts++;
         throw new TypeError('ECONNRESET');

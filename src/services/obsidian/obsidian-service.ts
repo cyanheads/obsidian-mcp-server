@@ -7,6 +7,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import {
+  configurationError,
   conflict,
   forbidden,
   JsonRpcErrorCode,
@@ -20,6 +21,7 @@ import { httpStatusToErrorCode, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Agent, type Dispatcher, type RequestInit, fetch as undiciFetch } from 'undici';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import { PathPolicy } from './path-policy.js';
+import { listHeadingPaths } from './section-extractor.js';
 import type {
   ApiExtension,
   DocumentMap,
@@ -92,10 +94,41 @@ interface RawTagsListing {
   totalFileTags?: number;
 }
 
+/**
+ * Upstream `POST /search/simple/` payload. `match.source` names the subject a
+ * span indexes; plugin 5.0.3 and later send it, older builds omit it.
+ */
 interface RawSimpleSearchHit {
   filename: string;
-  matches: Array<{ context: string; match: { start: number; end: number } }>;
+  matches: RawSimpleSearchMatch[];
   score?: number;
+}
+
+interface RawSimpleSearchMatch {
+  context: string;
+  match: { start: number; end: number; source?: 'filename' | 'content' };
+}
+
+/** A text-search span with its `context` offsets resolved and its subject known. */
+interface ResolvedSpan {
+  context: string;
+  match: { start: number; end: number; contextStart: number; contextEnd: number };
+  subject: 'body' | 'filename';
+}
+
+/**
+ * Upstream document map as markdown-patch 2.0 serializes it. Its `headings`
+ * nest by containment, and every repeat of a sibling heading keeps its own key
+ * (see `DUPLICATE_SUFFIX`), so the tree holds each occurrence that the flat
+ * 1.x map collapses. Plugin v4.x predates `Markdown-Patch-Version` and answers
+ * with the flat 1.x `string[]` whatever the header asks for.
+ */
+interface RawDocumentMapV2 {
+  headings: HeadingTree | string[];
+}
+
+interface HeadingTree {
+  [text: string]: HeadingTree;
 }
 
 interface RawStructuredSearchHit {
@@ -162,11 +195,61 @@ const MARKDOWN_PATCH_VERSION = '1';
 const HEADING_DELIMITER = '::';
 
 /**
+ * The suffix markdown-patch 2.0 appends to the key of the second and later
+ * occurrences of a sibling heading: U+FC750, then the occurrence index minus
+ * one in hex, each digit written as one of U+F6440–U+F644F. The plugin refuses
+ * a note whose own heading text ends this way, so stripping it is exact.
+ */
+const DUPLICATE_SUFFIX = /\u{FC750}[\u{F6440}-\u{F644F}]+$/u;
+
+/**
  * Methods safe to retry on transient errors. POST/PATCH are excluded — a
  * successful upstream write with a lost response would double-apply on retry
  * (duplicate `append`, re-run Obsidian command).
  */
 const RETRY_SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'PUT', 'DELETE']);
+
+/**
+ * Codes a TLS stack reports when it refuses the server's certificate. Both
+ * runtimes use OpenSSL's names. The first four were each produced on Bun 1.4.0
+ * and Node 26.5.0 (a self-signed leaf, an untrusted issuer, a SAN mismatch, an
+ * expired leaf); the rest are the same verifier's documented neighbours.
+ */
+const CERTIFICATE_REJECTION_CODES: ReadonlySet<string> = new Set([
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+]);
+
+/**
+ * Codes for a connection that failed before any response. Node reports errno
+ * names plus undici's own (`UND_ERR_SOCKET` is a socket closed with no bytes);
+ * Bun reports a refused connection as the non-errno `ConnectionRefused` and the
+ * others by errno name. Refused, host-not-found, and reset were produced on
+ * both runtimes; the unreachable-network and connect-timeout codes are the same
+ * failure reached over a route that drops packets instead of refusing them.
+ */
+const CONNECTION_FAILURE_CODES: ReadonlySet<string> = new Set([
+  'ECONNREFUSED',
+  'ConnectionRefused',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNRESET',
+  'UND_ERR_SOCKET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+]);
+
+/**
+ * Route prefixes that address a note. An error on one of these echoes the
+ * caller's note under `data.path`; no other route carries a vault path.
+ */
+const NOTE_ROUTE_PREFIXES = ['/vault/', '/open/', '/active/', '/periodic/'] as const;
 
 export class ObsidianService {
   readonly #config: ServerConfig;
@@ -402,12 +485,9 @@ export class ObsidianService {
     }
     const url = this.#targetToPath(target);
     const requestUrl = `${this.#config.baseUrl}${url}`;
-    const res = await this.#fetch(requestUrl, {
+    const res = await this.#send(ctx, requestUrl, {
       method: 'HEAD',
       headers: { Authorization: `Bearer ${this.#config.apiKey}` },
-      dispatcher: this.#dispatcher,
-      ...this.#tlsInit(requestUrl),
-      signal: ctx.signal,
     });
     if (res.status === 404) return null;
     if (!res.ok) await this.#throwForStatus(res, url, ctx, { requestedUrl: requestUrl });
@@ -469,11 +549,15 @@ export class ObsidianService {
   // ── Search ───────────────────────────────────────────────────────────────
 
   /**
-   * Text search. The upstream materializes one context window per matching
-   * note before it responds, so an oversized `contextLength` on a broad query
-   * exhausts V8's string capacity and comes back as an opaque 500 — caught
-   * here and re-thrown typed, the way `searchOmnisearch` re-throws its own
-   * reachability failure.
+   * Text search. Each upstream span gets its `context` offsets resolved
+   * (`contextRelativeSpan`), then a multi-token query's spans are merged into
+   * match locations (`mergeIntoLocations`).
+   *
+   * The upstream materializes one context window per matching note before it
+   * responds, so an oversized `contextLength` on a broad query exhausts V8's
+   * string capacity and comes back as an opaque 500 — caught here and
+   * re-thrown typed, the way `searchOmnisearch` re-throws its own reachability
+   * failure.
    */
   async searchText(ctx: Context, query: string, contextLength = 100): Promise<TextSearchHit[]> {
     const params = new URLSearchParams({ query, contextLength: String(contextLength) });
@@ -499,15 +583,17 @@ export class ObsidianService {
       );
     }
     const raw = (await res.json()) as RawSimpleSearchHit[];
+    const tokens = queryTokens(query);
     // Upstream returns a constant `score` that carries no ranking signal for
     // text mode — drop it on the way out so consumers don't mistake it for
     // relevance. Omnisearch is the source of real BM25 ranking.
     return raw.map((h) => ({
       filename: h.filename,
-      matches: h.matches.map((m) => ({
-        context: m.context,
-        match: { ...m.match, ...contextRelativeSpan(m, h.filename, contextLength, query) },
-      })),
+      matches: mergeIntoLocations(
+        h.matches.map((m) => contextRelativeSpan(m, h.filename, contextLength, tokens)),
+        tokens.length,
+        contextLength,
+      ).map(({ context, match }) => ({ context, match })),
     }));
   }
 
@@ -683,35 +769,99 @@ export class ObsidianService {
    * leaf name reaches the same section on writes that it already reaches on
    * reads. `extractSection` matches a heading at any depth, so an agent that
    * read `## Sibling` by its bare name carries that name to a write, where
-   * upstream targeting wants the whole `Parent::Child` chain.
+   * upstream targeting wants the whole `Parent::Child` chain. Locators that
+   * already carry the delimiter pass through unexpanded; non-heading targets
+   * skip resolution entirely.
    *
-   * Resolution order: an exact map entry wins (preserving upstream's own
-   * interpretation), then a unique leaf match is expanded, then several leaf
-   * matches are rejected as ambiguous rather than silently writing to the first.
-   * A leaf absent from the map passes through untouched so
-   * `Create-Target-If-Missing` still creates it and the upstream's own
-   * target-miss error still surfaces. Non-heading targets and locators that
-   * already carry the delimiter skip the lookup entirely.
+   * The resolved path must then name exactly one heading. The 1.x map the
+   * PATCH resolves against keys headings by full path, so a path that repeats
+   * in the note is listed once, at its last occurrence — the PATCH would land
+   * on the last repeat while a section read returns the first. A write to a
+   * repeated path is rejected as ambiguous. The count comes from the plugin's
+   * own parse (`#headingIndex`), not a local scan: the two disagree on
+   * headings inside list items, HTML blocks, and setext underlines, and a local
+   * count there rejected writes the PATCH would have landed correctly.
    */
   async #resolveHeadingTarget(
     ctx: Context,
     target: NoteTarget,
     headers: PatchHeaders,
   ): Promise<string> {
-    if (headers.targetType !== 'heading' || headers.target.includes(HEADING_DELIMITER)) {
-      return headers.target;
-    }
-    const map = await this.#rawGetDocumentMap(ctx, target);
-    if (map.headings.includes(headers.target)) return headers.target;
+    if (headers.targetType !== 'heading') return headers.target;
+    const { headings, occurrences } = await this.#headingIndex(ctx, target);
+    const resolved = headers.target.includes(HEADING_DELIMITER)
+      ? headers.target
+      : this.#expandHeadingLeaf(target, headers.target, headings);
 
-    const matches = map.headings.filter((h) => h.split(HEADING_DELIMITER).pop() === headers.target);
+    const repeats = occurrences.filter((p) => p === resolved);
+    if (repeats.length <= 1) return resolved;
+
+    const display = displayPath(this.#targetToPath(target));
+    const named =
+      resolved === headers.target ? `'${resolved}'` : `'${headers.target}' (${resolved})`;
+    throw conflict(
+      `Heading ${named} occurs ${repeats.length} times in ${display}, so a section write cannot tell which one to edit.`,
+      {
+        path: display,
+        reason: 'ambiguous_section',
+        candidates: repeats,
+        recovery: {
+          hint: `Every heading in \`candidates\` has the same full path, so no section locator picks one. Rename all but one of them so each path is unique — obsidian_replace_in_note can rewrite a heading line — then retry. obsidian_get_note with format "section" reads the first occurrence.`,
+        },
+      },
+    );
+  }
+
+  /**
+   * The note's heading paths as the plugin parses them, in one request:
+   * `headings` lists each distinct path the way the 1.x document map does
+   * (what a leaf expands against), and `occurrences` lists every heading,
+   * repeats included (what the repeat count reads).
+   *
+   * Both come from the markdown-patch 2.0 document map, whose tree keeps a key
+   * per repeat; flattened with the repeat suffixes stripped and collapsed, it
+   * is the 1.x `headings` array exactly, since both formats read the same
+   * parser's top-level heading tokens. Plugin v4.x ignores the version header
+   * and answers with the 1.x array, which cannot count repeats, so there the
+   * note body is fetched and scanned locally (`listHeadingPaths`).
+   */
+  async #headingIndex(
+    ctx: Context,
+    target: NoteTarget,
+  ): Promise<{ headings: string[]; occurrences: string[] }> {
+    const res = await this.#request(ctx, this.#targetToPath(target), {
+      method: 'GET',
+      headers: { Accept: DOCUMENT_MAP_ACCEPT, [MARKDOWN_PATCH_VERSION_HEADER]: '2' },
+      noteRead: true,
+    });
+    const map = (await res.json()) as RawDocumentMapV2;
+    if (Array.isArray(map.headings)) {
+      const { content } = await this.#rawGetNoteJson(ctx, target);
+      return { headings: map.headings, occurrences: listHeadingPaths(content) };
+    }
+    const occurrences = flattenHeadingTree(map.headings);
+    return { headings: [...new Set(occurrences)].filter(Boolean), occurrences };
+  }
+
+  /**
+   * Expand a bare heading leaf against the note's heading paths. Resolution
+   * order: an exact entry wins (preserving upstream's own interpretation),
+   * then a unique leaf match is expanded, then several leaf matches are
+   * rejected as ambiguous rather than silently writing to the first. A leaf
+   * absent from the paths passes through untouched so `Create-Target-If-Missing`
+   * still creates it and the upstream's own target-miss error still surfaces.
+   */
+  #expandHeadingLeaf(target: NoteTarget, leaf: string, headings: string[]): string {
+    if (headings.includes(leaf)) return leaf;
+
+    const matches = headings.filter((h) => h.split(HEADING_DELIMITER).pop() === leaf);
     const [first] = matches;
-    if (first === undefined) return headers.target;
+    if (first === undefined) return leaf;
     if (matches.length === 1) return first;
 
     const display = displayPath(this.#targetToPath(target));
     throw conflict(
-      `Heading '${headers.target}' is ambiguous in ${display} — ${matches.length} headings share that name: ${matches.join(', ')}.`,
+      `Heading '${leaf}' is ambiguous in ${display} — ${matches.length} headings share that name: ${matches.join(', ')}.`,
       {
         path: display,
         reason: 'ambiguous_section',
@@ -794,6 +944,37 @@ export class ObsidianService {
     return { tls: { rejectUnauthorized: false } };
   }
 
+  /**
+   * One request to the Local REST API — the single attempt `#request` hands
+   * to `withRetry`, and `tryGetSize`'s HEAD — with the dispatcher, the scoped
+   * TLS relaxation, and the caller's signal attached.
+   *
+   * A rejected `fetch` is classified here, inside the attempt, because the
+   * attempt is where the retry decision is made: a certificate rejection comes
+   * back as a non-transient `ConfigurationError` and `withRetry` rethrows it
+   * on the spot, while an unreachable plugin comes back as a transient
+   * `ServiceUnavailable` and keeps its retries (issues #133 and #136). A
+   * rejection that is neither passes through untouched, and so does anything
+   * thrown after the caller aborted — a cancellation is not a network fault.
+   */
+  async #send(
+    ctx: Context,
+    url: string,
+    init: { method: string; headers: Record<string, string>; body?: string },
+  ): Promise<UndiciResponse> {
+    try {
+      return await this.#fetch(url, {
+        ...init,
+        dispatcher: this.#dispatcher,
+        ...this.#tlsInit(url),
+        signal: ctx.signal,
+      });
+    } catch (err) {
+      if (ctx.signal?.aborted) throw err;
+      throw classifyFetchRejection(err) ?? err;
+    }
+  }
+
   #request(
     ctx: Context,
     pathAndQuery: string,
@@ -820,13 +1001,10 @@ export class ObsidianService {
     };
 
     const exec = async (): Promise<UndiciResponse> => {
-      const res = await this.#fetch(url, {
+      const res = await this.#send(ctx, url, {
         method: init.method,
         headers,
         ...(init.body !== undefined ? { body: init.body } : {}),
-        dispatcher: this.#dispatcher,
-        ...this.#tlsInit(url),
-        signal: ctx.signal,
       });
       if (!res.ok) {
         await this.#throwForStatus(res, pathAndQuery, ctx, {
@@ -955,10 +1133,12 @@ export class ObsidianService {
    * Classify an upstream error response and throw.
    *
    * **Containment invariant.** Four things leave this method on the wire and
-   * nothing else: a message authored in this file, the request path the caller
-   * supplied (`data.path`), the HTTP status (`data.status`, default branch),
-   * and the calling tool's own contract `reason` + `recovery`. The upstream's
-   * response body never crosses, in any branch, under any key.
+   * nothing else: a message authored in this file, the caller's own identifier
+   * (`data.path` on a note route, `data.commandId` on a command, neither on a
+   * route that carries no caller input — see `callerIdentifier`), the HTTP
+   * status (`data.status`, default branch), and the calling tool's own
+   * contract `reason` + `recovery`. The upstream's response body never
+   * crosses, in any branch, under any key.
    *
    * That is stricter than redaction, deliberately. The Local REST API
    * interleaves genuine diagnostics with vault data in one string: a rejected
@@ -1005,7 +1185,7 @@ export class ObsidianService {
     const upstreamMsg = typeof body?.message === 'string' ? body.message : text.trim();
     const cause = new UpstreamErrorText(upstreamMsg, opts.requestedUrl);
     const data = (reason?: string) => ({
-      path: display,
+      ...callerIdentifier(path),
       ...(reason !== undefined ? { reason, ...ctx.recoveryFor(reason) } : {}),
     });
 
@@ -1224,47 +1404,195 @@ export function encodeVaultPath(path: string): string {
 }
 
 /**
- * Locate the match span inside the `context` window the upstream ships with it.
+ * Every heading in a markdown-patch 2.0 heading tree as its `::`-joined full
+ * path, in tree order, one entry per occurrence. A top-level untitled heading
+ * is `""`, and its children read `::Child`, as the 1.x map writes them.
+ */
+function flattenHeadingTree(tree: HeadingTree, parent?: string): string[] {
+  return Object.entries(tree).flatMap(([key, children]) => {
+    const text = key.replace(DUPLICATE_SUFFIX, '');
+    const path = parent === undefined ? text : `${parent}${HEADING_DELIMITER}${text}`;
+    return [path, ...flattenHeadingTree(children, path)];
+  });
+}
+
+/**
+ * The query as Obsidian's `prepareSimpleSearch` reads it: split on whitespace,
+ * case-folded, each distinct token required. Quotes are ordinary characters.
+ */
+function queryTokens(query: string): string[] {
+  return [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
+}
+
+const isHighSurrogate = (cu: number) => cu >= 0xd800 && cu <= 0xdbff;
+const isLowSurrogate = (cu: number) => cu >= 0xdc00 && cu <= 0xdfff;
+
+/**
+ * Locate the match span inside the `context` window the upstream ships with
+ * it, and name the subject its `start`/`end` index.
  *
- * `start`/`end` are offsets into whichever subject the plugin matched, and
- * there are two. For a **body match** the subject is the note text and the
- * window is `body.slice(max(0, start - contextLength), min(len, end + contextLength))`,
+ * There are two subjects. For a **body match** the subject is the note text
+ * and the window is `body.slice(max(0, start - contextLength), end + contextLength)`,
  * so the span sits `min(start, contextLength)` characters into `context`. For a
  * **filename match** the subject is the note's basename and the plugin returns
  * that basename whole as `context`, so the span sits at `start` — which runs
  * past `min(start, contextLength)` as soon as the name is longer than the
- * window. A single hit's `matches[]` can carry both kinds. Verified against
- * Local REST API v5.0.3.
+ * window. A single hit's `matches[]` can carry both kinds.
  *
- * `context === basename` is the cheap separator, but it is not decisive: a body
- * window whose left edge is trimmed can coincide with the basename (a note whose
- * own name is quoted in its body, matched so the window lands on that quote),
- * and then the two readings disagree and the filename one slices the wrong text
- * — often past the end of `context` entirely. Where they disagree, settle it on
- * the text rather than the coincidence: the plugin matches whole query tokens,
- * so the correct reading reproduces one. An inconclusive check keeps the
- * filename reading, which is what the coincidence test alone would have picked.
+ * `match.source` (`"filename"` / `"content"`, plugin 5.0.3+) names the subject
+ * outright. Without it, `context === basename` is the cheap separator, but it
+ * is not decisive: a body window whose left edge is trimmed can coincide with
+ * the basename (a note whose own name is quoted in its body), and then the two
+ * readings disagree. Where they do, the text settles it — the correct reading
+ * reproduces the match — and an inconclusive check keeps the filename reading.
+ *
+ * Plugin 5.1.0+ widens a body window by one code unit rather than split a
+ * surrogate pair (`widenToCodePointBoundaries`), so the window can start one
+ * character before `start - contextLength` — see `bodyWindowOffset`.
  */
 function contextRelativeSpan(
-  m: { context: string; match: { start: number; end: number } },
+  m: RawSimpleSearchMatch,
   filename: string,
   contextLength: number,
-  query: string,
-): { contextStart: number; contextEnd: number } {
-  const span = m.match.end - m.match.start;
-  const bodyStart = Math.min(m.match.start, contextLength);
-  const basename = (filename.split('/').pop() ?? filename).replace(/\.[^./]+$/, '');
-
-  const at = (i: number) => ({ contextStart: i, contextEnd: i + span });
-  if (m.context !== basename || m.match.start === bodyStart) return at(bodyStart);
-
-  const reproducesToken = (i: number) => {
-    const slice = m.context.slice(i, i + span);
-    return slice.length === span && query.toLowerCase().includes(slice.toLowerCase());
+  tokens: string[],
+): ResolvedSpan {
+  const { start, end, source } = m.match;
+  const span = end - start;
+  const at = (subject: ResolvedSpan['subject'], i: number): ResolvedSpan => ({
+    context: m.context,
+    match: { start, end, contextStart: i, contextEnd: i + span },
+    subject,
+  });
+  /**
+   * The matched text is a run of coalesced token occurrences, so it opens with
+   * one token and closes with one. A reading shifted by a character fails
+   * that: upstream reports every occurrence, so a token beginning one
+   * character early, or ending one character late, would have been coalesced
+   * into this span already.
+   */
+  const reproduces = (i: number) => {
+    const slice = m.context.slice(i, i + span).toLowerCase();
+    return (
+      slice.length === span &&
+      tokens.some((t) => slice.startsWith(t)) &&
+      tokens.some((t) => slice.endsWith(t))
+    );
   };
-  return reproducesToken(m.match.start) || !reproducesToken(bodyStart)
-    ? at(m.match.start)
-    : at(bodyStart);
+  if (source === 'filename') return at('filename', start);
+  const bodyStart = bodyWindowOffset(m, contextLength, reproduces);
+  if (source === 'content') return at('body', bodyStart);
+
+  const basename = (filename.split('/').pop() ?? filename).replace(/\.[^./]+$/, '');
+  if (m.context !== basename) return at('body', bodyStart);
+  if (start === bodyStart) return at('filename', start);
+  return reproduces(start) || !reproduces(bodyStart)
+    ? at('filename', start)
+    : at('body', bodyStart);
+}
+
+/**
+ * Where a body match sits in its window: `min(start, contextLength)`, or one
+ * further when upstream widened the left edge to keep a surrogate pair whole.
+ *
+ * The widening happens only when the window is not clipped at the note start
+ * and its unwidened edge fell on a low surrogate, and it leaves a window that
+ * opens on a whole pair. A window that simply begins on a pair looks the same
+ * from `context` alone, so between the two candidate offsets the one that
+ * reproduces the match wins; a tie keeps the unwidened reading, which is also
+ * correct for plugins that predate the widening.
+ */
+function bodyWindowOffset(
+  m: RawSimpleSearchMatch,
+  contextLength: number,
+  reproduces: (i: number) => boolean,
+): number {
+  const base = Math.min(m.match.start, contextLength);
+  if (m.match.start <= contextLength) return base;
+  if (!isHighSurrogate(m.context.charCodeAt(0)) || !isLowSurrogate(m.context.charCodeAt(1))) {
+    return base;
+  }
+  return !reproduces(base) && reproduces(base + 1) ? base + 1 : base;
+}
+
+/**
+ * Merge a hit's spans into match locations. `prepareSimpleSearch` reports one
+ * span per token occurrence and coalesces only spans that touch, so each word
+ * of a phrase arrives as its own span with a near-identical window.
+ *
+ * Walking the spans in upstream order, a location takes the next span when all
+ * of these hold:
+ *
+ * - Same subject. Body and basename offsets have different origins.
+ * - `next.start - location.end ≤ 2 × contextLength`, which is when the two
+ *   windows overlap or abut. The union window is then contiguous and no longer
+ *   than the two it replaces, so a merge never grows the response.
+ * - The location does not already hold that span's case-folded text. Without
+ *   this bound a common token chains transitively across a whole note into a
+ *   single unbounded window that counts once against `maxMatchesPerHit`.
+ * - The windows agree on the text they share. The stitch is computed from
+ *   each window's real extent, so it follows edge clipping and surrogate
+ *   widening; a disagreement means the offsets are wrong, and refusing beats
+ *   fabricating note text.
+ *
+ * A query with a single distinct token is left alone, so single-word results
+ * keep one match per occurrence.
+ */
+function mergeIntoLocations(
+  spans: ResolvedSpan[],
+  distinctTokens: number,
+  contextLength: number,
+): ResolvedSpan[] {
+  if (distinctTokens < 2) return spans;
+  const locations: ResolvedSpan[] = [];
+  let current: { location: ResolvedSpan; texts: Set<string> } | undefined;
+  for (const span of spans) {
+    const text = matchedText(span);
+    if (current && !current.texts.has(text)) {
+      const joined = joinLocation(current.location, span, contextLength);
+      if (joined) {
+        current.location = joined;
+        current.texts.add(text);
+        continue;
+      }
+    }
+    if (current) locations.push(current.location);
+    current = { location: span, texts: new Set([text]) };
+  }
+  if (current) locations.push(current.location);
+  return locations;
+}
+
+function matchedText(span: ResolvedSpan): string {
+  return span.context.slice(span.match.contextStart, span.match.contextEnd).toLowerCase();
+}
+
+/** `location` extended through `next`, or `undefined` when the two may not merge. */
+function joinLocation(
+  location: ResolvedSpan,
+  next: ResolvedSpan,
+  contextLength: number,
+): ResolvedSpan | undefined {
+  if (next.subject !== location.subject) return;
+  const gap = next.match.start - location.match.end;
+  if (gap < 0 || gap > 2 * contextLength) return;
+  /** Subject offsets of each window's first character. */
+  const left = location.match.start - location.match.contextStart;
+  const nextLeft = next.match.start - next.match.contextStart;
+  const offset = nextLeft - left;
+  const shared = location.context.length - offset;
+  if (offset < 0 || shared < 0) return;
+  const head = next.context.slice(0, shared);
+  if (location.context.slice(offset, offset + head.length) !== head) return;
+  return {
+    context: location.context + next.context.slice(shared),
+    match: {
+      start: location.match.start,
+      end: next.match.end,
+      contextStart: location.match.contextStart,
+      contextEnd: next.match.end - left,
+    },
+    subject: location.subject,
+  };
 }
 
 /**
@@ -1381,6 +1709,78 @@ function periodOf(urlPath: string): string {
 /** The request path with its query string dropped — the route alone. */
 function routeOf(urlPath: string): string {
   return urlPath.split('?')[0] ?? urlPath;
+}
+
+/**
+ * The caller's identifier for an error on `urlPath`, keyed by the input it
+ * echoes — the same convention `nameRegex` and `contextLength` follow. A note
+ * route carries the note as `path`; `/commands/<id>/` carries the ID as
+ * `commandId`, which is what `obsidian_execute_command` calls it. Every other
+ * route (`/`, `/tags/`, `/commands/`, `/search/`, `/search/simple/`) carries
+ * no caller identifier, so it gets no key — `path` there used to hold the
+ * route string itself, which names no note (issue #130).
+ */
+function callerIdentifier(
+  urlPath: string,
+): { path: string } | { commandId: string } | Record<string, never> {
+  if (NOTE_ROUTE_PREFIXES.some((prefix) => urlPath.startsWith(prefix))) {
+    return { path: displayPath(urlPath) };
+  }
+  if (/^\/commands\/[^/]+\/?$/.test(routeOf(urlPath))) {
+    return { commandId: displayPath(urlPath) };
+  }
+  return {};
+}
+
+/**
+ * Classify a rejected `fetch` — one that produced no response at all — or
+ * return `undefined` to leave it as thrown.
+ *
+ * The two runtimes put the code in different places: Bun on the thrown error
+ * itself, Node's undici one level down on `cause` under a bare `TypeError:
+ * fetch failed`. Both levels are read, and the result is built from the code
+ * alone, so a Bun and a Node rejection produce the same message and `data`.
+ * Neither the runtime's own text nor the URL it names reaches the wire; the
+ * rejection rides as `cause`, the channel `#throwForStatus` uses for the same
+ * reason.
+ *
+ * The recovery hint is written inline, as `encodeVaultPath` writes
+ * `path_traversal`'s: both failures are the operator's to fix and reachable
+ * from every tool and resource — including the two resources that declare no
+ * `errors[]` for `ctx.recoveryFor` to resolve against.
+ */
+function classifyFetchRejection(err: unknown): McpError | undefined {
+  const codes = [err, err instanceof Error ? err.cause : undefined].flatMap((e) => {
+    const code = (e as { code?: unknown } | null | undefined)?.code;
+    return typeof code === 'string' ? [code] : [];
+  });
+
+  const certificate = codes.find((code) => CERTIFICATE_REJECTION_CODES.has(code));
+  if (certificate !== undefined) {
+    return configurationError(
+      `The Obsidian Local REST API's TLS certificate failed verification (${certificate}).`,
+      {
+        reason: 'certificate_rejected',
+        recovery: {
+          hint: "OBSIDIAN_VERIFY_SSL=true accepts only a certificate this runtime trusts, and the Local REST API's HTTPS port serves a self-signed one by default. Set OBSIDIAN_VERIFY_SSL=false, or point OBSIDIAN_BASE_URL at the plugin's plain-HTTP port (27123 by default).",
+        },
+      },
+      { cause: err },
+    );
+  }
+  if (codes.some((code) => CONNECTION_FAILURE_CODES.has(code))) {
+    return serviceUnavailable(
+      'Could not connect to the Obsidian Local REST API.',
+      {
+        reason: 'obsidian_unreachable',
+        recovery: {
+          hint: 'Confirm Obsidian is running with the Local REST API plugin enabled, and that OBSIDIAN_BASE_URL names the host and port the plugin listens on.',
+        },
+      },
+      { cause: err },
+    );
+  }
+  return;
 }
 
 /**

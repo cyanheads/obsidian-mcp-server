@@ -12,8 +12,9 @@
  * @module tests/helpers
  */
 
+import type { McpError } from '@cyanheads/mcp-ts-core/errors';
 import { Headers, type HeadersInit, Response } from 'undici';
-import { afterEach, beforeEach } from 'vitest';
+import { afterEach, beforeEach, expect } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import {
   type ObsidianFetch,
@@ -50,6 +51,102 @@ export function makeTestConfig(overrides: Partial<ServerConfig> = {}): ServerCon
     readOnly: false,
     ...overrides,
   };
+}
+
+/**
+ * A `fetch` rejection as Bun raises it: one `TypeError` carrying the code
+ * itself. Shapes recorded against Bun 1.4.0 — a self-signed certificate is
+ * `code: 'DEPTH_ZERO_SELF_SIGNED_CERT'`, a refused connection the non-errno
+ * `code: 'ConnectionRefused'`.
+ */
+export function bunFetchRejection(code: string, message: string): TypeError {
+  return Object.assign(new TypeError(message), { code });
+}
+
+/**
+ * A `fetch` rejection as Node's undici raises it: a bare `TypeError: fetch
+ * failed` with the coded error one level down on `cause`. Recorded against
+ * Node 26.5.0. `aggregate` reproduces a refused `localhost`, where both
+ * address families fail and the cause is an `AggregateError` carrying the
+ * shared code.
+ */
+export function nodeFetchRejection(
+  code: string,
+  message: string,
+  opts: { aggregate?: boolean } = {},
+): TypeError {
+  const coded = opts.aggregate
+    ? Object.assign(new AggregateError([new Error(message), new Error(message)], ''), { code })
+    : Object.assign(new Error(message), { code });
+  return new TypeError('fetch failed', { cause: coded });
+}
+
+/**
+ * A stub fetch that plays `outcomes` in order — call `n` gets outcome `n`, and
+ * the last one repeats — recording every call. An `Error` outcome rejects; a
+ * response outcome resolves. Counting calls through the real `#request` /
+ * `withRetry` path is what makes an attempt-count assertion mean anything.
+ */
+export function sequencedFetch(...outcomes: Array<Error | (() => MockResponse)>): {
+  calls: Array<{ init: Parameters<ObsidianFetch>[1]; url: string }>;
+  fetchImpl: ObsidianFetch;
+} {
+  const calls: Array<{ init: Parameters<ObsidianFetch>[1]; url: string }> = [];
+  const fetchImpl: ObsidianFetch = async (url, init) => {
+    calls.push({ url, init });
+    const outcome = outcomes[Math.min(calls.length, outcomes.length) - 1];
+    if (outcome instanceof Error) throw outcome;
+    if (!outcome) throw new Error('sequencedFetch: no outcomes scripted');
+    return outcome();
+  };
+  return { calls, fetchImpl };
+}
+
+/**
+ * Assert that `p` rejects, then hand back what it rejected with so the caller
+ * can make several assertions against one error.
+ */
+export async function rejectionOf<E = McpError>(p: Promise<unknown>): Promise<E> {
+  await expect(p).rejects.toBeDefined();
+  return p.then(
+    () => expect.unreachable('expected a rejection'),
+    (e: unknown) => e as E,
+  );
+}
+
+/**
+ * A `note+json` reply body carrying `content`. On plugin v4.x, whose document
+ * map cannot count repeats, a heading-targeted write reads it to confirm the
+ * resolved heading path names exactly one heading.
+ */
+export function noteJson(path: string, content: string) {
+  return { path, content, frontmatter: {}, tags: [], stat: { ctime: 0, mtime: 0, size: 0 } };
+}
+
+/** A markdown-patch 2.0 heading tree: each key a heading, each value its child headings. */
+export interface HeadingTree {
+  [text: string]: HeadingTree;
+}
+
+/**
+ * The key markdown-patch 2.0 gives the `n`th repeat (`n ≥ 1`) of a sibling
+ * heading: the text, U+FC750, then `n − 1` in hex with each digit spelled as
+ * one of U+F6440–U+F644F. Written out from markdown-patch 2.0.0's
+ * `projection.js` rather than shared with the service.
+ */
+export function repeatKey(text: string, n: number): string {
+  const digits = [...(n - 1).toString(16)].map((d) =>
+    String.fromCodePoint(0xf6440 + Number.parseInt(d, 16)),
+  );
+  return `${text}${String.fromCodePoint(0xfc750)}${digits.join('')}`;
+}
+
+/**
+ * A document-map reply in markdown-patch 2.0 format — the read a
+ * heading-targeted write makes before its PATCH.
+ */
+export function documentMapV2(headings: HeadingTree) {
+  return { version: 'abc123', frontmatterFields: [], headings, blocks: [] };
 }
 
 export type PathMatcher = string | ((path: string) => boolean);
