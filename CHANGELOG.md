@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.6.0](changelog/3.6.x/3.6.0.md) — 2026-09-23
+
+obsidian_patch_note, obsidian_append_to_note, obsidian_write_note, and the document map now speak markdown-patch 2.0 on Local REST API v5.x, required before plugin v6.0 removes the 1.x format they used to pin.
+
 ## [3.5.5](changelog/3.5.x/3.5.5.md) — 2026-09-22
 
 TLS certificate rejection and an unreachable Local REST API now surface as typed, actionable errors instead of a hintless InternalError, multi-word text search and inline tag matching are fixed, and a section write to a repeated heading path is rejected instead of landing on the wrong occurrence.

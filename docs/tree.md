@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 22:38:48
+Generated on: 2026-09-23 19:17:20
 
 ```text
 obsidian-mcp-server/
@@ -30,6 +30,7 @@ obsidian-mcp-server/
 │   ├── 3.3.x/
 │   ├── 3.4.x/
 │   ├── 3.5.x/
+│   ├── 3.6.x/
 │   └── template.md
 ├── docs/
 │   └── openapi.yaml
@@ -174,7 +175,9 @@ obsidian-mcp-server/
 │   ├── services/
 │   │   └── obsidian/
 │   │       ├── frontmatter-ops.ts
+│   │       ├── markdown-blocks.ts
 │   │       ├── obsidian-service.ts
+│   │       ├── patch-instruction.ts
 │   │       ├── path-policy.ts
 │   │       ├── section-extractor.ts
 │   │       └── types.ts
@@ -206,10 +209,12 @@ obsidian-mcp-server/
 │   │   ├── obsidian-service-base-url.test.ts
 │   │   ├── obsidian-service-close.test.ts
 │   │   ├── obsidian-service-error-containment.test.ts
+│   │   ├── obsidian-service-patch-format.test.ts
 │   │   ├── obsidian-service-path-policy.test.ts
 │   │   ├── obsidian-service-tls.test.ts
 │   │   ├── obsidian-service-unreachable.test.ts
 │   │   ├── obsidian-service.test.ts
+│   │   ├── patch-instruction.test.ts
 │   │   ├── path-policy.test.ts
 │   │   ├── section-extractor.test.ts
 │   │   └── simple-search-simulator.test.ts
