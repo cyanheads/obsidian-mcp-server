@@ -689,12 +689,13 @@ describe('listTagsFromContent / frontmatter is not body', () => {
 });
 
 /**
- * `#` inside a link is link syntax, not a tag: a heading anchor, an alias, or
- * link text. Reading one as a tag makes `list` wrong and `remove` destructive —
+ * `#` inside a wikilink is link syntax, not a tag: a heading anchor or an
+ * alias. Reading one as a tag makes `list` wrong and `remove` destructive —
  * stripping `Overview` from `[[#Overview & Notes]]` leaves `[[& Notes]]`, with
- * nothing in the file to reconstruct the target from. The whole `[[…]]` /
- * `[…](…)` span is protected, so the result does not depend on what the linked
- * note happens to be named.
+ * nothing in the file to reconstruct the target from. The whole `[[…]]` span
+ * is protected, so the result does not depend on what the linked note happens
+ * to be named. A markdown link is different: Obsidian reads a tag in its text,
+ * and only its destination or label is link syntax (issue #140).
  */
 describe('listTagsFromContent / link spans are not inline tags', () => {
   it.each([
@@ -705,19 +706,24 @@ describe('listTagsFromContent / link spans are not inline tags', () => {
     ['note name ending in a non-ASCII character', 'see [[Note✅#Overview]] here'],
     ['wikilink alias text', 'see [[Note#Heading|see #alias]] here'],
     ['embedded wikilink', 'see ![[Note#Overview]] here'],
-    ['markdown link text', 'see [Chat #support](https://example.dev) here'],
-    ['markdown link text on an angle-bracketed URL', 'see [Chat #support](<a b.md>) here'],
-    ['reference-style link text', 'see [Chat #support][chat] here\n\n[chat]: https://example.dev'],
-    ['collapsed reference-style link text', 'see [Chat #support][] here'],
     ['block anchor', 'see [[Note#^blockid]] here'],
   ])('reports no inline tag for a %s', (_label, input) => {
     expect(listTagsFromContent(input, {}).inline).toEqual([]);
   });
 
   it.each([
+    ['markdown link text', 'see [Chat #support](https://example.dev) here'],
+    ['markdown link text on an angle-bracketed URL', 'see [Chat #support](<a b.md>) here'],
+    ['reference-style link text', 'see [Chat #support][chat] here\n\n[chat]: https://example.dev'],
+    ['collapsed reference-style link text', 'see [Chat #support][] here'],
+  ])('reads the tag in %s', (_label, input) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual(['support']);
+  });
+
+  it.each([
     ['a tag immediately before a link', '#work [[Note#Heading]] end', ['work']],
     ['a tag immediately after a link', '[[Note#Heading]] #work end', ['work']],
-    ['a tag between two links', '[[A#x]] #work [B #y](u) end', ['work']],
+    ['a tag between two links', '[[A#x]] #work [B #y](u) end', ['work', 'y']],
     ['a nested tag and a trailing comma', '#a/b and #tag, end', ['a/b', 'tag']],
     ['an unclosed wikilink', 'see [[Note and #work here', ['work']],
     ['a bracketed span that is not a link', 'see [note #work] (not a link)', ['work']],
@@ -833,7 +839,6 @@ describe("listTagsFromContent / Obsidian's tag grammar", () => {
     ['a semicolon', '#tag; x'],
     ['a tilde', '#tag~ x'],
     ['a period', '#tag. x'],
-    ['a hash', '#tag#more x'],
     ['an em dash', '#tag—dash x'],
     ['an en dash', '#tag–endash x'],
     ['an ellipsis', '#tag…more x'],
@@ -943,7 +948,7 @@ describe('inline tags — boundary, HTML comments, and math (Obsidian readback)'
   /** The #138 table, row by row. */
   const TABLE: Array<[string, string, string[]]> = [
     ['punctuation before the hash', '(#pa) $#pb$ "#pc" .#pd x—#pe', []],
-    ['a tab before the hash', '\t#pf', ['pf']],
+    ['a tab before the hash', 'a\n\t#pf', ['pf']],
     ['a space inside brackets', '[x #ph]', ['ph']],
     ['a no-break space before the hash', `a${NBSP}#qi`, ['qi']],
     ['an ideographic space before the hash', `a${IDEOGRAPHIC_SPACE}#qj`, ['qj']],
@@ -1090,6 +1095,32 @@ describe('inline tags — boundary, HTML comments, and math (Obsidian readback)'
     ['a closing span', '<span>x</span>#ux', ['ux']],
     ['a bold element', 'x <b>#wq</b> y', ['wq']],
     ['an anchor element with an attribute', 'x <a href="u">#wr</a> y', ['wr']],
+    ['a quoted attribute value holding a hash', '<a href="u #ea">y</a>', []],
+    ['an unquoted attribute value holding a hash', '<a href=u#eb>y</a>', []],
+    ['a tag right after an element with an attribute', '<a href=x>#ec y', ['ec']],
+    ['a self-closing element with an attribute', '<b class="x" />#ee', ['ee']],
+    ['a word in angle brackets before a hash', 'x <a b #ta> y', ['ta']],
+    ['a sentence in angle brackets', '<Real occurrence Complements #tc.>', ['tc']],
+    ['a hash after an attribute value', 'x <a b=c #tf> y', ['tf']],
+    ['attribute-like text in a closing tag', 'x </a #ed> y', ['ed']],
+    [
+      'the four paragraphs of issue #144',
+      'x <a b #ta> y\n\n<Real occurrence Complements #tc.>\n\nx <a b=c #tf> y\n\nx <span>#td</span> y',
+      ['ta', 'tc', 'tf', 'td'],
+    ],
+    ['an attribute glued to a quoted value', 'x <a b="c"d>#tg y', []],
+    ['a single-quoted attribute value holding a hash', "x <a b='#th'>y</a>", []],
+    ['spaces around an attribute equals sign', 'x <a b = "c">#ti y', ['ti']],
+    ['attribute names opening with a colon and an underscore', 'x <a :b _c>#tj y', ['tj']],
+    ['an open tag across a line ending', 'x <a\nb="c">#tk y', ['tk']],
+    ['a closing tag across a line ending', 'x </a\n>#tl y', ['tl']],
+    ['a quoted attribute value across a line ending', 'x <a b="c\nd">#tm y', ['tm']],
+    ['a backtick-quoted attribute value', 'x <a b=`c`>#tn y', []],
+    ['an equals sign with no value', 'x <a b= >#to y', []],
+    ['a tag name with digits and a hyphen', 'x <a1-b>#tp y', ['tp']],
+    ['a self-closing tag glued to its attribute', 'x <a b/>#tq y', ['tq']],
+    ['a closing tag with a space before the bracket', 'x </a >#tr y', ['tr']],
+    ['a self-closing tag glued to a quoted value', 'x <a b="c"/>#ts y', ['ts']],
     ['a less-than heart', 'i <3#wt', []],
     ['a character entity', 'a &amp;#uz', []],
   ];
@@ -1176,12 +1207,27 @@ describe('reconcileTags / remove inline — link spans', () => {
     ['[[#Overview]]', 'see [[#Overview]] here'],
     ['[[Note (Draft)#Overview]]', 'see [[Note (Draft)#Overview]] here'],
     ['[[Note#Heading|see #Overview]]', 'see [[Note#Heading|see #Overview]] here'],
-    ['[Chat #Overview](https://example.dev)', 'see [Chat #Overview](https://example.dev) here'],
-    ['[Chat #Overview][chat]', 'see [Chat #Overview][chat] here\n\n[chat]: https://example.dev'],
   ])('leaves %s untouched', (_label, input) => {
     const r = reconcile(input, ['Overview'], 'remove', 'inline');
     expect(r.content).toBe(input);
     expect(r.skipped).toEqual(['Overview']);
+  });
+
+  it.each([
+    [
+      '[Chat #Overview](https://example.dev)',
+      'see [Chat #Overview](https://example.dev) here',
+      'see [Chat](https://example.dev) here',
+    ],
+    [
+      '[Chat #Overview][chat]',
+      'see [Chat #Overview][chat] here\n\n[chat]: https://example.dev',
+      'see [Chat][chat] here\n\n[chat]: https://example.dev',
+    ],
+  ])('removes the tag in the text of %s and leaves the link intact', (_label, input, expected) => {
+    const r = reconcile(input, ['Overview'], 'remove', 'inline');
+    expect(r.content).toBe(expected);
+    expect(r.applied).toEqual(['Overview']);
   });
 
   it('removes a real tag that sits immediately before a link', () => {
@@ -1433,5 +1479,616 @@ describe('serializeFrontmatter / dropping the block spares body indentation', ()
     ['CRLF separators', '---\r\ntags: [a]\r\n---\r\n\r\n    indented\r\n', '    indented\r\n'],
   ])('keeps the leading whitespace of the first content line — %s', (_label, input, expected) => {
     expect(deleteKey(input, 'tags')).toBe(expected);
+  });
+});
+
+/** Rows of `[label, note body, the tags Obsidian reads]`. */
+type Readback = Array<[string, string, string[]]>;
+
+/**
+ * Pin rows of Obsidian's own metadata-cache readback (note-JSON `tags`,
+ * Obsidian 1.13.7 / Local REST API 5.2.0) through both paths: `list` reports
+ * exactly the tags Obsidian reads, and `remove` reaches exactly those — each
+ * goes with at most one adjacent space and is gone from a second `list`, while
+ * every other `#xx` probe leaves the note byte-identical.
+ */
+function describeReadback(title: string, rows: Readback): void {
+  describe(title, () => {
+    it.each(rows)('list reads %s as Obsidian does', (_label, input, expected) => {
+      expect(listTagsFromContent(input, {}).inline).toEqual(expected);
+    });
+
+    it.each(rows)(
+      'remove reaches exactly the tags Obsidian reads: %s',
+      (_label, input, expected) => {
+        const probes = [...input.matchAll(/#([a-z]{2})(?![a-z])/g)].map((m) => m[1] ?? '');
+        for (const tag of new Set([...expected, ...probes])) {
+          const r = reconcile(input, [tag], 'remove', 'inline');
+          if (expected.includes(tag)) {
+            expect(r.applied, tag).toEqual([tag]);
+            expect(
+              [` #${tag}`, `#${tag} `, `\t#${tag}`, `#${tag}`].map((s) => input.replace(s, '')),
+              tag,
+            ).toContain(r.content);
+            expect(listTagsFromContent(r.content, {}).inline, tag).toEqual(
+              expected.filter((t) => t !== tag),
+            );
+          } else {
+            expect(r.applied, tag).toEqual([]);
+            expect(r.skipped, tag).toEqual([tag]);
+            expect(r.content, tag).toBe(input);
+          }
+        }
+      },
+    );
+  });
+}
+
+const FENCE = '```';
+
+/**
+ * Issue #140, and the neighbours probed alongside it. Each table holds the
+ * shapes the scan read differently from Obsidian before; the `already` tables
+ * hold neighbouring shapes it already read the same way, pinned so the fix
+ * cannot move them.
+ */
+describe('inline tags — issue #140 shapes (Obsidian readback)', () => {
+  describeReadback('link text', [
+    ['markdown link text', '[Discord #tf](https://x.y)', ['tf']],
+    ['reference link text', '[a #tg][ref]\n\n[ref]: https://x.y', ['tg']],
+    ['reference link text with an undefined label', '[a #tg][nope]', ['tg']],
+    ['collapsed reference link text', '[a #tg][]', ['tg']],
+    ['a tag opening link text', '[#ta](u)', ['ta']],
+    ['a tag closing link text', '[a #tg](u)', ['tg']],
+    ['link text and a tag glued after the link', 'x [a #bi](u)#bj', ['bi', 'bj']],
+    ['bold link text', '[**#bk**](u)', ['bk']],
+  ]);
+  describeReadback('link syntax, already read as Obsidian does', [
+    ['a URL fragment in a destination', '[x](https://example.dev/#frag)', []],
+    ['a hash in an angle-bracketed destination', '[x](<a #tb.md>)', []],
+    ['a hash in a link title', '[x](u "t #tc")', []],
+    ['a hash in a reference label', '[x][#td]\n\n[#td]: u', []],
+    ['image alt text', '![a #te](x.png)', []],
+    ['reference image alt text', '![a #bh][ref]\n\n[ref]: u', []],
+    ['a tag opening image alt text', 'x ![#bf](u)', []],
+    ['a destination that is only a fragment', 'x [a](#bg)', []],
+    ['a code span in link text', '[a `#th` b](u)', []],
+    ['math in link text', '[a $#bl$ b](u)', []],
+    ['wikilink alias text', '[[N#H|see #ti]]', []],
+    ['a tag glued after a link', '[x](u)#tf', ['tf']],
+    ['a tag glued after an image', 'x ![a](u)#bn', ['bn']],
+    ['link text holding a bracketed phrase', '[a [b] #tj](u)', ['tj']],
+    ['link text holding an escaped bracket', '[a \\] #bm](u)', ['bm']],
+    ['a closing bracket with no opener', 'a](b #tk)', ['tk']],
+  ]);
+
+  describeReadback('bracketed spans', [
+    ['a tag opening a bracketed span', '[#ta] x', ['ta']],
+    ['a bracketed span mid-line', 'x [#ta] y', ['ta']],
+    ['a tag glued after a bracketed span', 'x [a]#bb', ['bb']],
+    ['a bracketed span glued to a word', 'a[#yl] x', ['yl']],
+    ['a bracketed span nested in another', 'x [a [#yn] b] y', ['yn']],
+    ['a bracketed span closed on the next line', 'x [#yr\nb] y', ['yr']],
+    ['a tag glued after a space-only span', 'x [ ]#yn', ['yn']],
+    ['a bracketed tag before a link', 'x [#yo](u) y', ['yo']],
+    ['a bracketed span after an image', 'x ![a](u) [#yp] y', ['yp']],
+  ]);
+  describeReadback('brackets, already read as Obsidian does', [
+    ['an unclosed bracket', 'x [#ba', []],
+    ['a lone closing bracket', 'x ]#bc', []],
+    ['an unclosed wikilink', 'x [[#bd', []],
+    ['an unclosed bracket glued to a word', 'a[#be', []],
+    ['a parenthesis inside brackets', 'x [(#bo)](u)', []],
+    ['a footnote reference', 'x [^#bp] y', []],
+    ['a footnote definition', '[^1]: a #bq', ['bq']],
+    ['a bracket inside a wikilink alias', '[[a|[#br]]', []],
+    ['empty brackets', 'x []#yo', []],
+    ['a reference definition label', '[#yp]: u', []],
+    ['an indented reference definition label', '   [#yq]: u', []],
+    ['an outer bracket around a nested span', 'x [#zd [b] c] y', []],
+    ['a space before the hash inside brackets', 'x [ #ym] y', ['ym']],
+  ]);
+
+  describeReadback('fenced code', [
+    [
+      "the issue's fence sequence",
+      [
+        `${FENCE}markdown`,
+        `${FENCE}typescript`,
+        'x #tu',
+        FENCE,
+        'prose #tv',
+        FENCE,
+        'code #tw',
+        FENCE,
+      ].join('\n'),
+      ['tv'],
+    ],
+    [
+      'a longer fence wrapping a shorter one',
+      ['````', FENCE, 'x #fc', FENCE, '````', 'after #fd'].join('\n'),
+      ['fd'],
+    ],
+    ['an unclosed fence', `${FENCE}\nx #fg\n\ny #fh`, []],
+    ['a closer indented four columns', `${FENCE}\nx #fp\n    ${FENCE}\ny #fq`, []],
+    ['a backtick info string holding a backtick', `${FENCE} a\`b\nx #fs\n${FENCE}\ny #ft`, ['fs']],
+    ['a list-item fence, then an unindented line', `- ${FENCE}\n  x #fu\ny #fv`, []],
+    ['a list-item fence, then an unindented fence', `- ${FENCE}\nx #ch\n${FENCE}\ny #ci`, []],
+    [
+      'a list-item fence, indented content, then an unindented fence',
+      `- ${FENCE}\n  x #or\n${FENCE}\ny #os`,
+      [],
+    ],
+    ['a list-item fence ended by a blank line', `- ${FENCE}\nx #oo\n\ny #op`, ['op']],
+    [
+      'a longer list-item fence, a blank line, then a fence',
+      `- ${FENCE}\`\nx #yc\n\n${FENCE}\nafter #yd`,
+      [],
+    ],
+    ['a blockquote fence, then an unquoted line', `> ${FENCE}\n> x #cc\ny #cd`, []],
+    ['a blockquote fence, then an unquoted fence', `> ${FENCE}\n> x #ck\n${FENCE}\nafter #cl`, []],
+    ['a blockquote tilde fence, then unquoted lines', '> ~~~\nx #ya\n~~~\nafter #yb', []],
+    [
+      'a paragraph continuing past an indented fence',
+      `para\n    ${FENCE}\nx #fa\n${FENCE}\nafter #fb`,
+      ['fa'],
+    ],
+  ]);
+  describeReadback('fenced code, already read as Obsidian does', [
+    ['a tilde fence holding a backtick fence', `~~~\nx #fi\n${FENCE}\ny #fj\n~~~\nz #fk`, ['fk']],
+    ['a closer followed by spaces', `${FENCE}\nx #fl\n${FENCE}   \ny #fm`, ['fm']],
+    ['a closer indented three columns', `${FENCE}\nx #fn\n   ${FENCE}\ny #fo`, ['fo']],
+    ['a fence interrupting a paragraph', `para #fw\n${FENCE}\nx #fx\n${FENCE}`, ['fw']],
+    ['a closed list-item fence', `- ${FENCE}\n  x #ca\n  ${FENCE}\ny #cb`, ['cb']],
+    ['a list-item fence, a blank line, then a paragraph', `- ${FENCE}\n  x\n\ny #ce`, ['ce']],
+    ['a blockquote fence ended by a blank line', `> ${FENCE}\n> a\n\nafter #zo`, ['zo']],
+    ['a fence after a blockquote paragraph', `> a\n${FENCE}\n#cj\n${FENCE}`, []],
+    [
+      'a list-item fence across a blank line',
+      `- a\n\n  ${FENCE}\n  #ot\n\n  #ou\n  ${FENCE}\nafter #ov`,
+      ['ov'],
+    ],
+    ['a new list item after a lazy fence line', `- ${FENCE}\nx\n- b #xv`, ['xv']],
+    ['a heading after a lazy fence line', `> ${FENCE}\nx\n# H #xw`, ['xw']],
+  ]);
+
+  describeReadback('code spans', [
+    ['a code span across a line break', 'a `b\nc #ca` d #cb', ['cb']],
+    ['a double-backtick code span', 'a ``b ` #cc`` d #cd', ['cd']],
+    ['backtick runs of different lengths', 'a `` #cl ``` #cm', ['cl', 'cm']],
+  ]);
+  describeReadback('code spans, already read as Obsidian does', [
+    ['a code span opened inside a longer run', 'a ``b #ce` d #cf', ['cf']],
+    ['a three-backtick span opened inside a four-backtick run', 'a ```` #cj ``` #ck', ['ck']],
+    ['a code span that cannot cross an empty line', 'a `b\n\n#ci` d', ['ci']],
+    ['a tag glued after a space-only code span', 'a `` `#cn` #co', ['cn', 'co']],
+    ['an escaped backtick', 'a \\`#cp` #cq', ['cp', 'cq']],
+    ['a code span in a heading', '# a `#cr` #cs', ['cs']],
+    ['a triple-backtick code span across lines', 'a ```b\n#cg\nc``` #ch', ['ch']],
+    [
+      'a triple-backtick span between indented lines',
+      `para\n    ${FENCE}\nx #fr\n    ${FENCE}`,
+      [],
+    ],
+    ['a triple-backtick span on one line', 'a ```#fy``` b #fz', ['fz']],
+  ]);
+
+  describeReadback('HTML blocks', [
+    ['a div block', '<div>\nhello #tp\n</div>', []],
+    ['a one-line paragraph element', '<p>x #tr</p>', []],
+    ['a one-line pre element', '<pre>x #tq</pre>', []],
+    ['a div block ended by a blank line', '<div>\n#ha\n\n#hb\n</div>', ['hb']],
+    ['a pre block across a blank line', '<pre>\n#hc\n\n#hd\n</pre>\n#he', ['he']],
+    ['a lone inline tag on its line', '<span>\n#hf\n</span>', []],
+    ['a div interrupting a paragraph', 'para #hh\n<div>\n#hi', ['hh']],
+    ['an uppercase tag name', '<DIV>\n#hj', []],
+    ['a closing block tag', '</div>\n#hk', []],
+    ['a horizontal rule element', '<hr>#hl', []],
+    ['a div in a blockquote', '> <div>\n> #ho', []],
+    ['a script block', '<script>\n#hp\n</script>\nafter #hq', ['hq']],
+    ['a processing instruction', '<?php\n#hr\n?>\nafter #hs', ['hs']],
+    ['a declaration', '<!DOCTYPE html\n#ht>\nafter #hu', ['hu']],
+    ['a CDATA section', '<![CDATA[\n#hv\n]]>\nafter #hw', ['hw']],
+    ['a custom element ended by a blank line', '<my-el attr="x">\n#hx\n\n#hy', ['hy']],
+    ['a div continued past a tab-only line', '<div>\n#ok\n\t\n#ol', []],
+    ['a div in a list item', '- <div>\n  #pf\n\nafter #pg', ['pg']],
+    ['a div holding an indented line', '<div>\n    #ph\n</div>', []],
+    ['a blockquote div continued lazily', '> <div>\n#pi', []],
+    ['a list-item div continued lazily', '- <div>\n#yi\n\nafter #yj', ['yj']],
+    ['a blockquote comment ended with the blockquote', '> <!-- a\n\nafter #zm', ['zm']],
+    ['a list-item comment ended with the item', '- <!-- a\n\nafter #zw', ['zw']],
+  ]);
+  describeReadback('HTML, already read as Obsidian does', [
+    ['an inline element with text', '<span>x #ts</span>', ['ts']],
+    ['an inline element that cannot interrupt a paragraph', 'para\n<span>\n#hg', ['hg']],
+    ['a line break element opening a line', '<br>#hm', ['hm']],
+    ['a div indented four columns', '    <div>\n#hn', ['hn']],
+    ['a div indented four columns after a paragraph', 'para\n    <div>\n#fi', ['fi']],
+    ['a blockquote comment closed lazily', '> <!-- a\nb --> #zk\nafter #zl', ['zl']],
+    ['a blockquote pre block ended with the blockquote', '> <pre>\n> a\n\nafter #zx', ['zx']],
+  ]);
+
+  describeReadback('display math', [
+    ['a four-column-indented dollar pair', '    $$\n#tu\n    $$\nafter #tv', ['tu', 'tv']],
+    ['a blockquote math block continued lazily', '> $$\n#xt\n$$\nafter #xu', []],
+  ]);
+  describeReadback('display math, already read as Obsidian does', [
+    ['a math block interrupting a paragraph', 'para\n$$\n#ow\n$$\nafter #ox', ['ox']],
+    ['a math block in a blockquote', '> $$\n> #oy\n> $$\nafter #oz', ['oz']],
+    ['a math block in a list item', '- $$\n  #pa\n  $$\nafter #pb', ['pb']],
+    ['a math block indented three columns', '   $$\n#pc\n$$', []],
+    ['an indented line inside a math block', '$$\n    #pd\n$$\nafter #pe', ['pe']],
+    ['a math block across an empty line', '$$\na\n\n#ye\n$$\nafter #yf', ['yf']],
+    ['a blockquote math block ended with the blockquote', '> $$\n> a\n\nafter #zn', ['zn']],
+    [
+      'a math block after a paragraph, across an empty line',
+      'para\n$$\n#ma\n\n#mb\n$$\nafter #mc',
+      ['mc'],
+    ],
+    ['a math block after an empty line', 'para\n\n$$\n#md\n\n#me\n$$\nafter #mf', ['mf']],
+    ['indented double dollars inside a paragraph', 'para\n    $$\n#mg\n    $$\nafter #mh', ['mh']],
+    ['a math block opened with text on its line', 'para\n$$ x\n#mi\n$$\nafter #mj', ['mj']],
+    ['an unclosed math block interrupting a paragraph', 'para\n$$\n#mk\n\nlater #ml', []],
+    ['indented double dollars closed at line start', 'para\n    $$\n#fh\n$$', []],
+    ['inline double dollars closing on a line of their own', 'a $$\n#mm\n$$ b #mn', ['mn']],
+  ]);
+
+  describeReadback('glued tags', [
+    ['two glued tags', '#tl#tm', ['tl', 'tm']],
+    ['a glued tag after a nested tag', '#tn/#to', ['tn/', 'to']],
+    ['a glued tag before text', '#tag#more x', ['tag', 'more']],
+    ['a glued tag after an underscore', '#gq_#gr', ['gq_', 'gr']],
+    ['three glued tags', '#gs#gt#gu', ['gs', 'gt', 'gu']],
+    ['a trailing lone hash', '#ab#cd# x', ['ab', 'cd']],
+    ['glued tags inside emphasis', 'x _#rd#re_ y', ['rd', 're']],
+  ]);
+  describeReadback('glued hashes, already read as Obsidian does', [
+    ['a glued tag after an all-digit run', '#1984#gm', []],
+    ['a doubled hash', 'x ##gn', []],
+    ['glued tags after punctuation', '(#go#gp', []],
+    ['glued tags after a word', 'a#gv#gw', []],
+    ['a hash followed by a space', '#gx# gy', ['gx']],
+    ['a chain broken by an all-digit run', '#ab#12#cd', ['ab']],
+  ]);
+
+  describeReadback('underscores', [
+    ['emphasis around a tag', 'x _#uc_ y', ['uc']],
+    ['a tag after snake_case', 'snake_case_#wc', ['wc']],
+    ['a tag with an inner underscore after snake_case', 'snake_case_#ug_x', ['ug_x']],
+    ['a tag after closing emphasis', 'a _b_#uh', ['uh']],
+    ['a tag after emphasis at line start', '_a_#ui', ['ui']],
+    ['strong emphasis around a tag', 'x __#uj__ y', ['uj']],
+    ['a whole line of emphasis', '_#uk_', ['uk']],
+    ['a tag closing emphasis', 'x _a #um_ y', ['um']],
+    ['a tag closing emphasis opened mid-word', 'a_b #un_ y', ['un']],
+    ['a tag after two intraword underscores', 'a_b_c_#up', ['up']],
+    ['emphasis opened after a word', 'word_ #ur_', ['ur']],
+    ['emphasis opened on a word', 'x snake_#us_ y', ['us']],
+    ['emphasis closed before the hash', 'foo_bar _#ut', ['ut']],
+    ['emphasis opened after a digit', 'x 1_#uv_ y', ['uv']],
+    ['a closer before punctuation', 'x _#pb_. y', ['pb']],
+    ['a closer before a non-ASCII letter', 'x _#pd_é y', ['pd']],
+    ['a pair after one that failed', 'a_ _#pg b_', ['pg']],
+    ['a pair after a failed opener', 'x_ y _#ph z_', ['ph']],
+    ['emphasis around a tag and a word', 'a_#pi b_', ['pi']],
+    ['a double opener closed by a single run', 'x __a_#pj', ['pj']],
+    ['emphasis across a line break', 'x _a\nb_#pl', ['pl']],
+    ['a closer on the next line', 'x _#pm\nb_ y', ['pm']],
+    ['a tag keeping its inner underscore', 'x _#qa_name_ y', ['qa_name']],
+    ['an opener followed by a space', 'x _ #pe_ y', ['pe']],
+    ['a pair after a failed pair of spaces', 'a _ _#po_ b', ['po']],
+    ['a closer after a space', 'x _a _#pp', ['pp']],
+    ['a tag right after emphasis', 'x _a_#pq', ['pq']],
+    ['an intraword opener and a spaced closer', 'x_a _#pr', ['pr']],
+    ['an intraword opener across words', 'a_b c_#pt', ['pt']],
+    ['an intraword opener and a closer after a space', 'a_b c _#pu', ['pu']],
+    ['a double opener around a tag', 'x __#py_ y', ['py']],
+    ['a trailing underscore that no longer closes', 'x _a_#rb_ y', ['rb_']],
+    ['an all-digit tag that lost its closer', 'x _#rc #1984_ y', ['rc']],
+    ['a pair skipping a longer run', 'x _a__ _#qg', ['qg']],
+    ['a pair skipping an intraword run', 'x _#qh b_c d_ e', ['qh']],
+    ['a pair across a code span', 'x _a `b` c_#qd', ['qd']],
+    ['a pair across math', 'x _a $b$ c_#qj', ['qj']],
+    ['a pair across a wikilink', 'x _a [[l]] c_#qk', ['qk']],
+    ['a pair across a comment', 'x _a <!-- c --> d_#ql', ['ql']],
+    ['a pair across bold', 'x _a **b** c_#qm', ['qm']],
+    ['emphasis in a heading', '# x _a_#qp', ['qp']],
+    ['emphasis in a table cell', '|x _a_#qq|b|\n|-|-|', ['qq']],
+    ['emphasis in a list item', '- _a_#qr', ['qr']],
+    ['content ending at a line break', 'x _a\n_#qt', ['qt']],
+    ['a pair across a link destination', 'x _a [l](u_v) _#qv', ['qv']],
+    ['a pair across a bare URL', 'x _a https://x.y/a_b _#qw', ['qw']],
+    ['a pair then an all-digit-led tag', 'x _#qy_ #1984_z', ['qy', '1984_z']],
+    ['emphasis after a link', '[x](u)_a_#ys', ['ys']],
+    ['a pair across math holding an underscore', 'x _a $b_c$ d_#ra', ['ra']],
+    ['a pair across a wikilink holding an underscore', 'x _a [[b_c]] d_#rb', ['rb']],
+    ['a pair across a comment holding an underscore', 'x _a <!-- b_c --> d_#rc', ['rc']],
+    ['a pair across an image holding an underscore', 'x _a ![b_c](u) d_#rd', ['rd']],
+    ['a pair across an HTML attribute', 'x _a <a href="u_v"> d_#re', ['re']],
+    ['a pair across a code span holding an underscore', 'x _a `b_c` d_#rh', ['rh']],
+    ['emphasis inside link text', '[x _a_#ri](u)', ['ri']],
+    ['a pair across link text', 'x _a [b](u) c_#rj', ['rj']],
+    ['a closer inside a tag before a non-ASCII letter', 'x _#rk_日本 y', ['rk']],
+    ['an escaped underscore between a pair', 'x _a \\_ d_#rf', ['rf']],
+  ]);
+  describeReadback('underscores, already read as Obsidian does', [
+    ['a trailing underscore', '#tag_ x', ['tag_']],
+    ['intraword underscores', 'a_#wd_b', []],
+    ['an unpaired underscore at line start', '_#ua', []],
+    ['an unpaired underscore after a word', 'snake_#ub', []],
+    ['an unpaired opener', 'x _#ud', []],
+    ['an unpaired underscore glued to a word', 'x_#ue y', []],
+    ['a closer before a letter', 'x _#uf_b y', []],
+    ['a closer before a letter, at word end', 'x _#ul_y', []],
+    ['a trailing underscore that opens nothing', '#uo_ and _x_', ['uo_']],
+    ['a third, unpaired underscore', 'x _a_ b_#uq', []],
+    ['a pair of spaces', 'a_ _#uu', []],
+    ['a closer before a digit', 'x _#pc_1 y', []],
+    ['a closer longer than its opener', 'x _a__#pk', []],
+    ['underscores inside a tag', '#qb_name_ x', ['qb_name_']],
+    ['underscores inside a tag, mid-word', '#qc_a_b', ['qc_a_b']],
+    ['a code-span closer', 'x _a `c_` _#qn', []],
+    ['a code-span closer, then an unpaired run', 'x _a `_` _#pw', []],
+    ['a code-span underscore that cannot open', 'x `a_` b_#zf', []],
+    ['a code-span underscore that closes', 'x _a `_` b_#zg', []],
+    ['interleaved stars', 'x _a *b_ c* d_#qo', []],
+    ['stars around a failed pair', 'x *a_ _#px* y', []],
+    ['a tab between the runs', 'x _\t_#qs', []],
+    ['a line break between the runs', 'x_\n_#qu', []],
+    ['an escaped opener', 'x \\_a_#qx', []],
+    ['a trailing underscore that cannot open', '#qe_ x_', ['qe_']],
+    ['a pair, then a new opener', 'x _a b_ c _#ps', []],
+    ['emphasis across an empty line', 'x _a\n\nb_#pv', []],
+    ['a closer run longer than its opener', 'x _#pz__ y', []],
+    ['underscores through a tag', 'x #ra_b_c_ y', ['ra_b_c_']],
+    ['a trailing underscore before a tag', '#rl_ a_ #rm', ['rl_', 'rm']],
+    ['a comment underscore that cannot open', '<!-- _ --> a_#zh', []],
+    ['a comment underscore, then a failed pair', '<!-- a_ --> _#yw', []],
+    ['a destination underscore that cannot open', '[x](u_v) _#zi', []],
+    ['a destination underscore that closes', 'x _a [l](u_) d_#rg', []],
+    ['link text that cannot reach past the link', '[a_](u) b_#zj', []],
+    ['a wikilink underscore', '[[my_note]] and _#yt', []],
+    ['a math underscore', '$x_1$ and _#yu', []],
+    ['a math underscore before a brace', '$x_{1}$ and _#yv', []],
+  ]);
+
+  describeReadback('table cells', [
+    ['an unpadded table cell', '|a|b|\n|-|-|\n|#uo|x|', ['uo']],
+    ['a header cell', '|#ta|b|\n|-|-|', ['ta']],
+    ['a table without leading pipes', 'a|b\n-|-\nx|#tb', ['tb']],
+    ['a last cell', '|a|b|\n|-|-|\n|x|#tc|', ['tc']],
+    ['fewer delimiter cells than header cells', '|a|b|\n|-|\n|#td|x|', ['td']],
+    ['a table in a blockquote', '> |a|b|\n> |-|-|\n> |#ti|x|', ['ti']],
+    ['aligned delimiter cells', '|a|b|\n|:-|-:|\n|#tj|x|', ['tj']],
+    ['a row without a closing pipe', '|a|b|\n|-|-|\n|x|#tb', ['tb']],
+    ['a row with an extra cell', '|a|b|\n|-|-|\n|a|b|#ti|', ['ti']],
+    ['a one-column table', '|a|\n|-|\n|#tj|', ['tj']],
+    ['a cell after a padded one', '|a|b|\n|--|--|\n| x |#tl|', ['tl']],
+    ['spaced delimiter cells', '| a | b |\n| --- | --- |\n|#tn|x|', ['tn']],
+    ['a table in a list item', '- |a|b|\n  |-|-|\n  |#tp|x|', ['tp']],
+    ['a cell after a code span holding a pipe', '|a|b|\n|-|-|\n|`x|y`|#tr|', ['tr']],
+    ['a table after an empty line', 'para\n\n|a|b|\n|-|-|\n|#ts|x|', ['ts']],
+    ['a table after a heading', '# H\n|a|b|\n|-|-|\n|#ty|x|', ['ty']],
+    ['trailing pipes without leading ones', 'a|b|\n-|-|\nx|#yb|', ['yb']],
+    ['a row with a trailing pipe in a table without them', 'a|b\n-|-\nx|#yc|', ['yc']],
+    ['leading pipes without trailing ones', '|a|b\n|-|-\n|#yd|x', ['yd']],
+  ]);
+  describeReadback('pipes, already read as Obsidian does', [
+    ['pipes on one line', 'a|b|#uq|c', []],
+    ['a table ended by an empty line', '|a|b|\n|-|-|\n\n|#te|x|', []],
+    ['a line without a leading pipe after a table', '|a|b|\n|-|-|\nx #tf|#tg', ['tf']],
+    ['a pipe in prose', 'a |#th', []],
+    ['a table that would interrupt a paragraph', 'para\n|a|b|\n|-|-|\n|#tk|x|', []],
+    ["a row without the header's leading pipe", '|a|b|\n|-|-|\nx|#ta', []],
+    ['a row with a leading pipe the header lacks', 'a|b\n-|-\n|x|#tc|', []],
+    ['a row ending in a tag after a pipe', '|a|b|\n|-|-|\nx|y #tf|#tg', ['tf']],
+    ['a row opening with a tag', '|a|b|\n|-|-|\n#th|x', ['th']],
+    ['a setext heading, not a table', 'a\n-\n#tk', ['tk']],
+    ['a delimiter row with a leading pipe the header lacks', 'a|b\n|-|-|\n|#tm|x|', []],
+    ['an invalid delimiter row', '|a|b|\n|x|-|\n|#to|x|', []],
+    ['an escaped pipe', '|a|b|\n|-|-|\n|x\\|#tq|y|', ['tq']],
+    ['a line without a leading pipe ending the table', '|a|b|\n|-|-|\n|x|y|\nx #tt|#tu', ['tt']],
+    ['a plain line ending the table', '|a|b|\n|-|-|\nplain\n|#tv|x|', []],
+    ['a header with a single pipe', '|a\n|-\n|#tw', []],
+    ['a setext heading holding a pipe', 'a|b\n---\n|#tx|', []],
+    ['a row indented four columns', '|a|b|\n|-|-|\n    |#tz|x|', []],
+    ["a delimiter row without the header's leading pipe", '|a|b|\n-|-\n|#ya|x|', []],
+    ['a row indented two columns', '| a | b |\n|---|---|\n  |#ye|x|', []],
+    ['a delimiter row indented one column', '|a|b|\n |-|-|\n|#yf|x|', []],
+    ['a header indented one column', ' |a|b|\n|-|-|\n|#yg|x|', []],
+    ['a row indented one column', '|a|b|\n|-|-|\n |#yh|x|', []],
+    ['a padded cell in a table without leading pipes', 'a | b\n--|--\n| #yi | x', ['yi']],
+    ['rows after a line that ends the table', '|a|b|\n|-|-|\n|x|y|\nz|#yj\n|#yk|w|', []],
+    ['a plain line ending a table without leading pipes', 'a|b\n-|-\nplain\nx|#zb', []],
+  ]);
+});
+
+/**
+ * Issue #139: an indented code block hides its tags, but only where the line
+ * cannot continue something else — a paragraph line above it, or a list item
+ * whose content it belongs to. Measured from where each line's content starts
+ * inside its blockquotes and list items.
+ */
+describe('inline tags — issue #139 indented code (Obsidian readback)', () => {
+  describeReadback('indented code', [
+    [
+      "the issue's note",
+      [
+        '    #sa at top',
+        '',
+        '    #sb indented after blank',
+        'para',
+        '    #sc lazy continuation',
+        '- item',
+        '',
+        '    #sd list continuation',
+        '- item2',
+        '    #se nested',
+        '',
+        '\t#sf tab after blank',
+      ].join('\n'),
+      ['sc', 'sd', 'se', 'sf'],
+    ],
+    ['the first line of the body', '    #sa at top', []],
+    ['a tab opening the first line', '\t#zs', []],
+    ['a tab opening the first line, with text after', '\t#zt at top', []],
+    ['right after the frontmatter', '---\nx: 1\n---\n    #sr', []],
+    ['after an empty line', 'para\n\n\t#st', []],
+    ['after a spaces-only line', 'para\n  \n    #sv', []],
+    ['after a heading and an empty line', '# H\n\n    #so', []],
+    ['right after a heading', '# H\n    #sp', []],
+    ['after a heading and a tab-only line', '# H\n\t\n    #on', []],
+    ['after a tab-only first line', '\t\n    #pq', []],
+    ['after a list has ended', '- a\n\nb\n\n    #sq', []],
+    ['inside a blockquote', '>     #sm', []],
+    ['after a tab in a blockquote', '>\t#tn', []],
+    ['after two tabs in a blockquote', '>\t\t#to', []],
+    ['after a blockquote paragraph and an empty quoted line', '> para\n>\n>     #sx', []],
+    ['after a blockquote and an empty line', '> a\n\n    #tt', []],
+    ['an indented line after a blockquote paragraph', '> para\n    #sw', []],
+    ['a tab-indented line after a blockquote paragraph', '> para\n\tx #xx', []],
+    ['an indented line after a lazy blockquote line', '> para\n  b\n    #xy', []],
+    ['an indented line after a nested blockquote', '> > a\n    #yg', []],
+    ['an indented line after a list in a blockquote', '> - a\n    #yh', []],
+    ["four columns past a list item's content", '- item\n\n      #sg', []],
+    ["four columns past a wide list item's content", '-   item\n\n        #sj', []],
+    ['text five spaces after a list marker', '-     #sl', []],
+    ["four columns past a nested item's content", '- a\n  - b\n\n        #sy', []],
+    ["four columns past a tab-separated item's content", '-\ta\n\n\t\t#tm', []],
+    ["four columns past a two-space item's content", '-  item\n\n       #og', []],
+    ['eight columns into an ordered item', '1. item\n\n        #oa', []],
+    ['eight columns into a wide ordered item', '1.  item\n\n        #ob', []],
+    ['eight columns into a two-digit ordered item', '10. item\n\n        #oc', []],
+    ['nine columns into a three-digit ordered item', '100. item\n\n         #xi', []],
+    ['seven columns into a parenthesis item', '1) item\n\n       #od', []],
+    ['seven columns into a second parenthesis item', '2) item\n\n       #xd', []],
+    [
+      'seven columns into an ordered item with a three-column line',
+      '1. item\n   b\n\n       #xl',
+      [],
+    ],
+    ["after an ordered item's aligned paragraph", '1. item\n\n   b\n\n       #py', []],
+    ["after an empty ordered item's aligned line", '1. \n   a\n\n       #oj', []],
+    [
+      'seven columns into an ordered item with a later aligned line',
+      '1. item\n\n       #om\n   b #on',
+      ['on'],
+    ],
+    ['six columns into a star item', '* item\n\n      #xn', []],
+    ['six columns into a plus item', '+ item\n\n      #xo', []],
+    ['six columns into a dash item', '- item\n\n      #xm', []],
+    ['four columns after a five-column item ends', '-    a\n\n    #xq', []],
+    ['after a heading in a list item', '- # H\n      #ym', []],
+    ['code in a list item between paragraphs', '- a\n\n      code #yk\n\n  b #yl', ['yl']],
+    ['after a fenced block', `${FENCE}\nx\n${FENCE}\n    #ta`, []],
+    ['after an HTML block', '<div>\n\n    #tb', []],
+    ['after a comment block', '<!-- x -->\n    #tw', []],
+    ['after a thematic break', '***\n    #tc', []],
+    ['continued across an empty line', '    code\n\n    #te', []],
+    ['after a table', '|a|b|\n|-|-|\n    #tg', []],
+    ['between paragraphs', 'para\n\n    #th\npara2 #ti', ['ti']],
+    ['after a setext heading', 'para\n---\n    #tj', []],
+    ['after a double-underlined setext heading', 'para\n===\n    #tx', []],
+    ['after a math block', '$$\nx\n$$\n    #tk', []],
+    ['after a link reference definition', '[a]: u\n    #ty', []],
+  ]);
+  describeReadback('indentation, already read as Obsidian does', [
+    ['a lazy continuation line', 'para\n    #sc', ['sc']],
+    ['list content after an empty line', '- item\n\n    #sd', ['sd']],
+    ['list content right after the item', '- item2\n    #se', ['se']],
+    ['tab-indented list content', '- item\n\n\t#sf', ['sf']],
+    ['six columns into an ordered item', '1. item\n\n      #si', ['si']],
+    ['three spaces', '   #ss', ['ss']],
+    ['a paragraph continued past a tab-only line', 'para\n\t\n    #su', ['su']],
+    ['nested list content', '- a\n  - b\n\n      #sz', ['sz']],
+    ['a paragraph after indented code', '    code\npara #td', ['td']],
+    ["a list item's second paragraph", '- a\n\n  b #tl', ['tl']],
+    ['deep paragraph continuation in a list item', '- a\n      #tp', ['tp']],
+    ['content under an empty list item', '-\n    #tq', ['tq']],
+    ['an indented line continuing a lazy paragraph', '- a\nb\n\n    #tr', ['tr']],
+    ['a line after an ordered item that cannot interrupt', 'para\n2. x\n    #ts', ['ts']],
+    ['a lazy line then list content', '- a\nb\n    #tz', ['tz']],
+    ['a lazy line indented four columns into a wide item', '10.  a\n    #xp', ['xp']],
+    ['a line after blockquote code', '>     code\n#xr', ['xr']],
+    ['a line after list-item code', '-     code\n#xs', ['xs']],
+    ['a lazy line under a five-column item', '-    a\n    #zz', ['zz']],
+    ['a lazy blockquote line indented two columns', '> a\n  #oi', ['oi']],
+    ['list content after a tab-only line', '- a\n\t\n    #om', ['om']],
+    ['a tab mid-line', 'a\t#zu', ['zu']],
+    ['a tab-indented lazy line', 'a\n\t#zv', ['zv']],
+    ['five columns into a two-space item', '-  item\n\n      #of', ['of']],
+    ['six columns into an ordered item, again', '1. item\n\n      #xf', ['xf']],
+    ['six columns into a parenthesis item', '1) item\n\n      #xg', ['xg']],
+    ['seven columns into a two-digit ordered item', '10. item\n\n       #xh', ['xh']],
+    ['seven columns into a wide ordered item', '1.  item\n\n       #xj', ['xj']],
+    ['a lazy line then an empty line and list content', '- a\nb\n\n    #xz', ['xz']],
+    ['seven columns into a tab-separated ordered item', '1.\titem\n\n       #oh', ['oh']],
+    ['six columns into an ordered item, once more', '1. item\n\n      #ol', ['ol']],
+  ]);
+
+  it('removes a tag beside indented code without touching the code', () => {
+    const input = '    #keep in code\n\npara #keep here\n';
+    const r = reconcile(input, ['keep'], 'remove', 'inline');
+    expect(r.applied).toEqual(['keep']);
+    expect(r.content).toBe('    #keep in code\n\npara here\n');
+  });
+
+  it('adds a tag whose only occurrence is indented code', () => {
+    const input = '    #keep in code\n';
+    const r = reconcile(input, ['keep'], 'add', 'inline');
+    expect(r.applied).toEqual(['keep']);
+    expect(r.content).toBe(`${input}#keep\n`);
+  });
+});
+
+/**
+ * Every scanner added for #139 and #140, fed its own worst case at 80,000
+ * characters: openers with no closer, and runs of markers that each start a
+ * construct. A scan that rescanned the rest of a line or paragraph from each
+ * one would be quadratic here and run past the test timeout.
+ */
+describe('inline tag scan stays linear in note length', () => {
+  it.each([
+    ['nested list markers on one line', `${'* '.repeat(40_000)}x #t`, ['t']],
+    ['nested ordered markers on one line', `${'1. '.repeat(26_000)}x #t`, ['t']],
+    ['tab-separated list markers', `${'-\t'.repeat(40_000)}x #t`, ['t']],
+    ['list markers before a thematic-break-like tail', `- ${'* '.repeat(40_000)}x #t`, ['t']],
+    ['nested items, then empty lines', `${'- '.repeat(20_000)}a #t${'\n'.repeat(40_000)}`, ['t']],
+    ['blockquote markers on one line', `${'> '.repeat(40_000)}#t`, ['t']],
+    ['blockquote and list markers on one line', `${'> - '.repeat(20_000)}#t`, ['t']],
+    ['unclosed fences', '```\n'.repeat(20_000), []],
+    ['lazy fence lines', `- ${FENCE}\n${'x #t\n'.repeat(16_000)}`, []],
+    ['HTML attributes with no closing bracket', `<a${' b'.repeat(40_000)}\n#t`, ['t']],
+    ['HTML attributes across line endings', `<a${' b\n'.repeat(26_000)}\n#t`, ['t']],
+    ['unquoted HTML attribute values', `<a${' b=c'.repeat(20_000)}\n#t`, ['t']],
+    ['a quoted HTML attribute value that never closes', `<a b='${' c'.repeat(40_000)}\n#t`, ['t']],
+    [
+      'open tags whose quoted values close on the next tag',
+      `${'x <a b="c '.repeat(8_000)}#t`,
+      ['t'],
+    ],
+    ['closing tags carrying attributes', `${'x </a b '.repeat(10_000)}#t`, ['t']],
+    ['comment openers', '<!--\n'.repeat(16_000), []],
+    ['display math openers', '$$\n'.repeat(26_000), []],
+    ['unpaired inline double dollars', 'a $$\n'.repeat(16_000), []],
+    ['a delimiter row with trailing spaces', `|a|b|\n|-${' '.repeat(80_000)}x #t`, ['t']],
+    ['delimiter cells without an end', `|a|b|\n${'|-'.repeat(40_000)}x #t`, ['t']],
+    ['table rows', `|a|b|\n|-|-|\n${'|#t|x|\n'.repeat(11_000)}`, ['t']],
+    ['a backtick run in prose', `a ${'`'.repeat(80_000)} #t`, ['t']],
+    [
+      'backtick runs of growing length',
+      Array.from({ length: 400 }, (_, k) => '`'.repeat(k + 1)).join(' '),
+      [],
+    ],
+    ['unclosed brackets', '[#t '.repeat(20_000), []],
+    ['link tails with no opener', 'x](u) #t '.repeat(9_000), ['t']],
+    ['image openers', '![a #t '.repeat(11_000), ['t']],
+    ['underscore openers', '_#t '.repeat(20_000), ['t']],
+    ['intraword underscores', 'a_b '.repeat(20_000), []],
+    ['underscores in code spans', '`_` _a '.repeat(11_000), []],
+    ['a glued tag chain', '#a'.repeat(40_000), ['a']],
+    ['a tag full of underscores', `#${'a_'.repeat(40_000)}`, [`${'a_'.repeat(40_000)}`]],
+  ])('scans %s in linear time', (_label, input, expected) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual(expected);
   });
 });

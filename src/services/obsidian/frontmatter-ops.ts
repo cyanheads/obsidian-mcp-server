@@ -6,6 +6,7 @@
  */
 
 import { type Document, isMap, isScalar, isSeq, parseDocument, Scalar, type YAMLSeq } from 'yaml';
+import { HTML_TAG_SOURCE, scanBlocks } from './markdown-blocks.js';
 
 /**
  * The outcome of a frontmatter mutation. A block that cannot be re-emitted
@@ -385,8 +386,43 @@ function normalizeTagList(value: unknown): string[] {
   return [];
 }
 
-const FENCED_CODE_BLOCK = /```[\s\S]*?```|~~~[\s\S]*?~~~/;
-const INLINE_CODE = /`[^`\n]+`/;
+/**
+ * The opening backtick run of a code span. It closes at the next whole
+ * backtick run of the same length in the paragraph, across line breaks:
+ * `` a ``b ` #x`` `` is code, `` a `` #x ``` `` is not. Only the opener is a
+ * regex; `codeSpanCloser` finds the closer.
+ */
+const INLINE_CODE = /(?<code>`+)/;
+
+/**
+ * The end of the code span each opener in `text` starts, or `undefined` when
+ * it has none. Whole backtick runs are listed once, by length; openers must be
+ * looked up in ascending order, so each length's list is walked once.
+ */
+function codeSpanCloser(text: string): (open: number, length: number) => number | undefined {
+  const runs = new Map<number, number[]>();
+  for (let i = 0; i < text.length; ) {
+    if (text[i] !== '`') {
+      i++;
+      continue;
+    }
+    const start = i;
+    while (text[i] === '`') i++;
+    const list = runs.get(i - start);
+    if (list) list.push(start);
+    else runs.set(i - start, [start]);
+  }
+  const walked = new Map<number, number>();
+  return (open, length) => {
+    const list = runs.get(length);
+    if (!list) return;
+    let k = walked.get(length) ?? 0;
+    while ((list[k] ?? Number.POSITIVE_INFINITY) <= open) k++;
+    walked.set(length, k);
+    const close = list[k];
+    return close === undefined ? undefined : close + length;
+  };
+}
 /**
  * `[[Target#Heading|Alias]]`. The `#` in a wikilink opens a heading anchor and
  * the text after `|` is display text — neither is a tag. Protecting the whole
@@ -397,49 +433,31 @@ const INLINE_CODE = /`[^`\n]+`/;
  * link target, so a span never nests.
  */
 const WIKILINK = /\[\[[^[\]\n]*\]\]/;
-/** `[text](destination)` — a `#` in the link text or in a URL fragment is link syntax. */
-const MARKDOWN_LINK = /\[[^[\]\n]*\]\([^()\n]*\)/;
+/** `![alt](source)` and `![alt][label]` — Obsidian reads no tag in an image's alt text. */
+const IMAGE = /!\[[^[\]\n]*\](?:\([^()\n]*\)|\[[^[\]\n]*\])/;
 /**
- * `[text][label]` and `[text][]` — the reference-style forms of the same link.
- * The label must follow the text immediately; a bracketed phrase on its own
- * (`[note #work]`) is not a link and its `#` stays a tag.
+ * The `](destination)` or `][label]` that makes the bracketed text before it a
+ * link. Only this tail is link syntax: Obsidian reads a tag in link text
+ * (`[Discord #tf](https://x.y)` is tagged `tf`) and none in a destination, a
+ * title, or a label. The text must open on the same line with no bracket in it;
+ * a bracketed phrase followed by a space and a second one (`[note #work] [ref]`)
+ * is no link.
  */
-const REFERENCE_LINK = /\[[^[\]\n]+\]\[[^[\]\n]*\]/;
+const LINK_TAIL = /(?<linkTail>\](?<=\[[^[\]\n]*\])(?:\([^()\n]*\)|\[[^[\]\n]*\]))/;
+/** The `[label]:` that opens a link reference definition. */
+const LINK_DEFINITION = /\[(?<=(?:^|\n)[ ]{0,3}\[)[^[\]\n]+\]:/;
 
 /**
  * Obsidian's metadata cache reads no tag inside an HTML comment or math. The
  * rules below are pinned against its readback (Obsidian 1.13.7) rather than a
- * spec, and a few differ from CommonMark: an inline span ends at an empty or
- * spaces-only line but runs through a tab-only one. Issue #138.
+ * spec. HTML blocks and display math blocks are block structure and live in
+ * `markdown-blocks.ts`; these are the spans inside one paragraph. Issue #138.
  *
- * An **HTML block** opens with `<!--` at the start of a line — after up to
- * three spaces of indentation, or after list-item and blockquote markers — and
- * runs through the end of the line holding the first `-->`, or to the end of
- * the note when none follows. The whole closing line is hidden, so the tag in
- * `<!-- a --> #rd` is not one. A line opening with `<!-->` or `<!--->` closes
- * on itself.
- *
- * The prefix gives every whitespace character exactly one owner — a list
- * marker takes the one it requires, the next marker's indent takes the rest,
- * and the tail after the last marker takes what follows it — so the lookbehind
- * cannot backtrack exponentially over a long run of markers. The `(?=<!--)`
- * gate runs it only where a comment opens.
- */
-const HTML_BLOCK =
-  /(?=<!--)(?<=(?:^|\n)(?:[ \t]*(?:>|(?:[-+*]|\d{1,9}[.)])[ \t]))*(?:(?<=>)[ \t]?[ ]{0,3}|(?<=(?:[-+*]|\d[.)])[ \t])[ \t]*|[ ]{0,3}))<!--(?:-?>[^\n]*|[\s\S]*?-->[^\n]*|[\s\S]*)/;
-/**
- * An **inline comment** anywhere else: `<!--`, then text that does not open
- * with `>` or `->` and holds no `--`, then `-->`, within one paragraph.
- * `<!-- x -- y -->` is not a comment, and neither is an unclosed `<!--`.
+ * An **inline comment**: `<!--`, then text that does not open with `>` or `->`
+ * and holds no `--`, then `-->`. `<!-- x -- y -->` is not a comment, and
+ * neither is an unclosed `<!--`.
  */
 const HTML_COMMENT = /<!--(?!-?>)(?:(?!--|\n *\r?\n)[\s\S])*-->/;
-/**
- * A **display math block**: a line that opens with `$$` and holds no second
- * `$$`. It runs, across empty lines, to the next line that is `$$` alone, or to
- * the end of the note — `$$\na\nb$$` does not close it.
- */
-const DISPLAY_MATH =
-  /(?<=(?:^|\n)[ \t]*)\$\$(?![^\n]*\$\$)[\s\S]*?(?:\n[ \t]*\$\$[ \t]*(?=\r?\n|$)|$)/;
 /** Unescaped `$$ … $$` within one paragraph, with no spacing rule. */
 const INLINE_DOUBLE_MATH = /(?<=(?:^|[^\\])(?:\\\\)*)\$\$(?:(?!\n *\r?\n)[\s\S])*?\$\$/;
 /**
@@ -503,26 +521,53 @@ function closesInlineMath(content: string, i: number): boolean {
  * A **backslash escape** of ASCII punctuation: `\]#t` and `\\#t` are tags,
  * `\#t` is an escaped hash and not one.
  */
-const ESCAPE = /\\[!-/:-@[-`{-~]/;
-/** An **inline HTML tag**: `<br>#t`, `x <b>#t</b>`, `<a href="u">#t</a>`. */
-const HTML_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>\n]*)?\/?>/;
+const ESCAPE = /(?<escape>\\[!-/:-@[-`{-~])/;
+/**
+ * An **inline HTML tag**: `<br>#t`, `x <b>#t</b>`, `<a href="u">#t</a>`. Only
+ * a tag CommonMark's grammar accepts is one; `x <a b #t> y` is text.
+ */
+const HTML_TAG = new RegExp(`(?:${HTML_TAG_SOURCE})`);
 /**
  * An **emphasis, highlight, or strikethrough delimiter run** directly before
  * `#` that has a partner elsewhere on its line: `**#t**`, `*#t*`, `**x**#t`,
  * `foo*#t*bar`, `==#t==`, `~~#t~~`. An unpartnered run is literal text to
  * Obsidian (`a *#t`, `a ==#t`), and so is a single `~`. The partner test is
- * the same delimiter anywhere else on the line. `_` runs are left out: `_` is a
- * tag character, so `_#t_` would read as the tag `t_`, where Obsidian reads `t`.
+ * the same delimiter anywhere else on the line. `_` pairs by rules of its own,
+ * in `underscoreMarks`.
  */
 const EMPHASIS_RUN =
   /(?<!\*)(?=\*+#)(?:(?<=\*[^\n]*?)|(?=\*+#[^\n]*?\*))\*+|(?<!=)(?===#)(?:(?<===[^\n]*?)|(?===#[^\n]*?==))==|(?<!~)(?=~~#)(?:(?<=~~[^\n]*?)|(?=~~#[^\n]*?~~))~~/;
 /**
  * A **blockquote marker** directly before `#`: `>#t`, `> >#t`. A table cell
- * pipe is the same kind of node (`|#t|` in a table row is a tag), but telling
- * a table row from a pipe in prose takes the lines above it, which this
- * one-pass scan does not look at, so `|#t` stays unread either way.
+ * pipe is the same kind of node; `markupMarks` protects those, since telling a
+ * table row from a pipe in prose takes the block structure around it.
  */
 const QUOTE_MARKER = />(?=#)(?<=(?:^|\n)[ \t]*(?:>[ \t]*)*>)/;
+
+/**
+ * Every span a tag cannot live in, or that a `#` right after opens a tag, in
+ * the order `protectedSpans` tries them: the construct that opens first wins,
+ * so `$b <!-- c$` is math and `<!-- $b -->` is a comment.
+ */
+const INLINE_SPANS = new RegExp(
+  [
+    INLINE_CODE,
+    WIKILINK,
+    IMAGE,
+    LINK_TAIL,
+    LINK_DEFINITION,
+    HTML_COMMENT,
+    INLINE_DOUBLE_MATH,
+    INLINE_MATH_OPEN,
+    ESCAPE,
+    HTML_TAG,
+    EMPHASIS_RUN,
+    QUOTE_MARKER,
+  ]
+    .map((r) => r.source)
+    .join('|'),
+  'g',
+);
 
 /**
  * The characters that end an inline tag, as the body of a character class:
@@ -546,12 +591,34 @@ const TAG_CHAR = `[^${TAG_STOP}]`;
  * blocks a tag in Obsidian — `(#a`, `.#b`, `x—#c`, an unpartnered `a *#d` —
  * and so does the `\` of an escaped `\#`. A segment starts at the note body or
  * right after a protected span, and Obsidian reads a tag glued to either:
- * `[[x]]#t`, `` `c`#t ``, `**#t**`, and `<br>#t` are tags.
+ * `[[x]]#t`, `` `c`#t ``, `**#t**`, `<br>#t`, `[#t]`, `_#t_`, and a table
+ * cell's `|#t|` are tags.
  */
 const TAG_LEFT_BOUNDARY = String.raw`(^|\s)`;
 
 /** Obsidian rejects a tag made only of ASCII digits (`#1984`); `#1990s` and `#١٢٣` are tags. */
 const ALL_DIGITS = /^[0-9]+$/;
+
+/**
+ * A run of tags glued end to end, `#a#b`. Obsidian reads each `#` that
+ * directly follows a tag as the start of another one — `#tl#tm` is two tags,
+ * `#tn/#to` is `tn/` and `to` — but not one after an all-digit run, since that
+ * run was never a tag (`#1984#x` holds none).
+ */
+const TAG_CHAIN_SOURCE = `${TAG_LEFT_BOUNDARY}((?:#${TAG_CHAR}+)+)`;
+const TAG_CHAIN = new RegExp(TAG_CHAIN_SOURCE, 'gu');
+/** A chain plus the single horizontal space after it, which a removal may take. */
+const TAG_CHAIN_SPACED = new RegExp(`${TAG_CHAIN_SOURCE}([ \\t]?)`, 'gu');
+
+/** The tags in a matched chain: each name, up to the first all-digit one. */
+function chainTags(chain: string): string[] {
+  const tags: string[] = [];
+  for (const name of chain.slice(1).split('#')) {
+    if (ALL_DIGITS.test(name)) break;
+    tags.push(name);
+  }
+  return tags;
+}
 
 /**
  * Inline `#tag` syntax lives in the body. The frontmatter block is spliced off
@@ -570,10 +637,9 @@ function mutateInlineTags(
   let updatedNonCode = false;
 
   if (operation === 'add') {
+    const present = new Set(inlineTags(segments));
     for (const tag of tags) {
-      const re = makeInlineTagRegex(tag);
-      const present = segments.some((s) => !s.protected && re.test(s.text));
-      if (present) {
+      if (present.has(tag)) {
         skipped.add(tag);
       } else {
         applied.add(tag);
@@ -608,7 +674,7 @@ function mutateInlineTags(
         skipped.add(tag);
         continue;
       }
-      const re = makeInlineTagRegex(tag);
+      const remove = removeFromChain(tag);
       let found = false;
       for (const s of segments) {
         if (s.protected) continue;
@@ -620,9 +686,9 @@ function mutateInlineTags(
          * least the tag itself, so this terminates.
          */
         for (
-          let next = s.text.replace(re, removeAt);
+          let next = s.text.replace(TAG_CHAIN_SPACED, remove);
           next !== s.text;
-          next = s.text.replace(re, removeAt)
+          next = s.text.replace(TAG_CHAIN_SPACED, remove)
         ) {
           s.text = next;
           found = true;
@@ -669,44 +735,103 @@ interface Segment {
 }
 
 /**
- * Split the body into stretches a tag may live in and stretches it may not:
- * code, where a `#` is code; link syntax, where a `#` is a heading anchor or
- * link text; HTML comments and math, where Obsidian reads no tag; and the
- * markup after which a `#` opens a tag (`ESCAPE` through `QUOTE_MARKER`). The
- * construct that opens first wins, so `$b <!-- c$` is math and `<!-- $b -->`
- * is a comment. Both the read and the write path run over the result, so
+ * A `TAG_CHAIN` replacer that drops every tag named `tag` from a chain and
+ * keeps the rest. Chains are split at `#` rather than matched against the
+ * name, so removing `caf` cannot strip the front off `#café`. A chain that
+ * loses all its tags takes one adjacent space with it, per `removeAt`.
+ */
+function removeFromChain(
+  tag: string,
+): (
+  full: string,
+  leading: string,
+  chain: string,
+  trailing: string,
+  offset: number,
+  whole: string,
+) => string {
+  return (full, leading, chain, trailing, offset, whole) => {
+    const names = chain.slice(1).split('#');
+    const tagged = chainTags(chain).length;
+    const kept = names.filter((name, i) => i >= tagged || name !== tag);
+    if (kept.length === names.length) return full;
+    if (kept.length === 0) return removeAt(full, leading, trailing, offset, whole);
+    return `${leading}#${kept.join('#')}${trailing}`;
+  };
+}
+
+/** Every inline tag in the segments a tag may live in, each once, in order of first appearance. */
+function inlineTags(segments: Segment[]): string[] {
+  const tags = new Set<string>();
+  for (const seg of segments) {
+    if (seg.protected) continue;
+    for (const m of seg.text.matchAll(TAG_CHAIN)) {
+      for (const tag of chainTags(m[2] ?? '')) tags.add(tag);
+    }
+  }
+  return [...tags];
+}
+
+/**
+ * Split the body into stretches a tag may live in and stretches it may not.
+ * `scanBlocks` finds the block structure — code, HTML blocks, and display math
+ * are hidden whole — and each paragraph, heading, and table row is split by
+ * `splitInline`. Both the read and the write path run over the result, so
  * `list` and `remove` agree on what counts as a tag.
  */
 function splitProtectedSegments(content: string): Segment[] {
   const segments: Segment[] = [];
   let cursor = 0;
-  const re = new RegExp(
-    [
-      FENCED_CODE_BLOCK,
-      INLINE_CODE,
-      WIKILINK,
-      MARKDOWN_LINK,
-      REFERENCE_LINK,
-      HTML_BLOCK,
-      HTML_COMMENT,
-      DISPLAY_MATH,
-      INLINE_DOUBLE_MATH,
-      INLINE_MATH_OPEN,
-      ESCAPE,
-      HTML_TAG,
-      EMPHASIS_RUN,
-      QUOTE_MARKER,
-    ]
-      .map((r) => r.source)
-      .join('|'),
-    'g',
-  );
-  const mathCloser = inlineMathCloser(content);
+  const push = (isProtected: boolean, text: string) => {
+    if (text.length > 0) segments.push({ protected: isProtected, text });
+  };
+  for (const block of scanBlocks(content)) {
+    push(false, content.slice(cursor, block.start));
+    const text = content.slice(block.start, block.end);
+    if (block.kind === 'hidden') push(true, text);
+    else for (const seg of splitInline(text, block.tableRow)) push(seg.protected, seg.text);
+    cursor = block.end;
+  }
+  push(false, content.slice(cursor));
+  return segments;
+}
+
+/** A protected span inside one paragraph, heading, or table row. */
+interface InlineSpan {
+  end: number;
+  kind: 'escape' | 'linkTail' | 'other';
+  start: number;
+}
+
+/**
+ * The spans of `text` a tag cannot live in, or that a `#` right after opens a
+ * tag, in order.
+ */
+function protectedSpans(text: string): InlineSpan[] {
+  const spans: InlineSpan[] = [];
+  const mathCloser = inlineMathCloser(text);
+  const codeCloser = codeSpanCloser(text);
+  INLINE_SPANS.lastIndex = 0;
   for (;;) {
-    const m = re.exec(content);
+    const m = INLINE_SPANS.exec(text);
     if (!m) break;
-    let matched = m[0] ?? '';
-    if (m.groups?.inlineMath !== undefined) {
+    let start = m.index;
+    let end = start + m[0].length;
+    if (m.groups?.code !== undefined) {
+      /**
+       * A run with no closer leaves its first backtick as text, and the rest of
+       * the run is tried as an opener of its own — where CommonMark would make
+       * the whole run text, Obsidian reads `` a ``b #x` `` as the code span
+       * `` `b #x` ``. Each shorter opener is tried here rather than by
+       * re-running the regex, which would rescan the run from every backtick.
+       */
+      const runEnd = end;
+      let close = codeCloser(start, runEnd - start);
+      while (close === undefined && ++start < runEnd) close = codeCloser(start, runEnd - start);
+      if (close === undefined) continue;
+      end = close;
+      INLINE_SPANS.lastIndex = end;
+    } else if (m.groups?.inlineMath !== undefined) {
       /**
        * The `$$` constructs are tried before this one and nothing after it
        * opens with `$`, so an opener with no closer leaves this position to
@@ -714,38 +839,200 @@ function splitProtectedSegments(content: string): Segment[] {
        */
       const close = mathCloser(m.index);
       if (close === undefined) continue;
-      matched = content.slice(m.index, close + 1);
-      re.lastIndex = close + 1;
+      end = close + 1;
+      INLINE_SPANS.lastIndex = end;
     }
-    if (m.index > cursor) {
-      segments.push({ protected: false, text: content.slice(cursor, m.index) });
-    }
-    segments.push({ protected: true, text: matched });
-    cursor = m.index + matched.length;
+    const kind =
+      m.groups?.escape !== undefined
+        ? 'escape'
+        : m.groups?.linkTail !== undefined
+          ? 'linkTail'
+          : 'other';
+    spans.push({ start, end, kind });
   }
-  if (cursor < content.length) {
-    segments.push({ protected: false, text: content.slice(cursor) });
+  return spans;
+}
+
+/**
+ * Split one paragraph, heading, or table row. Beyond the spans of
+ * `protectedSpans`, three kinds of markup become protected one-character (or
+ * one-run) segments, since a `#` directly after each opens a tag: the brackets
+ * of a bracketed span, a table row's cell pipes, and an underscore run that
+ * pairs as emphasis (`underscoreMarks`).
+ */
+function splitInline(text: string, tableRow: boolean): Segment[] {
+  const spans = protectedSpans(text);
+  /** `markEnd[i]` is the end of the mark starting at `i`, or 0. */
+  const markEnd = new Uint32Array(text.length);
+  const linkTexts = markupMarks(text, spans, tableRow, markEnd);
+  underscoreMarks(text, spans, linkTexts, markEnd);
+
+  const segments: Segment[] = [];
+  let cursor = 0;
+  const cut = (start: number, end: number) => {
+    if (start > cursor) segments.push({ protected: false, text: text.slice(cursor, start) });
+    segments.push({ protected: true, text: text.slice(start, end) });
+    cursor = end;
+  };
+  let s = 0;
+  for (let i = 0; i < text.length; ) {
+    const span = spans[s];
+    if (span?.start === i) {
+      cut(i, span.end);
+      i = span.end;
+      s++;
+    } else if (markEnd[i]) {
+      const end = markEnd[i] as number;
+      cut(i, end);
+      i = end;
+    } else i++;
   }
+  if (cursor < text.length) segments.push({ protected: false, text: text.slice(cursor) });
   return segments;
 }
 
 /**
- * Captures the character before the tag and the single horizontal space after
- * it, if any. The lookahead refuses a longer tag that merely starts with `tag`
- * — removing `caf` must not strip the front off `#café`.
+ * Mark the brackets of every bracketed span and, in a table row, every cell
+ * pipe; return the link texts — the ranges between a `[` and the `LINK_TAIL`
+ * that closes it. Pinned against Obsidian readback: `[#t]`, `x [a]#t`, and
+ * `[#t](u)` are tags, as is `[#t` closed on the next line of the paragraph,
+ * while `x [#t` (never closed), `x []#t` (empty), `[^#t]` (a footnote), and
+ * the outer `[` of `[#t [b] c]` (a `[` before the `]`) open none. A `]]`
+ * closes a wikilink, not a bracketed span.
  */
-function makeInlineTagRegex(tag: string): RegExp {
-  const escaped = tag.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
-  return new RegExp(`${TAG_LEFT_BOUNDARY}#${escaped}(?!${TAG_CHAR})([ \\t]?)`, 'gu');
+function markupMarks(
+  text: string,
+  spans: InlineSpan[],
+  tableRow: boolean,
+  markEnd: Uint32Array,
+): Array<[number, number]> {
+  const linkTexts: Array<[number, number]> = [];
+  let open = -1;
+  let s = 0;
+  for (let i = 0; i < text.length; ) {
+    const span = spans[s];
+    if (span?.start === i) {
+      if (span.kind === 'linkTail') {
+        if (open >= 0 && i > open + 1) {
+          markEnd[open] = open + 1;
+          linkTexts.push([open + 1, i]);
+        }
+        open = -1;
+      }
+      i = span.end;
+      s++;
+      continue;
+    }
+    const ch = text[i];
+    if (ch === '[') {
+      open = text[i + 1] === '^' ? -1 : i;
+    } else if (ch === ']') {
+      if (open >= 0 && i > open + 1 && text[i + 1] !== ']') {
+        markEnd[open] = open + 1;
+        markEnd[i] = i + 1;
+      }
+      open = -1;
+    } else if (ch === '|' && tableRow) {
+      markEnd[i] = i + 1;
+    }
+    i++;
+  }
+  return linkTexts;
+}
+
+const TAG_AT = new RegExp(`#${TAG_CHAR}+`, 'uy');
+
+/**
+ * Mark the underscore runs that pair as emphasis. `_` is a tag character, so
+ * this decides both where a tag may start (`x _#t_ y` is tagged `t`,
+ * `snake_case_#t` is tagged `t`) and where one ends (the closing `_` of
+ * `_#t_` is not part of it). None of this is CommonMark's flanking rule; it is
+ * fitted to more than eighty Obsidian 1.13.7 readback probes. Walking the
+ * paragraph's runs in order, with at most one opener pending:
+ *
+ * - With none pending, a run becomes the opener.
+ * - A run followed by an ASCII letter or digit cannot close (`x _#t_b` holds
+ *   no tag) and is passed over.
+ * - A run longer than the opener cannot close it and is passed over.
+ * - When the text between opener and run both starts and ends with whitespace
+ *   (`a_ _#t`), the pair fails and the run becomes the opener instead.
+ * - Otherwise the two pair, and both are marks.
+ *
+ * A run inside a tag's name, or inside a protected span — code, math, a
+ * comment, a link destination — can close but never open: `#qb_name_ x` is the
+ * tag `qb_name_`, and `x `a_` b_#t` holds no tag while `x _a `_` b_#t` pairs
+ * the first two runs. An escaped `\_` is text. Link text pairs on its own, as
+ * CommonMark nests it: `[x _a_#t](u)` is tagged `t`, while the run in
+ * `[a_](u) b_#t` cannot reach past the link.
+ */
+function underscoreMarks(
+  text: string,
+  spans: InlineSpan[],
+  linkTexts: Array<[number, number]>,
+  markEnd: Uint32Array,
+): void {
+  type Run = { start: number; end: number };
+  let outer: Run | undefined;
+  let inner: Run | undefined;
+  /** Index of the link text the walk is in, or -1 outside every link. */
+  let link = -1;
+  let tagEnd = -1;
+  let s = 0;
+  let l = 0;
+
+  /** Offer `run` to the pending opener; returns the opener pending afterwards. */
+  const offer = (opener: Run | undefined, run: Run, closeOnly: boolean): Run | undefined => {
+    if (!opener) return closeOnly ? undefined : run;
+    if (/[A-Za-z0-9]/.test(text[run.end] ?? '')) return opener;
+    if (run.end - run.start > opener.end - opener.start) return opener;
+    if (/\s/.test(text[opener.end] ?? '') && /\s/.test(text[run.start - 1] ?? '')) {
+      return closeOnly ? undefined : run;
+    }
+    markEnd[opener.start] = opener.end;
+    markEnd[run.start] = run.end;
+    return;
+  };
+
+  for (let i = 0; i < text.length; ) {
+    while ((spans[s]?.end ?? Number.POSITIVE_INFINITY) <= i) s++;
+    const span = spans[s];
+    const inSpan = span !== undefined && span.start <= i;
+    if (inSpan && span.kind === 'escape') {
+      i = span.end;
+      continue;
+    }
+    const ch = text[i];
+    if (ch === '#' && !inSpan) {
+      TAG_AT.lastIndex = i;
+      if (TAG_AT.test(text)) tagEnd = TAG_AT.lastIndex;
+    }
+    if (ch !== '_') {
+      i++;
+      continue;
+    }
+    const run = { start: i, end: i };
+    while (text[run.end] === '_' && (!inSpan || run.end < span.end)) run.end++;
+    i = run.end;
+    const closeOnly = inSpan || run.start < tagEnd;
+    while ((linkTexts[l]?.[1] ?? Number.POSITIVE_INFINITY) <= run.start) l++;
+    if ((linkTexts[l]?.[0] ?? Number.POSITIVE_INFINITY) <= run.start) {
+      if (link !== l) inner = undefined;
+      link = l;
+      inner = offer(inner, run, closeOnly);
+    } else {
+      outer = offer(outer, run, closeOnly);
+    }
+  }
 }
 
 /**
  * Read-only helpers for `obsidian_manage_tags list`. Inline tags are read from
  * the body only, and through the same protected-segment split and left boundary
  * a removal uses, so what `list` reports is exactly what `remove` can reach — a
- * `#` inside a YAML scalar, a code span, a link span, an HTML comment, or math,
- * or one glued to the character before it (`\#`, `(#x`), is none of them. A tag
- * runs for as long as `TAG_CHAR` matches, and an all-digit run is not a tag.
+ * `#` inside a YAML scalar, code, an HTML block or comment, math, an image, or
+ * a link's destination or label, or one glued to the character before it
+ * (`\#`, `(#x`), is none of them. A tag runs for as long as `TAG_CHAR`
+ * matches, and an all-digit run is not a tag.
  */
 export function listTagsFromContent(
   content: string,
@@ -754,22 +1041,8 @@ export function listTagsFromContent(
   frontmatter: string[];
   inline: string[];
 } {
-  const fmTags = normalizeTagList(frontmatter.tags);
-  const inline: string[] = [];
-  const seen = new Set<string>();
-  /** Each segment is scanned to exhaustion, which resets `lastIndex` between them. */
-  const re = new RegExp(`${TAG_LEFT_BOUNDARY}#(${TAG_CHAR}+)`, 'gu');
-  for (const seg of splitProtectedSegments(splice(content).body)) {
-    if (seg.protected) continue;
-    for (;;) {
-      const m = re.exec(seg.text);
-      if (!m) break;
-      const t = m[2];
-      if (t && !ALL_DIGITS.test(t) && !seen.has(t)) {
-        seen.add(t);
-        inline.push(t);
-      }
-    }
-  }
-  return { frontmatter: fmTags, inline };
+  return {
+    frontmatter: normalizeTagList(frontmatter.tags),
+    inline: inlineTags(splitProtectedSegments(splice(content).body)),
+  };
 }

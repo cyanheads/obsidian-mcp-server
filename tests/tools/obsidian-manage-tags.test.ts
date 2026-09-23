@@ -451,7 +451,7 @@ describe('obsidian_manage_tags / remove inline — byte fidelity through the han
 describe('obsidian_manage_tags / link spans are not inline tags', () => {
   const LINKED = 'see [[#Overview & Notes]] here\nand [Chat #support](https://example.dev)\n';
 
-  it('reports no inline tag for a heading anchor or markdown link text', async () => {
+  it('reports no inline tag for a heading anchor, and reads markdown link text', async () => {
     harness
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
@@ -468,15 +468,15 @@ describe('obsidian_manage_tags / link spans are not inline tags', () => {
     );
 
     if (out.result.operation !== 'list') throw new Error('expected list branch');
-    expect(out.result.tags.inline).toEqual([]);
-    expect(out.result.tags.all).toEqual(['keepme']);
+    expect(out.result.tags.inline).toEqual(['support']);
+    expect(out.result.tags.all).toEqual(['keepme', 'support']);
 
     const render = obsidianManageTags.format;
     if (!render) throw new Error('obsidian_manage_tags declares no format()');
     const text = render(out)
       .map((c) => (c.type === 'text' ? c.text : ''))
       .join('\n');
-    expect(text).toContain('*Inline (0):* _(none)_');
+    expect(text).toContain('*Inline (1):* `#support`');
     expect(text).toContain('`#keepme`');
   });
 
@@ -645,5 +645,135 @@ describe("obsidian_manage_tags / Obsidian's tag grammar", () => {
     if (result.operation !== 'remove') throw new Error('expected remove branch');
     expect(result.applied).toEqual([]);
     expect(result.skipped).toEqual(['caf']);
+  });
+});
+
+/**
+ * Block and inline structure at the handler: code (fenced and indented), HTML
+ * blocks, and a link's destination hide their tags, while link text, a table
+ * cell, emphasis, and a glued tag expose theirs — on both consumption
+ * surfaces. Issues #139 and #140.
+ */
+describe('obsidian_manage_tags / tags Obsidian hides in blocks and reads in markup', () => {
+  const BODY = [
+    '```typescript',
+    'x #tu',
+    '```',
+    'prose #tv',
+    '',
+    '    #sa indented code',
+    '',
+    '<div>',
+    '#tp',
+    '</div>',
+    '',
+    '[Discord #tf](https://x.y/#frag), x _#uc_ y, #tl#tm',
+    '',
+    '|a|b|',
+    '|-|-|',
+    '|#uo|x|',
+    '',
+  ].join('\n');
+  const READ = ['tv', 'tf', 'uc', 'tl', 'tm', 'uo'];
+
+  it('lists exactly the tags Obsidian reads, on both surfaces', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(BODY, {}, READ), { headers: { 'content-type': 'application/json' } });
+
+    const res = await runToolContract(obsidianManageTags, {
+      target: { type: 'path', path: 'N.md' },
+      operation: 'list',
+    });
+
+    expect(res.isError).toBeFalsy();
+    const { result } = obsidianManageTags.output.parse(res.structuredContent);
+    if (result.operation !== 'list') throw new Error('expected list branch');
+    expect(result.tags.inline).toEqual(READ);
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('*Inline (6):* `#tv` `#tf` `#uc` `#tl` `#tm` `#uo`');
+  });
+
+  it('lists no inline tag for a note whose every hash is hidden', async () => {
+    const hidden = '```\n#tu\n```\n\n    #sa\n\n<div>\n#tp\n</div>\n';
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(hidden, {}, []), { headers: { 'content-type': 'application/json' } });
+
+    const res = await runToolContract(obsidianManageTags, {
+      target: { type: 'path', path: 'N.md' },
+      operation: 'list',
+    });
+
+    const { result } = obsidianManageTags.output.parse(res.structuredContent);
+    if (result.operation !== 'list') throw new Error('expected list branch');
+    expect(result.tags.inline).toEqual([]);
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('*Inline (0):* _(none)_');
+  });
+
+  it('skips hidden tags and issues no write', async () => {
+    let puts = 0;
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(BODY, {}, READ), { headers: { 'content-type': 'application/json' } });
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply(() => {
+      puts++;
+      return { statusCode: 200, data: '' };
+    });
+
+    const res = await runToolContract(obsidianManageTags, {
+      target: { type: 'path', path: 'N.md' },
+      operation: 'remove',
+      location: 'inline',
+      tags: ['tu', 'sa', 'tp', 'frag'],
+    });
+
+    expect(puts).toBe(0);
+    const { result } = obsidianManageTags.output.parse(res.structuredContent);
+    if (result.operation !== 'remove') throw new Error('expected remove branch');
+    expect(result.applied).toEqual([]);
+    expect(result.skipped).toEqual(['tu', 'sa', 'tp', 'frag']);
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('*Skipped (4):*');
+  });
+
+  it('removes read tags and writes back only those sites', async () => {
+    const after = BODY.replace('prose #tv', 'prose')
+      .replace('x _#uc_ y', 'x __ y')
+      .replace('#tl#tm', '#tm')
+      .replace('[Discord #tf]', '[Discord]')
+      .replace('|#uo|x|', '||x|');
+    let putBody = '';
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(BODY, {}, READ), { headers: { 'content-type': 'application/json' } });
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply((opts) => {
+      putBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(after, {}, ['tm']), { headers: { 'content-type': 'application/json' } });
+
+    const res = await runToolContract(obsidianManageTags, {
+      target: { type: 'path', path: 'N.md' },
+      operation: 'remove',
+      location: 'inline',
+      tags: ['tv', 'tf', 'uc', 'tl', 'uo'],
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(putBody).toBe(after);
+    const { result } = obsidianManageTags.output.parse(res.structuredContent);
+    if (result.operation !== 'remove') throw new Error('expected remove branch');
+    expect(result.applied).toEqual(['tv', 'tf', 'uc', 'tl', 'uo']);
+    expect(result.tags).toEqual(['tm']);
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('*Applied (5):* `#tv` `#tf` `#uc` `#tl` `#uo`');
   });
 });
