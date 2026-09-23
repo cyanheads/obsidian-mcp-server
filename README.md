@@ -60,7 +60,7 @@ Vault-note and tag data are also reachable via tools — `obsidian_get_note` for
 
 - `format: "content" | "full" | "document-map" | "section"` selects the projection; `full` accepts `includeLinks: true` for outgoing wiki/markdown links (vault-internal only — external URLs are filtered)
 - Addressed by vault `path`, the `active` file, or a `periodic` note (`daily` / `weekly` / `monthly` / `quarterly` / `yearly`)
-- Heading sections use `Parent::Child` syntax; a bare leaf name matching several headings returns the first match and lists every colliding path in `candidates`
+- Heading sections use `Parent::Child` syntax, and every `#`-style heading path the document map lists reads back as itself (setext headings, underlined with `===` or `---`, are not recognized); a bare leaf name matching several headings, or a full path that repeats in the note, returns the first match and lists every colliding path in `candidates`
 - Forgiving `path` resolution: a case-mismatched path retries against the canonical filename, an ambiguous case match fails with `Conflict`, and a `NotFound` carries `Did you mean: …?` suggestions when near-matches exist
 - Typed errors include `note_missing`, `path_forbidden`, `no_active_file`, `periodic_unsupported` / `periodic_disabled`, and `path_traversal`
 
@@ -95,8 +95,8 @@ Vault-note and tag data are also reachable via tools — `obsidian_get_note` for
 ### `obsidian_search_notes` <sub>tool</sub>
 
 - `mode: "text" | "jsonlogic"` always; `"omnisearch"` is added to the schema only when the Omnisearch plugin's HTTP server is reachable at startup (restart to re-probe)
-- `text` — substring match with `contextLength`-sized context windows (default 100) and an optional `pathPrefix`; `jsonlogic` — a JSONLogic tree with `var` paths into `path` / `content` / `frontmatter.<key>` / `tags` / `stat.{ctime,mtime,size}`, plus `glob` / `regexp` operators taking `[PATTERN, VALUE]`; `omnisearch` — BM25-ranked, quoted phrases, `-exclusion`, `path:` / `ext:` filters, typo tolerance, PDF/OCR via Text Extractor, hard-capped at 50 upstream hits (`truncated: true` when likely hit)
-- Cursor pagination — omit `cursor` for page one, pass `nextCursor` from the prior response; text-mode hits additionally clip to `maxMatchesPerHit` (default 10), flagged with `truncated` / `totalMatches`
+- `text` — whitespace-split tokens, all required, each matched case-insensitively as a substring (quotes are literal, so there is no phrase operator), with `contextLength`-sized context windows (default 100) and an optional `pathPrefix`; tokens within 2 × `contextLength` of each other, such as a phrase's words, share one match location; `jsonlogic` — a JSONLogic tree with `var` paths into `path` / `content` / `frontmatter.<key>` / `tags` / `stat.{ctime,mtime,size}`, plus `glob` / `regexp` operators taking `[PATTERN, VALUE]`; `omnisearch` — BM25-ranked, quoted phrases, `-exclusion`, `path:` / `ext:` filters, typo tolerance, PDF/OCR via Text Extractor, hard-capped at 50 upstream hits (`truncated: true` when likely hit)
+- Cursor pagination — omit `cursor` for page one, pass `nextCursor` from the prior response; text-mode hits additionally clip to `maxMatchesPerHit` match locations (default 10), flagged with `truncated` / `totalMatches`
 - No dedicated backlinks tool — express "what links here" via `jsonlogic`: `{"regexp": ["\\[\\[Target Note(\\||#|\\]\\])", {"var": "content"}]}`
 
 ---
@@ -104,7 +104,7 @@ Vault-note and tag data are also reachable via tools — `obsidian_get_note` for
 ### `obsidian_write_note` <sub>tool</sub>
 
 - Without `section` — full-file write; refuses to clobber an existing note unless `overwrite: true` (`file_exists` conflict otherwise, naming the surgical-edit tools as the alternative)
-- With `section` — `PATCH`-with-replace against a heading/block/frontmatter target, leaving the rest of the file untouched (`overwrite` is ignored); a bare heading leaf shared by several headings fails with `ambiguous_section`
+- With `section` — `PATCH`-with-replace against a heading/block/frontmatter target, leaving the rest of the file untouched (`overwrite` is ignored); a bare heading leaf shared by several headings fails with `ambiguous_section` unless one of them has no parent heading, which the write then targets, and a full heading path that repeats in the note fails the same way
 - Output reports `created`, plus `previousSizeInBytes` / `currentSizeInBytes` on every call to spot an accidental clobber or a mistyped path
 
 ---
@@ -121,7 +121,7 @@ Vault-note and tag data are also reachable via tools — `obsidian_get_note` for
 ### `obsidian_patch_note` <sub>tool</sub>
 
 - `operation: "append" | "prepend" | "replace"` against one heading, block reference, or frontmatter field per call
-- Heading targets accept the full `Parent::Child` path or an unambiguous bare leaf name; a leaf matching several headings fails with `ambiguous_section` and lists the candidates
+- Heading targets accept the full `Parent::Child` path or a bare leaf name; a leaf matching several headings fails with `ambiguous_section` and lists the candidates, unless one of them has no parent heading, which the patch then targets; a full path that repeats in the note fails with `ambiguous_section` too
 - `patchOptions`: `createTargetIfMissing`, `applyIfContentPreexists` (idempotency guard — otherwise `content_preexists`), `trimTargetWhitespace`
 
 ---
@@ -146,7 +146,8 @@ Vault-note and tag data are also reachable via tools — `obsidian_get_note` for
 ### `obsidian_manage_tags` <sub>tool</sub>
 
 - `operation: "add" | "remove" | "list"`; `location: "frontmatter"` (default, canonical `tags:` array) | `"inline"` (body `#tag`, `add` appends at end-of-file) | `"both"` (reconciles both)
-- Inline detection skips fenced/inline code spans, link spans (`[[...]]`, `[text](...)`, `[text][ref]`), and `\#`-escaped hashes, so a heading anchor or wikilink alias is never mistaken for a tag
+- Inline detection skips fenced/inline code spans, link spans (`[[...]]`, `[text](...)`, `[text][ref]`), HTML comments, and math (`$…$`, `$$…$$`), so a heading anchor or wikilink alias is never mistaken for a tag; `%% … %%` comments are still read, as Obsidian reads them
+- Inline tags follow Obsidian's grammar: a tag starts at line start, after whitespace, or right after markup such as `**`, `==`, `<br>`, or a `\`-escape (`**#x**` is a tag; `(#x`, `.#x`, `a *#x`, and `\#x` are not) and runs through letters and digits in any script, emoji, `_`, `-`, and `/`, with at least one character that is not an ASCII digit (`#1990s`, `#café`, `#日本語`, and `#✅done` are tags; `#1984` is not)
 - `add` / `remove` report `applied` vs. `skipped` tags plus the full `tags` set after the change; `list` ignores the input `tags` array
 
 ---
@@ -349,8 +350,8 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `OBSIDIAN_API_KEY` | **Required.** Bearer token for the Obsidian Local REST API plugin. | — |
-| `OBSIDIAN_BASE_URL` | Base URL of the Local REST API plugin. Use `https://127.0.0.1:27124` for the always-on HTTPS port (self-signed cert). A trailing slash is stripped at startup. | `http://127.0.0.1:27123` |
-| `OBSIDIAN_VERIFY_SSL` | Verify the TLS certificate. Default `false` because the plugin uses a self-signed cert. The relaxation is applied per request, to an `https:` `OBSIDIAN_BASE_URL` only — every other HTTPS connection the process makes still verifies normally, on both Bun and Node. | `false` |
+| `OBSIDIAN_BASE_URL` | Base URL of the Local REST API plugin. Use `https://127.0.0.1:27124` for the always-on HTTPS port (self-signed cert). A trailing slash is stripped at startup. When nothing answers there (Obsidian closed, plugin disabled, wrong host or port), calls fail with `obsidian_unreachable` — a `GET`, `PUT`, or `DELETE` after its retries, any other request on the first attempt. | `http://127.0.0.1:27123` |
+| `OBSIDIAN_VERIFY_SSL` | Verify the TLS certificate. Default `false` because the plugin uses a self-signed cert. The relaxation is applied per request, to an `https:` `OBSIDIAN_BASE_URL` only — every other HTTPS connection the process makes still verifies normally, on both Bun and Node. With `true`, a certificate the runtime does not trust fails every call on its first attempt with `certificate_rejected`. | `false` |
 | `OBSIDIAN_REQUEST_TIMEOUT_MS` | Per-request timeout in milliseconds. | `30000` |
 | `OBSIDIAN_ENABLE_COMMANDS` | Opt-in flag for the command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`). Off by default — Obsidian commands are opaque and can be destructive. | `false` |
 | `OBSIDIAN_READ_PATHS` | Comma-separated vault-relative folder allowlist for read operations. Prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault. Write paths are implicitly readable. | unset |

@@ -233,10 +233,14 @@ Services that accept `ctx` use the same resolver for parity. The Obsidian servic
 ```ts
 // inside obsidian-service.ts
 throw notFound(`Not found: ${display}`, data('note_missing'), { cause });
-// where data(reason) does: { path, reason, ...ctx.recoveryFor(reason) }
+// where data(reason) does: { ...callerIdentifier(path), reason, ...ctx.recoveryFor(reason) }
+// — `path` on a note route, `commandId` on /commands/<id>/, no key on routes
+// that carry no caller input (/, /tags/, /commands/, /search/).
 // The upstream body is never spread into `data` — it rides as `cause`, which
 // is non-enumerable and so reaches the log without reaching the client.
 ```
+
+A `fetch` that rejects before any response is classified inside the attempt (`#send`), so the retry decision sees the typed error: a refused certificate throws `ConfigurationError` `certificate_rejected` on the first attempt, an unreachable plugin throws `ServiceUnavailable` `obsidian_unreachable` and keeps the GET/PUT/DELETE retries. Both carry an inline `recovery.hint` rather than `ctx.recoveryFor`, because they reach every tool and resource — including resources with no `errors[]` — and the operator, not the agent, fixes them.
 
 **Fallback for ad-hoc throws** (no contract entry fits, prototype tools, service-layer code without a contract): use error factories.
 
