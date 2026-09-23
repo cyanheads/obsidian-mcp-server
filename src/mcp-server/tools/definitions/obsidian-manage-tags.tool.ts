@@ -1,8 +1,10 @@
 /**
  * @fileoverview obsidian_manage_tags — add/remove/list tags across both
  * frontmatter (`tags:` array) and inline (`#tag`) syntax. The service layer
- * reconciles both representations; inline detection skips code spans, link
- * spans, and a hash escaped as `\#`.
+ * reconciles both representations; inline detection follows Obsidian's own
+ * reading — it skips code spans, link spans, HTML comments, math, and a `#`
+ * glued to the text before it rather than to whitespace, line start, or
+ * markup.
  * @module mcp-server/tools/definitions/obsidian-manage-tags.tool
  */
 
@@ -21,7 +23,7 @@ const LocationSchema = z
 
 export const obsidianManageTags = tool('obsidian_manage_tags', {
   description:
-    "Add, remove, or list a note's tags. Defaults to the frontmatter `tags:` array — set `location` to `inline` or `both` to mutate the note body. `add` ensures the tag is present in the requested location(s); `remove` strips it; `both` reconciles across both representations. Inline `#tag` detection skips code spans (fenced and inline), link spans (`[[...]]`, `[text](...)`, `[text][ref]`) so a heading anchor, block anchor, or wikilink alias is never read as a tag or rewritten by a removal, and a hash escaped as `\\#`; a `#` inside an HTML comment or a math span is still counted. Inline-location additions append the new tag at end-of-file. `list` ignores the input `tags` array.",
+    "Add, remove, or list a note's tags. Defaults to the frontmatter `tags:` array — set `location` to `inline` or `both` to mutate the note body. `add` ensures the tag is present in the requested location(s); `remove` strips it; `both` reconciles across both representations. Inline `#tag` detection skips code spans (fenced and inline), link spans (`[[...]]`, `[text](...)`, `[text][ref]`) so a heading anchor, block anchor, or wikilink alias is never read as a tag or rewritten by a removal, and HTML comments (`<!-- … -->`) and math (`$…$`, `$$…$$`), where Obsidian indexes no tag. An inline tag starts at line start, after whitespace, or right after markup such as `**`, `==`, `<br>`, or a `\\`-escape (`**#x**` is a tag; `(#x`, `a *#x`, and `\\#x` are not); a `#` inside a `%% … %%` comment still counts. Inline-location additions append the new tag at end-of-file. `list` ignores the input `tags` array.",
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),

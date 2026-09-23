@@ -546,3 +546,104 @@ describe('obsidian_manage_tags / link spans are not inline tags', () => {
     expect(out.result.applied).toEqual(['work']);
   });
 });
+
+/**
+ * Obsidian's tag grammar at the handler: a leading digit and non-ASCII
+ * characters are tags, an all-digit run and a hash glued to a preceding letter
+ * are not. Issue #127.
+ */
+describe("obsidian_manage_tags / Obsidian's tag grammar", () => {
+  const BODY = 'Plans for #1990s, #café, #日本語 and #✅done. Not tags: #1984 café#tag\n';
+
+  it('lists exactly the inline tags Obsidian reports, on both surfaces', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(
+        200,
+        noteJson(BODY, { tags: ['keepme'] }, ['keepme', '1990s', 'café', '日本語', '✅done']),
+        {
+          headers: { 'content-type': 'application/json' },
+        },
+      );
+
+    const res = await runToolContract(obsidianManageTags, {
+      target: { type: 'path', path: 'N.md' },
+      operation: 'list',
+    });
+
+    expect(res.isError).toBeFalsy();
+    const { result } = obsidianManageTags.output.parse(res.structuredContent);
+    if (result.operation !== 'list') throw new Error('expected list branch');
+    expect(result.tags.inline).toEqual(['1990s', 'café', '日本語', '✅done']);
+    expect(result.tags.all).toEqual(['keepme', '1990s', 'café', '日本語', '✅done']);
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('*Inline (4):* `#1990s` `#café` `#日本語` `#✅done`');
+    expect(text).not.toContain('#1984`');
+  });
+
+  it('removes a leading-digit and a non-ASCII tag and writes back only those sites', async () => {
+    // Each tag goes with the space before it; the commas that followed stay.
+    const after = 'Plans for,, #日本語 and #✅done. Not tags: #1984 café#tag\n';
+    let putBody = '';
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(BODY, {}, ['1990s', 'café', '日本語', '✅done']), {
+        headers: { 'content-type': 'application/json' },
+      });
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply((opts) => {
+      putBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(after, {}, ['日本語', '✅done']), {
+        headers: { 'content-type': 'application/json' },
+      });
+
+    const res = await runToolContract(obsidianManageTags, {
+      target: { type: 'path', path: 'N.md' },
+      operation: 'remove',
+      location: 'inline',
+      tags: ['1990s', 'café'],
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(putBody).toBe(after);
+    const { result } = obsidianManageTags.output.parse(res.structuredContent);
+    if (result.operation !== 'remove') throw new Error('expected remove branch');
+    expect(result.applied).toEqual(['1990s', 'café']);
+    expect(result.skipped).toEqual([]);
+    expect(result.tags).toEqual(['日本語', '✅done']);
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('*Applied (2):* `#1990s` `#café`');
+  });
+
+  it('skips a prefix of a non-ASCII tag and issues no write', async () => {
+    let puts = 0;
+    const pool = harness.current().pool;
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(BODY, {}, ['1990s', 'café', '日本語', '✅done']), {
+        headers: { 'content-type': 'application/json' },
+      });
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply(() => {
+      puts++;
+      return { statusCode: 200, data: '' };
+    });
+
+    const res = await runToolContract(obsidianManageTags, {
+      target: { type: 'path', path: 'N.md' },
+      operation: 'remove',
+      location: 'inline',
+      tags: ['caf'],
+    });
+
+    expect(puts).toBe(0);
+    const { result } = obsidianManageTags.output.parse(res.structuredContent);
+    if (result.operation !== 'remove') throw new Error('expected remove branch');
+    expect(result.applied).toEqual([]);
+    expect(result.skipped).toEqual(['caf']);
+  });
+});

@@ -739,16 +739,15 @@ describe('listTagsFromContent / link spans are not inline tags', () => {
   });
 
   /**
-   * Obsidian's help documents HTML comments and math spans without claiming its
-   * tag index skips them, so a `#tag` in either is still reported. Excluding
-   * them would risk a false negative — and a `$…$` span detector would read the
-   * gap between two prices as math.
+   * Obsidian's metadata cache reads no tag inside an HTML comment or a math
+   * span. A `$` delimits math only under Obsidian's inline-math rule, so prose
+   * between two prices is not math and its tag still counts. Issue #138.
    */
   it.each([
-    ['an HTML comment', '<!-- #hidden -->', ['hidden']],
-    ['an inline math span', 'value $#x$ end', ['x']],
+    ['an HTML comment', '<!-- #hidden -->', []],
+    ['an inline math span', 'value $#x$ end', []],
     ['prose between two dollar amounts', 'costs $5 and $10 for #work', ['work']],
-  ])('still reports a tag inside %s', (_label, input, expected) => {
+  ])('reads a tag around %s the way Obsidian does', (_label, input, expected) => {
     expect(listTagsFromContent(input, {}).inline).toEqual(expected);
   });
 
@@ -760,6 +759,381 @@ describe('listTagsFromContent / link spans are not inline tags', () => {
     ['a bare URL fragment', 'see https://x.dev/#frag end'],
   ])('still reports nothing for %s', (_label, input) => {
     expect(listTagsFromContent(input, {}).inline).toEqual([]);
+  });
+});
+
+/**
+ * Obsidian's inline tag grammar, each expectation read back from Obsidian's own
+ * metadata cache (note-JSON `tags`, Obsidian 1.13.7 / Local REST API 5.2.0): a
+ * tag runs until whitespace, ASCII punctuation other than `_` `-` `/`, or a
+ * character from the General (U+2000–U+206F) or Supplemental (U+2E00–U+2E7F)
+ * Punctuation blocks, and needs one character that is not an ASCII digit.
+ * Issue #127.
+ */
+describe("listTagsFromContent / Obsidian's tag grammar", () => {
+  it.each([
+    [
+      'leading digits, non-ASCII letters, CJK, and emoji',
+      '#1990s #2024-goals #3d #1984 #café #日本語 #✅done #y1984',
+      ['1990s', '2024-goals', '3d', 'café', '日本語', '✅done', 'y1984'],
+    ],
+    ['the issue repro', 'Plans for #1990s and #café.', ['1990s', 'café']],
+    [
+      'emoji, CJK, and accents on either side of ASCII',
+      '#tag🎉emoji #tag日本語 #日本語tag #café2',
+      ['tag🎉emoji', 'tag日本語', '日本語tag', 'café2'],
+    ],
+    ['digits made valid by - _ /', '#123-456 #12_34 #123/456', ['123-456', '12_34', '123/456']],
+    ['a nested tag with a Unicode segment', '#wörk/日本語 end', ['wörk/日本語']],
+    [
+      'digits outside ASCII, which are not "numeric" to Obsidian',
+      '#١٢٣ #１２３ #½ #²³',
+      ['١٢٣', '１２３', '½', '²³'],
+    ],
+    [
+      'Latin-1 and symbol characters that continue a tag',
+      '#a¡b #c¿d #e─f #g©h #i«j #k§l #m¶n #o°p #q·r #sΩt #u€v #w™x #y→z #aa♥bb #cc×dd',
+      [
+        'a¡b',
+        'c¿d',
+        'e─f',
+        'g©h',
+        'i«j',
+        'k§l',
+        'm¶n',
+        'o°p',
+        'q·r',
+        'sΩt',
+        'u€v',
+        'w™x',
+        'y→z',
+        'aa♥bb',
+        'cc×dd',
+      ],
+    ],
+    [
+      'combining marks, variation selectors, and a soft hyphen',
+      '#ne\u0301e #love❤\ufe0fx #vs\ufe0fy #soft\u00adhy',
+      ['ne\u0301e', 'love❤\ufe0fx', 'vs\ufe0fy', 'soft\u00adhy'],
+    ],
+    [
+      'CJK and fullwidth punctuation',
+      '#a、b #c。d #e「f #g！h #i～j',
+      ['a、b', 'c。d', 'e「f', 'g！h', 'i～j'],
+    ],
+  ])('reports exactly the tags Obsidian reports: %s', (_label, input, expected) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual(expected);
+  });
+
+  it.each([
+    ['an apostrophe', "#tag' x"],
+    ['a bang', '#tag! x'],
+    ['an opening paren', '#tag( x'],
+    ['a double quote', '#tag" x'],
+    ['a semicolon', '#tag; x'],
+    ['a tilde', '#tag~ x'],
+    ['a period', '#tag. x'],
+    ['a hash', '#tag#more x'],
+    ['an em dash', '#tag—dash x'],
+    ['an en dash', '#tag–endash x'],
+    ['an ellipsis', '#tag…more x'],
+    ['a Unicode hyphen (U+2010)', '#tag‐more x'],
+    ['a prime (U+2032)', '#tag′more x'],
+    ['an undertie (U+203F)', '#tag‿more x'],
+    ['a zero-width space', '#tag\u200bmore x'],
+    ['a zero-width joiner', '#tag\u200dmore x'],
+    ['a supplemental-punctuation mark (U+2E2E)', '#tag⸮more x'],
+    ['a no-break space', '#tag\u00a0more x'],
+    ['a byte-order mark', '#tag\ufeffmore x'],
+    ['an ideographic space', '#tag\u3000more x'],
+  ])('ends a tag at %s', (_label, input) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual(['tag']);
+  });
+
+  it('ends a tag inside a ZWJ emoji sequence, at the joiner', () => {
+    expect(listTagsFromContent('#x👨\u200d👩\u200d👧 end', {}).inline).toEqual(['x👨']);
+  });
+
+  it.each([
+    ['an all-digit tag', '#123 and #1984'],
+    ['a non-ASCII letter before the hash', 'café#tag'],
+    ['a CJK letter before the hash', '日本#tag'],
+    ['an emoji before the hash', '✅#tag'],
+    ['a digit before the hash', '1#tag'],
+    ['an underscore before the hash', '_#tag'],
+    ['a hyphen before the hash', 'a -#tag b'],
+    ['a slash before the hash', 'a /#tag b'],
+  ])('reports nothing for %s', (_label, input) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual([]);
+  });
+});
+
+describe("reconcileTags / inline — Obsidian's tag grammar", () => {
+  it('removes a non-ASCII tag and only that tag', () => {
+    const r = reconcile('Plans for #café.', ['café'], 'remove', 'inline');
+    expect(r.applied).toEqual(['café']);
+    expect(r.skipped).toEqual([]);
+    // #111's rule: the tag goes with exactly one adjacent space.
+    expect(r.content).toBe('Plans for.');
+  });
+
+  it.each([
+    ['a leading-digit tag', 'Plans for #1990s and #café.', '1990s', 'Plans for and #café.'],
+    ['a CJK tag', 'a #日本語 b #日本語tag', '日本語', 'a b #日本語tag'],
+    ['an emoji tag', 'done: #✅done, next', '✅done', 'done:, next'],
+    ['a digits-plus-separator tag', 'see #123-456 end', '123-456', 'see end'],
+  ])('removes %s without touching its neighbours', (_label, input, tag, expected) => {
+    const r = reconcile(input, [tag], 'remove', 'inline');
+    expect(r.applied).toEqual([tag]);
+    expect(r.content).toBe(expected);
+  });
+
+  it.each([
+    ['a prefix ending before a non-ASCII letter', '#café here', 'caf'],
+    ['a prefix ending before a CJK letter', '#tag日本語 here', 'tag'],
+    ['a prefix ending before an emoji', '#tag🎉emoji here', 'tag'],
+    ['a prefix ending before a combining mark', '#ne\u0301e here', 'ne'],
+  ])('leaves a longer tag alone when removing %s', (_label, input, tag) => {
+    const r = reconcile(input, [tag], 'remove', 'inline');
+    expect(r.applied).toEqual([]);
+    expect(r.skipped).toEqual([tag]);
+    expect(r.content).toBe(input);
+  });
+
+  it('leaves an all-digit hash in place on a removal, as list does not report it', () => {
+    const input = 'year #1984 here and #1984s\n';
+    const r = reconcile(input, ['1984'], 'remove', 'inline');
+    expect(r.applied).toEqual([]);
+    expect(r.skipped).toEqual(['1984']);
+    expect(r.content).toBe(input);
+  });
+
+  it('removes a tag that Unicode punctuation ends', () => {
+    const r = reconcile('#tag— dash and #tag… trail', ['tag'], 'remove', 'inline');
+    expect(r.content).toBe('— dash and… trail');
+  });
+
+  it('adds a tag whose longer relative is the only one present', () => {
+    const r = reconcile('Body #café\n', ['caf'], 'add', 'inline');
+    expect(r.applied).toEqual(['caf']);
+    expect(r.content).toBe('Body #café\n#caf\n');
+  });
+
+  it('skips adding a non-ASCII tag that is already present', () => {
+    const r = reconcile('Body #café.\n', ['café'], 'add', 'inline');
+    expect(r.skipped).toEqual(['café']);
+    expect(r.content).toBe('Body #café.\n');
+  });
+});
+
+/**
+ * Where Obsidian reads an inline tag at all: after line start, whitespace, or
+ * markup it parses as a node of its own, and never inside an HTML comment or
+ * math. Every expectation is
+ * Obsidian's own metadata-cache readback (Obsidian 1.13.7, Local REST API
+ * 5.2.0) for the exact input; each `#xx` in an input is a distinct probe tag.
+ * Issue #138.
+ */
+describe('inline tags — boundary, HTML comments, and math (Obsidian readback)', () => {
+  const NBSP = String.fromCodePoint(0xa0);
+  const IDEOGRAPHIC_SPACE = String.fromCodePoint(0x3000);
+  const EM_SPACE = String.fromCodePoint(0x2003);
+  const ZERO_WIDTH_SPACE = String.fromCodePoint(0x200b);
+
+  /** The #138 table, row by row. */
+  const TABLE: Array<[string, string, string[]]> = [
+    ['punctuation before the hash', '(#pa) $#pb$ "#pc" .#pd x—#pe', []],
+    ['a tab before the hash', '\t#pf', ['pf']],
+    ['a space inside brackets', '[x #ph]', ['ph']],
+    ['a no-break space before the hash', `a${NBSP}#qi`, ['qi']],
+    ['an ideographic space before the hash', `a${IDEOGRAPHIC_SPACE}#qj`, ['qj']],
+    ['an inline HTML comment', 'a <!-- #qa --> b', []],
+    ['a multi-line HTML block', '<!--\n#qb\n-->', []],
+    ['an inline comment spanning lines', 'z #qe <!-- #qf\nstill #qg -->\nafter #qh', ['qe', 'qh']],
+    ['the rest of a line that opens an HTML block', '<!-- a --> #rd', []],
+    ['inline math', 'm $a #ra b$ n', []],
+    ['inline display-style math', 'x $$ #rb $$ y', []],
+    ['a display math block', '$$\n#qd\n$$', []],
+    ['a space after the opening dollar', 'm $ #qc $ n', ['qc']],
+    ['prose between two prices', 'cost $5 and #rc for $10', ['rc']],
+    ['an Obsidian comment', '%% #rf %%', ['rf']],
+  ];
+
+  /** Obsidian's inline-math delimiter rule, pinned by further live probes. */
+  const MATH: Array<[string, string, string[]]> = [
+    ['a closing dollar after a space', 'a $b #mb c $ d', ['mb']],
+    ['a closing dollar after a tab', 'a $b #tb c\t$ d', ['tb']],
+    ['a closing dollar before a digit', 'a $b #mc c$5 d', ['mc']],
+    ['a later closer past a digit-followed one', 'a $b #tj c$1 d$ e', []],
+    ['a closing dollar before a letter', 'a $b #md c$x d', []],
+    ['a closing dollar before punctuation', 'a $b #nc c$, d', []],
+    ['an escaped opening dollar', 'a \\$b #me c$ d', ['me']],
+    ['an escaped backslash before the opener', 'a \\\\$b #tk c$ d', []],
+    ['an escaped dollar inside the span', 'a $b #mf c\\$ d$ e', []],
+    ['an opening dollar before a tab', 'a $\t#ta c$ d', ['ta']],
+    ['an opening dollar before a newline', 'a $\n#tc c$ d', []],
+    ['an opening dollar before a no-break space', `a $${NBSP}#tt c$ d`, []],
+    ['a closing dollar after a newline', 'a $b #td\n$ d', []],
+    ['an opener glued to a word', 'a$b #mx c$ d', []],
+    ['a closer skipped because a space precedes it', 'a $b $c #th d$ e', []],
+    ['a tag between two math spans', 'a $b$c #ti d$ e', ['ti']],
+    ['a line break inside the span', 'a $b\n#mg c$ d', []],
+    ['an empty line inside the span', 'a $b\n\n#mh c$ d', ['mh']],
+    ['a spaces-only line inside the span', 'a $b\n  \n#sa c$ d', ['sa']],
+    ['a tab-only line inside the span', 'a $b\n\t\n#uc c$ d', []],
+    ['an unclosed dollar', 'a $b #mq c', ['mq']],
+    ['two prices', 'a $5 and $6 #ml', ['ml']],
+    ['inline double dollars', 'a $$b #mi c$$ d', []],
+    ['double dollars before a digit', 'a $$b #ud c$$5 d', []],
+    ['double dollars across an empty line', 'a $$b\n\n#te c$$ d', ['te']],
+    ['double dollars across a line break', 'a $$b\n#sg c$$ d #sh', ['sh']],
+    ['a tag between double-dollar pairs', 'a $$ b $$ #sz $$ c', ['sz']],
+    ['unclosed inline double dollars', 'a $$b #mr c\n\nlater #ms', ['mr', 'ms']],
+    ['a display block across an empty line', '$$\nb\n\n#tf\n$$\nafter #tg', ['tg']],
+    ['an unclosed display block', '$$ #na\n\nlater #nb', []],
+    ['an indented unclosed display block', '  $$ #tl\n\nlater #tm', []],
+    ['double dollars closed on their own line', '$$a$$ #tn', ['tn']],
+    ['pairs on a line that opens with double dollars', '$$ a $$ b $$ #ra\nnext #rb', ['ra', 'rb']],
+    ['a display block whose closer is not alone on its line', '$$\na\nb$$ #tq\nnext #tr', []],
+    ['a display closer followed by text', '$$\na\n$$ #sd\nnext #se', []],
+    ['an indented display closer', '$$\na\n  $$\nafter #sf', ['sf']],
+    ['a tab-indented display closer', '$$\na\n\t$$\nafter #st', ['st']],
+    ['a single dollar opening after unclosed double dollars', 'a $$b #xa c$ d', []],
+    ['a closer followed by more dollars', 'a $b #xb c$$$ d', []],
+    ['a CRLF line break after the span', 'a $b #xc c$\r\nd #xd', ['xd']],
+    ['a CRLF empty line inside the span', 'a $b\r\n\r\n#xh c$ d', ['xh']],
+    ['a CRLF display block', '$$\r\n#xf\r\n$$\r\nafter #xg', ['xg']],
+  ];
+
+  const HTML: Array<[string, string, string[]]> = [
+    ['a tag after an inline comment', 'a <!-- x --> #hj', ['hj']],
+    ['a tag before an inline comment', 'x #hn <!-- y -->', ['hn']],
+    ['an inline comment across an empty line', 'a <!-- x\n\n#he --> b', ['he']],
+    ['an inline comment across a spaces-only line', 'a <!-- x\n  \n#ui --> b', ['ui']],
+    ['an inline comment across a tab-only line', 'a <!-- x\n\t\n#sb --> b', []],
+    ['an unclosed inline comment', 'a <!-- #hf unclosed\n\nlater #hg', ['hf', 'hg']],
+    ['a comment opened by <!-->', 'a <!--> #hk --> b', ['hk']],
+    ['a comment opened by <!--->', 'a <!---> #hl --> b', ['hl']],
+    ['a comment containing a double hyphen', 'a <!-- x -- y #hm --> b', ['hm']],
+    ['text after the first closer', 'a <!-- b --> c --> #um', ['um']],
+    ['comments with leading hyphens', 'a <!-- -x --> #up <!--- x --> #uq', ['up', 'uq']],
+    ['an indented HTML block', '   <!-- a --> #ha', []],
+    ['an HTML block interrupting a paragraph', 'para\n<!-- a --> #hb', []],
+    ['the rest of the line that closes an HTML block', '<!--\nx\n--> #hc', []],
+    ['the line after an HTML block', '<!--\nx\n-->\n#hd', ['hd']],
+    ['an unclosed HTML block', '<!-- #hh unclosed block\n\nlater #hi', []],
+    ['the line after a one-line HTML block', '<!-- a --> b\nc #ho', ['ho']],
+    ['an HTML block in a list item', '- <!-- a --> #hq', []],
+    ['an HTML block in a blockquote', '> <!-- a --> #hr', []],
+    ['an HTML block in an ordered list item', '1. <!-- a --> #uk', []],
+    ['an HTML block in a quoted list item', '* > <!-- a --> #ul', []],
+    ['an unspaced HTML block', '<!--a--> #ht', []],
+    ['an HTML block across an empty line', '<!--\n#uf\n\n#ug\n-->\nafter #uh', ['uh']],
+    ['two consecutive HTML blocks', '<!-- a\n--> b\n<!-- c --> #un', []],
+    ['an inline comment across a CRLF empty line', 'a <!-- b\r\n\r\n#xe --> c', ['xe']],
+  ];
+
+  const MIXED: Array<[string, string, string[]]> = [
+    ['math that opens before a comment', 'a $b <!-- #sl c$ d --> #sm', ['sm']],
+    ['a comment that opens before math', 'a <!-- $b --> #sn c$', ['sn']],
+    ['math whose closer sits inside a comment', 'a $b <!-- c$ #so -->', ['so']],
+    ['dollars inside code spans', 'a `$` #mt `$` b', ['mt']],
+    ['a tag glued to a wikilink', '[[x]]#ba', ['ba']],
+    ['a tag glued to a code span', '`c`#bb', ['bb']],
+    ['a tag glued to a comment', 'a <!-- x -->#bc', ['bc']],
+    ['a tag glued to math', 'a $x$#bd', ['bd']],
+    ['an Obsidian comment block', '%%\n#be\n%%', ['be']],
+    ['an em space before the hash', `a${EM_SPACE}#bf`, ['bf']],
+    ['a zero-width space before the hash', `a${ZERO_WIDTH_SPACE}#bg`, []],
+  ];
+
+  /**
+   * Markup Obsidian parses as its own node, after which a `#` opens a tag even
+   * with no whitespace before it — and the same characters as plain text,
+   * after which it does not.
+   */
+  const MARKUP: Array<[string, string, string[]]> = [
+    ['bold', 'x **#ua** y', ['ua']],
+    ['italic', 'x *#ub* y', ['ub']],
+    ['bold italic', 'x ***#ug*** y', ['ug']],
+    ['strikethrough', 'x ~~#ue~~ y', ['ue']],
+    ['a highlight', 'x ==#uf== y', ['uf']],
+    ['bold glued to a word', 'a**#uh**', ['uh']],
+    ['a tag right after closing bold', '**x**#ui y', ['ui']],
+    ['italic that closes later on the line', 'a *#wj b* c', ['wj']],
+    ['italic that opened earlier on the line', '*a b*#wk c', ['wk']],
+    ['emphasis inside a word', 'foo*#wy*bar', ['wy']],
+    ['an unpartnered star', 'a *#wb b', []],
+    ['an unpartnered double star', 'a **#ww b', []],
+    ['a single tilde pair', 'a ~#wf~ b', []],
+    ['unpartnered tildes', 'a ~~#wg b', []],
+    ['unpartnered equals signs', 'a ==#wh b', []],
+    ['intraword underscores', 'a_#wd_b', []],
+    ['a blockquote marker', '>#uk', ['uk']],
+    ['nested blockquote markers', '> >#wl', ['wl']],
+    ['an indented blockquote marker', '  >#wm', ['wm']],
+    ['a greater-than sign mid-line', 'x >#yb y', []],
+    ['a pipe outside a table', '|not a table #wx and |#wp', ['wx']],
+    ['a padded table cell', '| a | b |\n|---|---|\n| #up | x |', ['up']],
+    ['an escaped bracket', 'a \\]#ta b', ['ta']],
+    ['an escaped star', 'a \\*#tb b', ['tb']],
+    ['an escaped parenthesis', 'a \\(#tc b', ['tc']],
+    ['an escaped backslash', 'a \\\\#td b', ['td']],
+    ['an escaped underscore', 'x\\_#te', ['te']],
+    ['escaped brackets around emphasis', 'must return a \\[ _transform_\\]#tz) given', ['tz']],
+    ['an escaped hash', 'x \\#vb', []],
+    ['an escaped backslash, then an escaped hash', 'x \\\\\\#vc', []],
+    ['a backslash before a non-ASCII mark', 'x \\—#va', []],
+    ['a line break element', 'line<br>#uw', ['uw']],
+    ['a self-closing line break', 'a <br/>#uy', ['uy']],
+    ['an inline span', 'text <span>#tq</span> more', ['tq']],
+    ['a closing span', '<span>x</span>#ux', ['ux']],
+    ['a bold element', 'x <b>#wq</b> y', ['wq']],
+    ['an anchor element with an attribute', 'x <a href="u">#wr</a> y', ['wr']],
+    ['a less-than heart', 'i <3#wt', []],
+    ['a character entity', 'a &amp;#uz', []],
+  ];
+
+  const ROWS = [...TABLE, ...MATH, ...HTML, ...MIXED, ...MARKUP];
+  const probeTags = (input: string) =>
+    [...input.matchAll(/#([a-z]{2})(?![a-z])/g)].map((m) => m[1] ?? '');
+
+  it.each(ROWS)('list reads %s as Obsidian does', (_label, input, expected) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual(expected);
+  });
+
+  it.each(ROWS)('remove reaches exactly the tags Obsidian reads: %s', (_label, input, expected) => {
+    for (const tag of probeTags(input)) {
+      const r = reconcile(input, [tag], 'remove', 'inline');
+      if (expected.includes(tag)) {
+        expect(r.applied, tag).toEqual([tag]);
+        expect(
+          [` #${tag}`, `#${tag} `, `\t#${tag}`, `#${tag}`].map((s) => input.replace(s, '')),
+          tag,
+        ).toContain(r.content);
+        expect(listTagsFromContent(r.content, {}).inline, tag).toEqual(
+          expected.filter((t) => t !== tag),
+        );
+      } else {
+        expect(r.applied, tag).toEqual([]);
+        expect(r.skipped, tag).toEqual([tag]);
+        expect(r.content, tag).toBe(input);
+      }
+    }
+  });
+
+  it('adds a tag whose only occurrence is inside a comment or math', () => {
+    const input = 'a <!-- #wip --> b $#wip$ c\n';
+    const r = reconcile(input, ['wip'], 'add', 'inline');
+    expect(r.applied).toEqual(['wip']);
+    expect(r.content).toBe(`${input}#wip\n`);
+  });
+
+  it('removes a real tag beside a comment and math without touching either', () => {
+    const input = 'keep <!-- #wip --> and $#wip$ but #wip goes\n';
+    const r = reconcile(input, ['wip'], 'remove', 'inline');
+    expect(r.applied).toEqual(['wip']);
+    expect(r.content).toBe('keep <!-- #wip --> and $#wip$ but goes\n');
   });
 });
 

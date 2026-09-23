@@ -208,8 +208,9 @@ export type TagReconcileOutcome =
 
 /**
  * Add or remove tags across frontmatter (`tags:` array) and inline `#tag`
- * syntax. Inline detection skips code spans, link spans, and a hash escaped as
- * `\#` — see `splitProtectedSegments` and `TAG_LEFT_BOUNDARY`.
+ * syntax. Inline detection skips code spans, link spans, HTML comments, math,
+ * and a `#` preceded by anything but whitespace, line start, or markup such
+ * as `**` or `<br>` — see `splitProtectedSegments` and `TAG_LEFT_BOUNDARY`.
  */
 export function reconcileTags(
   content: string,
@@ -406,11 +407,102 @@ const MARKDOWN_LINK = /\[[^[\]\n]*\]\([^()\n]*\)/;
 const REFERENCE_LINK = /\[[^[\]\n]+\]\[[^[\]\n]*\]/;
 
 /**
- * A tag's left boundary: the start of a segment, or a character that is neither
- * part of a tag nor the `\` that escapes one. Obsidian documents `\#` as an
- * escaped hashtag — a literal `#` carrying no formatting.
+ * Obsidian's metadata cache reads no tag inside an HTML comment or math. The
+ * rules below are pinned against its readback (Obsidian 1.13.7) rather than a
+ * spec, and a few differ from CommonMark: an inline span ends at an empty or
+ * spaces-only line but runs through a tab-only one. Issue #138.
+ *
+ * An **HTML block** opens with `<!--` at the start of a line — after up to
+ * three spaces of indentation, or after list-item and blockquote markers — and
+ * runs through the end of the line holding the first `-->`, or to the end of
+ * the note when none follows. The whole closing line is hidden, so the tag in
+ * `<!-- a --> #rd` is not one. A line opening with `<!-->` or `<!--->` closes
+ * on itself.
  */
-const TAG_LEFT_BOUNDARY = '(^|[^\\w/\\\\])';
+const HTML_BLOCK =
+  /(?<=(?:^|\n)(?:[ \t]*(?:>[ \t]?|(?:[-+*]|\d{1,9}[.)])[ \t]+))*[ ]{0,3})<!--(?:-?>[^\n]*|[\s\S]*?-->[^\n]*|[\s\S]*)/;
+/**
+ * An **inline comment** anywhere else: `<!--`, then text that does not open
+ * with `>` or `->` and holds no `--`, then `-->`, within one paragraph.
+ * `<!-- x -- y -->` is not a comment, and neither is an unclosed `<!--`.
+ */
+const HTML_COMMENT = /<!--(?!-?>)(?:(?!--|\n *\r?\n)[\s\S])*-->/;
+/**
+ * A **display math block**: a line that opens with `$$` and holds no second
+ * `$$`. It runs, across empty lines, to the next line that is `$$` alone, or to
+ * the end of the note — `$$\na\nb$$` does not close it.
+ */
+const DISPLAY_MATH =
+  /(?<=(?:^|\n)[ \t]*)\$\$(?![^\n]*\$\$)[\s\S]*?(?:\n[ \t]*\$\$[ \t]*(?=\r?\n|$)|$)/;
+/** Unescaped `$$ … $$` within one paragraph, with no spacing rule. */
+const INLINE_DOUBLE_MATH = /(?<=(?:^|[^\\])(?:\\\\)*)\$\$(?:(?!\n *\r?\n)[\s\S])*?\$\$/;
+/**
+ * Unescaped `$ … $` within one paragraph. The opener is not followed by a space
+ * or tab; the closer is not preceded by one and not followed by a digit, and a
+ * `$` that fails those is passed over rather than ending the span. That is what
+ * keeps `cost $5 and #rc for $10` out of math while `m $a #ra b$ n` is in it.
+ */
+const INLINE_MATH =
+  /(?<=(?:^|[^\\])(?:\\\\)*)\$(?![ \t$])(?:(?!\n *\r?\n)[\s\S])*?(?<![ \t])(?<=(?:^|[^\\])(?:\\\\)*)\$(?!\d)/;
+
+/**
+ * Markup Obsidian parses as a node of its own, so a `#` right after it opens a
+ * tag the way one does after whitespace, while the same character as plain
+ * text blocks the tag. Protecting each span makes the `#` after it a segment
+ * start. Pinned against Obsidian 1.13.7 readback; issue #138.
+ *
+ * A **backslash escape** of ASCII punctuation: `\]#t` and `\\#t` are tags,
+ * `\#t` is an escaped hash and not one.
+ */
+const ESCAPE = /\\[!-/:-@[-`{-~]/;
+/** An **inline HTML tag**: `<br>#t`, `x <b>#t</b>`, `<a href="u">#t</a>`. */
+const HTML_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>\n]*)?\/?>/;
+/**
+ * An **emphasis, highlight, or strikethrough delimiter run** directly before
+ * `#` that has a partner elsewhere on its line: `**#t**`, `*#t*`, `**x**#t`,
+ * `foo*#t*bar`, `==#t==`, `~~#t~~`. An unpartnered run is literal text to
+ * Obsidian (`a *#t`, `a ==#t`), and so is a single `~`. The partner test is
+ * the same delimiter anywhere else on the line. `_` runs are left out: `_` is a
+ * tag character, so `_#t_` would read as the tag `t_`, where Obsidian reads `t`.
+ */
+const EMPHASIS_RUN =
+  /(?<!\*)(?=\*+#)(?:(?<=\*[^\n]*?)|(?=\*+#[^\n]*?\*))\*+|(?<!=)(?===#)(?:(?<===[^\n]*?)|(?===#[^\n]*?==))==|(?<!~)(?=~~#)(?:(?<=~~[^\n]*?)|(?=~~#[^\n]*?~~))~~/;
+/**
+ * A **blockquote marker** directly before `#`: `>#t`, `> >#t`. A table cell
+ * pipe is the same kind of node (`|#t|` in a table row is a tag), but telling
+ * a table row from a pipe in prose takes the lines above it, which this
+ * one-pass scan does not look at, so `|#t` stays unread either way.
+ */
+const QUOTE_MARKER = />(?=#)(?<=(?:^|\n)[ \t]*(?:>[ \t]*)*>)/;
+
+/**
+ * The characters that end an inline tag, as the body of a character class:
+ * whitespace, ASCII punctuation other than `_`, `-`, and `/`, and the General
+ * (U+2000–U+206F) and Supplemental (U+2E00–U+2E7F) Punctuation blocks. Every
+ * other code point — letters and digits in any script, emoji, variation
+ * selectors, combining marks, symbols such as `€` or `©` — continues a tag.
+ * Read off Obsidian's own metadata cache (1.13.7): `#café`, `#日本語`, and
+ * `#✅done` are tags, `#tag—dash` ends at the em dash, and a zero-width joiner
+ * ends a tag mid-emoji. Every regex using it carries the `u` flag, so the class
+ * matches whole code points rather than surrogate halves.
+ */
+const TAG_STOP = String.raw`\s!-,.:-@\[-\^\x60{-~\u2000-\u206F\u2E00-\u2E7F`;
+
+/** One code point that continues an inline tag. */
+const TAG_CHAR = `[^${TAG_STOP}]`;
+
+/**
+ * A tag's left boundary: the start of a segment, or whitespace (`\s`, which
+ * takes in NBSP and U+3000). A punctuation mark that is plain text before `#`
+ * blocks a tag in Obsidian — `(#a`, `.#b`, `x—#c`, an unpartnered `a *#d` —
+ * and so does the `\` of an escaped `\#`. A segment starts at the note body or
+ * right after a protected span, and Obsidian reads a tag glued to either:
+ * `[[x]]#t`, `` `c`#t ``, `**#t**`, and `<br>#t` are tags.
+ */
+const TAG_LEFT_BOUNDARY = String.raw`(^|\s)`;
+
+/** Obsidian rejects a tag made only of ASCII digits (`#1984`); `#1990s` and `#١٢٣` are tags. */
+const ALL_DIGITS = /^[0-9]+$/;
 
 /**
  * Inline `#tag` syntax lives in the body. The frontmatter block is spliced off
@@ -462,6 +554,11 @@ function mutateInlineTags(
     }
   } else {
     for (const tag of tags) {
+      /** `#1984` is text to Obsidian and to `list`, so a removal leaves it too. */
+      if (ALL_DIGITS.test(tag)) {
+        skipped.add(tag);
+        continue;
+      }
       const re = makeInlineTagRegex(tag);
       let found = false;
       for (const s of segments) {
@@ -524,15 +621,33 @@ interface Segment {
 
 /**
  * Split the body into stretches a tag may live in and stretches it may not:
- * code, where a `#` is code, and link syntax, where a `#` is a heading anchor
- * or link text. Both the read and the write path run over the result, so
+ * code, where a `#` is code; link syntax, where a `#` is a heading anchor or
+ * link text; HTML comments and math, where Obsidian reads no tag; and the
+ * markup after which a `#` opens a tag (`ESCAPE` through `QUOTE_MARKER`). The
+ * construct that opens first wins, so `$b <!-- c$` is math and `<!-- $b -->`
+ * is a comment. Both the read and the write path run over the result, so
  * `list` and `remove` agree on what counts as a tag.
  */
 function splitProtectedSegments(content: string): Segment[] {
   const segments: Segment[] = [];
   let cursor = 0;
   const re = new RegExp(
-    [FENCED_CODE_BLOCK, INLINE_CODE, WIKILINK, MARKDOWN_LINK, REFERENCE_LINK]
+    [
+      FENCED_CODE_BLOCK,
+      INLINE_CODE,
+      WIKILINK,
+      MARKDOWN_LINK,
+      REFERENCE_LINK,
+      HTML_BLOCK,
+      HTML_COMMENT,
+      DISPLAY_MATH,
+      INLINE_DOUBLE_MATH,
+      INLINE_MATH,
+      ESCAPE,
+      HTML_TAG,
+      EMPHASIS_RUN,
+      QUOTE_MARKER,
+    ]
       .map((r) => r.source)
       .join('|'),
     'g',
@@ -553,18 +668,23 @@ function splitProtectedSegments(content: string): Segment[] {
   return segments;
 }
 
-/** Captures the character before the tag and the single horizontal space after it, if any. */
+/**
+ * Captures the character before the tag and the single horizontal space after
+ * it, if any. The lookahead refuses a longer tag that merely starts with `tag`
+ * — removing `caf` must not strip the front off `#café`.
+ */
 function makeInlineTagRegex(tag: string): RegExp {
   const escaped = tag.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
-  return new RegExp(`${TAG_LEFT_BOUNDARY}#${escaped}(?![\\w/-])([ \\t]?)`, 'g');
+  return new RegExp(`${TAG_LEFT_BOUNDARY}#${escaped}(?!${TAG_CHAR})([ \\t]?)`, 'gu');
 }
 
 /**
  * Read-only helpers for `obsidian_manage_tags list`. Inline tags are read from
  * the body only, and through the same protected-segment split and left boundary
  * a removal uses, so what `list` reports is exactly what `remove` can reach — a
- * `#` inside a YAML scalar, a code span, a link span, or escaped as `\#` is
- * none of them.
+ * `#` inside a YAML scalar, a code span, a link span, an HTML comment, or math,
+ * or one glued to the character before it (`\#`, `(#x`), is none of them. A tag
+ * runs for as long as `TAG_CHAR` matches, and an all-digit run is not a tag.
  */
 export function listTagsFromContent(
   content: string,
@@ -577,14 +697,14 @@ export function listTagsFromContent(
   const inline: string[] = [];
   const seen = new Set<string>();
   /** Each segment is scanned to exhaustion, which resets `lastIndex` between them. */
-  const re = new RegExp(`${TAG_LEFT_BOUNDARY}#([a-zA-Z][\\w/-]*)`, 'g');
+  const re = new RegExp(`${TAG_LEFT_BOUNDARY}#(${TAG_CHAR}+)`, 'gu');
   for (const seg of splitProtectedSegments(splice(content).body)) {
     if (seg.protected) continue;
     for (;;) {
       const m = re.exec(seg.text);
       if (!m) break;
       const t = m[2];
-      if (t && !seen.has(t)) {
+      if (t && !ALL_DIGITS.test(t) && !seen.has(t)) {
         seen.add(t);
         inline.push(t);
       }
