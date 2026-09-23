@@ -2,9 +2,10 @@
  * @fileoverview obsidian_search_notes — text/jsonlogic/omnisearch search with
  * MCP-spec cursor pagination. The `omnisearch` mode is added conditionally by
  * the entry point only when the Omnisearch plugin's HTTP server is reachable
- * at startup. Text-mode hits additionally clip per file via `maxMatchesPerHit`
- * so a single match-heavy note can't blow the response budget — clipped hits
- * carry `truncated: true` and `totalMatches`.
+ * at startup. Text-mode hits carry match locations (the service merges a
+ * multi-token query's per-token spans) and additionally clip per file via
+ * `maxMatchesPerHit` so a single match-heavy note can't blow the response
+ * budget — clipped hits carry `truncated: true` and `totalMatches`.
  * @module mcp-server/tools/definitions/obsidian-search-notes.tool
  */
 
@@ -34,45 +35,49 @@ const TextHitSchema = z
       .array(
         z
           .object({
-            context: z.string().describe('Surrounding text around the match.'),
+            context: z.string().describe('Surrounding text around the location.'),
             match: z
               .object({
                 start: z
                   .number()
                   .describe(
-                    'Match start offset within the subject upstream matched — the note body in the usual case, or the note basename (extension stripped) when the filename itself matched, in which case `context` is that basename. This is not an offset into `context`; use `contextStart` for that. Note-body values index the same string `obsidian_get_note` returns.',
+                    'Location start offset within the subject upstream matched — the note body in the usual case, or the note basename (extension stripped) when the filename itself matched, in which case `context` is that basename. This is not an offset into `context`; use `contextStart` for that. Note-body values index the same string `obsidian_get_note` returns.',
                   ),
                 end: z
                   .number()
-                  .describe('Match end offset within the same subject `start` indexes.'),
+                  .describe('Location end offset within the same subject `start` indexes.'),
                 contextStart: z
                   .number()
                   .describe(
-                    'Match start offset within `context`. `context.slice(contextStart, contextEnd)` is the matched text.',
+                    'Location start offset within `context`. `context.slice(contextStart, contextEnd)` is the matched text, from the first matched token through the last.',
                   ),
-                contextEnd: z.number().describe('Match end offset within `context`.'),
+                contextEnd: z.number().describe('Location end offset within `context`.'),
               })
               .describe(
-                'Where the match sits, on two origins: `start`/`end` index the matched subject, `contextStart`/`contextEnd` index the accompanying `context` window.',
+                'Where the location sits, on two origins: `start`/`end` index the matched subject, `contextStart`/`contextEnd` index the accompanying `context` window.',
               ),
           })
-          .describe('A single match within a file.'),
+          .describe(
+            'A match location within a file: one token occurrence, or several query tokens close enough to share one context window (a phrase).',
+          ),
       )
-      .describe('Per-match context windows. Capped per file by `maxMatchesPerHit`.'),
+      .describe(
+        'Match locations with their context windows, in document order. Capped per file by `maxMatchesPerHit`.',
+      ),
     totalMatches: z
       .number()
       .optional()
       .describe(
-        'Total matches in this file. Present only when `matches` was clipped to `maxMatchesPerHit`.',
+        'Total match locations in this file. Present only when `matches` was clipped to `maxMatchesPerHit`.',
       ),
     truncated: z
       .boolean()
       .optional()
       .describe(
-        'True when `matches` was clipped to `maxMatchesPerHit`. Use `obsidian_get_note` to read the full file when more context is needed.',
+        'True when `matches` was clipped to `maxMatchesPerHit` locations. Use `obsidian_get_note` to read the full file when more context is needed.',
       ),
   })
-  .describe('A file with one or more text-search matches.');
+  .describe('A file with one or more text-search match locations.');
 
 const StructuredHitSchema = z
   .object({
@@ -121,22 +126,25 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
     : (['text', 'jsonlogic'] as const);
 
   const description = omnisearchReachable
-    ? 'Search the vault by text substring, JSONLogic predicate, or BM25-ranked Omnisearch query. Pick the mode that matches the query shape — `omnisearch` is best for ranked relevance, typo tolerance, and PDF/OCR coverage (via the Text Extractor plugin). Results paginate via opaque cursors: omit `cursor` for the first page, then pass `nextCursor` from the prior response. Text-mode hits additionally clip per file at `maxMatchesPerHit`.'
-    : 'Search the vault by text substring or JSONLogic predicate. Pick the mode that matches the query shape. Results paginate via opaque cursors: omit `cursor` for the first page, then pass `nextCursor` from the prior response. Text-mode hits additionally clip per file at `maxMatchesPerHit`.';
+    ? 'Search the vault by text tokens, JSONLogic predicate, or BM25-ranked Omnisearch query. Pick the mode that matches the query shape — `omnisearch` is best for ranked relevance, typo tolerance, and PDF/OCR coverage (via the Text Extractor plugin). Results paginate via opaque cursors: omit `cursor` for the first page, then pass `nextCursor` from the prior response. Text-mode hits additionally clip per file at `maxMatchesPerHit` match locations.'
+    : 'Search the vault by text tokens or JSONLogic predicate. Pick the mode that matches the query shape. Results paginate via opaque cursors: omit `cursor` for the first page, then pass `nextCursor` from the prior response. Text-mode hits additionally clip per file at `maxMatchesPerHit` match locations.';
+
+  const textModeDescription =
+    '`text` splits `query` on whitespace and requires every token, each matched case-insensitively as a substring of the filename or note body. Quotes are literal characters, not a phrase operator. Each hit returns match locations with surrounding context windows; tokens that sit close together, such as the words of a phrase, share one location.';
 
   const inputSchema = z.object({
     mode: z
       .enum(modeEnum)
       .describe(
         omnisearchReachable
-          ? 'Which search algorithm to run. `text` matches a substring case-insensitively across filenames and note bodies, returning surrounding context windows. `jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`, plus `glob` and `regexp` operators — both take their arguments as `[PATTERN, VALUE]`, so the pattern comes first and the `{"var": ...}` reference second. `omnisearch` runs a BM25-ranked query via the Omnisearch plugin — supports quoted phrases, `-exclusion`, `path:` / `ext:` filters, typo tolerance, and PDF/OCR (with Text Extractor); upstream caps results at 50.'
-          : 'Which search algorithm to run. `text` matches a substring case-insensitively across filenames and note bodies, returning surrounding context windows. `jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, and `stat.{ctime,mtime,size}`, plus `glob` and `regexp` operators — both take their arguments as `[PATTERN, VALUE]`, so the pattern comes first and the `{"var": ...}` reference second.',
+          ? `Which search algorithm to run. ${textModeDescription} \`jsonlogic\` evaluates a JSONLogic tree against each note, with \`var\` paths into \`path\`, \`content\`, \`frontmatter.<key>\`, \`tags\`, and \`stat.{ctime,mtime,size}\`, plus \`glob\` and \`regexp\` operators — both take their arguments as \`[PATTERN, VALUE]\`, so the pattern comes first and the \`{"var": ...}\` reference second. \`omnisearch\` runs a BM25-ranked query via the Omnisearch plugin — supports quoted phrases, \`-exclusion\`, \`path:\` / \`ext:\` filters, typo tolerance, and PDF/OCR (with Text Extractor); upstream caps results at 50.`
+          : `Which search algorithm to run. ${textModeDescription} \`jsonlogic\` evaluates a JSONLogic tree against each note, with \`var\` paths into \`path\`, \`content\`, \`frontmatter.<key>\`, \`tags\`, and \`stat.{ctime,mtime,size}\`, plus \`glob\` and \`regexp\` operators — both take their arguments as \`[PATTERN, VALUE]\`, so the pattern comes first and the \`{"var": ...}\` reference second.`,
       ),
     query: z
       .string()
       .optional()
       .describe(
-        'The query string. Required for `text` and `omnisearch` modes; ignored in `jsonlogic` mode (use `logic` instead — this field must be a string, so passing a JSONLogic tree here is rejected).',
+        'The query string. Required for `text` and `omnisearch` modes; ignored in `jsonlogic` mode (use `logic` instead — this field must be a string, so passing a JSONLogic tree here is rejected). In `text` mode it is split on whitespace and every token must appear; quotes stay part of the tokens, so a quoted phrase matches nothing unless the note contains the quote characters.',
       ),
     logic: z
       .record(z.string(), z.unknown())
@@ -150,7 +158,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       .positive()
       .default(100)
       .describe(
-        'Characters of context on each side of the match (text mode only). Sizes the rendered text as well as the structured payload, so a wide window multiplies the response across every match on the page.',
+        'Characters of context on each side of a match location (text mode only). Sizes the rendered text as well as the structured payload, so a wide window multiplies the response across every location on the page. Query tokens within 2 × `contextLength` of each other share a location.',
       ),
     pathPrefix: z
       .string()
@@ -164,7 +172,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       .positive()
       .default(DEFAULT_MATCHES_PER_HIT)
       .describe(
-        'Cap on match contexts returned per file in text mode. When clipped, the hit carries `truncated: true` and `totalMatches`.',
+        'Cap on match locations returned per file in text mode. A phrase whose tokens share one location counts once. When clipped, the hit carries `truncated: true` and `totalMatches`.',
       ),
     cursor: CursorSchema,
   });
@@ -172,7 +180,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
   const textBranch = z
     .object({
       mode: z.literal('text').describe('Echoed mode.'),
-      hits: z.array(TextHitSchema).describe('Matching files with per-match context.'),
+      hits: z.array(TextHitSchema).describe('Matching files with their match locations.'),
       totalCount: z
         .number()
         .describe('Total post-path-policy hit count across all pages, before pagination.'),
@@ -255,7 +263,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       code: JsonRpcErrorCode.ValidationError,
       when: '`query` is missing for `text` or `omnisearch` mode (required for both).',
       recovery:
-        'Pass `query` — substring for text mode, or BM25 query syntax (quoted phrases, `-exclusion`, `path:` / `ext:` filters) for omnisearch.',
+        'Pass `query` — whitespace-separated tokens, all required, for text mode, or BM25 query syntax (quoted phrases, `-exclusion`, `path:` / `ext:` filters) for omnisearch.',
     },
     {
       reason: 'context_length_too_large',
@@ -409,7 +417,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       if (result.mode === 'text') {
         for (const h of result.hits) {
           const trunc = h.truncated
-            ? ` — truncated, showing first ${h.matches.length} of ${h.totalMatches} matches`
+            ? ` — truncated, showing first ${h.matches.length} of ${h.totalMatches} locations`
             : '';
           lines.push(`### ${h.filename}${trunc}`);
           for (const m of h.matches) {

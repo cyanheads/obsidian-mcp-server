@@ -1,0 +1,17 @@
+[
+  {
+    "filename": "_mcp-validate-117/vexquorn-probe.md",
+    "score": -20.0337,
+    "matches": [
+      { "match": { "start": 0, "end": 8, "source": "filename" }, "context": "vexquorn-probe" },
+      {
+        "match": { "start": 337, "end": 345, "source": "content" },
+        "context": "orem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lor\n\n## Edge cases\n\nVexquorn zorblatt: <script> sample, lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor "
+      },
+      {
+        "match": { "start": 1766, "end": 1774, "source": "content" },
+        "context": "amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem i\n\nLone vexquorn here. lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum "
+      }
+    ]
+  }
+]

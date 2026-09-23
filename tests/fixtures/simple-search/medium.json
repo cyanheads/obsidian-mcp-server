@@ -1,0 +1,16 @@
+[
+  {
+    "filename": "_mcp-validate-117/vexquorn-probe.md",
+    "score": -4.1117,
+    "matches": [
+      {
+        "match": { "start": 1282, "end": 1291, "source": "content" },
+        "context": "olor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem  closes with moxtrundle.\n\nGradlefen then lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum d"
+      },
+      {
+        "match": { "start": 1448, "end": 1456, "source": "content" },
+        "context": "et lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dol prumbisk medium gap.\n\nRepeat: echoplume echoplume echoplume. lorem ipsum dolor sit amet lorem ipsum dolor si"
+      }
+    ]
+  }
+]

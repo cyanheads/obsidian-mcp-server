@@ -81,15 +81,22 @@ export interface ObsidianCommand {
 
 export type SearchMode = 'text' | 'jsonlogic' | 'omnisearch';
 
+/**
+ * A text-search hit. Each entry of `matches` is a match location: one upstream
+ * span, or — for a query with two or more distinct tokens — consecutive spans
+ * of the same subject merged into one window (see `mergeIntoLocations`).
+ */
 export interface TextSearchHit {
   filename: string;
   matches: Array<{
+    /** A contiguous slice of the subject; a merged location's windows stitched into one. */
     context: string;
     /**
-     * `start`/`end` are upstream's own offsets into the subject it matched —
-     * the note body, or the note basename for a filename match.
-     * `contextStart`/`contextEnd` are derived by the service and index
-     * `context` directly.
+     * `start`/`end` are offsets into the subject upstream matched — the note
+     * body, or the note basename for a filename match — running from the
+     * location's first span to its last. `contextStart`/`contextEnd` are
+     * derived by the service and index `context` directly, so
+     * `context.slice(contextStart, contextEnd)` is `subject.slice(start, end)`.
      */
     match: { start: number; end: number; contextStart: number; contextEnd: number };
   }>;

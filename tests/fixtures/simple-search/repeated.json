@@ -1,0 +1,20 @@
+[
+  {
+    "filename": "_mcp-validate-117/vexquorn-probe.md",
+    "score": -3.9476999999999998,
+    "matches": [
+      {
+        "match": { "start": 1478, "end": 1487, "source": "content" },
+        "context": "lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dol prumbisk medium gap.\n\nRepeat: echoplume echoplume echoplume. lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit am"
+      },
+      {
+        "match": { "start": 1488, "end": 1497, "source": "content" },
+        "context": "m dolor sit amet lorem ipsum dolor sit amet lorem ipsum dol prumbisk medium gap.\n\nRepeat: echoplume echoplume echoplume. lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem i"
+      },
+      {
+        "match": { "start": 1498, "end": 1507, "source": "content" },
+        "context": "t amet lorem ipsum dolor sit amet lorem ipsum dol prumbisk medium gap.\n\nRepeat: echoplume echoplume echoplume. lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor"
+      }
+    ]
+  }
+]
