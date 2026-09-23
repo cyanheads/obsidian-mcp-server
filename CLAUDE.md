@@ -266,7 +266,9 @@ src/
   services/
     obsidian/
       obsidian-service.ts               # Local REST API client (init/accessor pattern)
-      frontmatter-ops.ts                # YAML frontmatter parse/serialize/edit helpers
+      frontmatter-ops.ts                # YAML frontmatter parse/serialize/edit helpers + inline tag reader
+      markdown-blocks.ts                # Block structure (code, HTML, math, tables) for inline tag detection
+      patch-instruction.ts              # markdown-patch 1.x headers / 2.0 instructions, format negotiation, 2.0 map flattening
       section-extractor.ts              # Heading/block/frontmatter section extraction
       types.ts                          # Domain types (NoteJson, NoteTarget, etc.)
   mcp-server/

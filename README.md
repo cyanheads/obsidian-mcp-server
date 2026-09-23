@@ -60,7 +60,7 @@ Vault-note and tag data are also reachable via tools — `obsidian_get_note` for
 
 - `format: "content" | "full" | "document-map" | "section"` selects the projection; `full` accepts `includeLinks: true` for outgoing wiki/markdown links (vault-internal only — external URLs are filtered)
 - Addressed by vault `path`, the `active` file, or a `periodic` note (`daily` / `weekly` / `monthly` / `quarterly` / `yearly`)
-- Heading sections use `Parent::Child` syntax, and every `#`-style heading path the document map lists reads back as itself (setext headings, underlined with `===` or `---`, are not recognized); a bare leaf name matching several headings, or a full path that repeats in the note, returns the first match and lists every colliding path in `candidates`
+- Heading sections use `Parent::Child` syntax and find headings the way the document map does — setext headings (underlined with `===` or `---`) count, `#` lines inside a list item, HTML block, or fence do not — so every heading path the map lists reads back as itself, over the same span a section write edits; a bare leaf name matching several headings, or a full path that repeats in the note, returns the first match and lists every colliding path in `candidates`
 - Forgiving `path` resolution: a case-mismatched path retries against the canonical filename, an ambiguous case match fails with `Conflict`, and a `NotFound` carries `Did you mean: …?` suggestions when near-matches exist
 - Typed errors include `note_missing`, `path_forbidden`, `no_active_file`, `periodic_unsupported` / `periodic_disabled`, and `path_traversal`
 
@@ -112,7 +112,7 @@ Vault-note and tag data are also reachable via tools — `obsidian_get_note` for
 ### `obsidian_append_to_note` <sub>tool</sub>
 
 - Without `section` — appends to an existing file, or creates it with the given content as the whole body (`created: true` flags the second case)
-- With `section` — appends to a heading/block/frontmatter target; the file must already exist, and `createTargetIfMissing: true` brings the section itself into existence
+- With `section` — appends to a heading/block/frontmatter target; the file must already exist, and `createTargetIfMissing: true` brings the section itself into existence. On plugin v5.0 and later, content appended to a heading is separated from the section's existing content by a blank line (except a list item appended to a section that ends in a list and has no sub-headings, which continues that list), and a heading in it must sit below the section's own level (`heading_outside_section` otherwise)
 - Block-reference targets concatenate with no separator — include a leading newline in `content` for one
 - `previousSizeInBytes` / `currentSizeInBytes` bracket every call for drift detection
 
@@ -120,9 +120,9 @@ Vault-note and tag data are also reachable via tools — `obsidian_get_note` for
 
 ### `obsidian_patch_note` <sub>tool</sub>
 
-- `operation: "append" | "prepend" | "replace"` against one heading, block reference, or frontmatter field per call
+- `operation: "append" | "prepend" | "replace"` against one heading, block reference, or frontmatter field per call; on plugin v5.0 and later, content appended or prepended to a heading is separated from the section's existing content by a blank line (except a list item appended to a section that ends in a list and has no sub-headings, or prepended to one that opens with a list, which continues that list), and a heading in it must sit below the section's own level (`heading_outside_section` otherwise)
 - Heading targets accept the full `Parent::Child` path or a bare leaf name; a leaf matching several headings fails with `ambiguous_section` and lists the candidates, unless one of them has no parent heading, which the patch then targets; a full path that repeats in the note fails with `ambiguous_section` too
-- `patchOptions`: `createTargetIfMissing`, `applyIfContentPreexists` (idempotency guard — otherwise `content_preexists`), `trimTargetWhitespace`
+- `patchOptions`: `createTargetIfMissing`, `applyIfContentPreexists` (idempotency guard — otherwise `content_preexists`), `trimTargetWhitespace` (plugin v4.x only; v5.0 and later place the blank lines around inserted content themselves)
 
 ---
 
@@ -146,8 +146,8 @@ Vault-note and tag data are also reachable via tools — `obsidian_get_note` for
 ### `obsidian_manage_tags` <sub>tool</sub>
 
 - `operation: "add" | "remove" | "list"`; `location: "frontmatter"` (default, canonical `tags:` array) | `"inline"` (body `#tag`, `add` appends at end-of-file) | `"both"` (reconciles both)
-- Inline detection skips fenced/inline code spans, link spans (`[[...]]`, `[text](...)`, `[text][ref]`), HTML comments, and math (`$…$`, `$$…$$`), so a heading anchor or wikilink alias is never mistaken for a tag; `%% … %%` comments are still read, as Obsidian reads them
-- Inline tags follow Obsidian's grammar: a tag starts at line start, after whitespace, or right after markup such as `**`, `==`, `<br>`, or a `\`-escape (`**#x**` is a tag; `(#x`, `.#x`, `a *#x`, and `\#x` are not) and runs through letters and digits in any script, emoji, `_`, `-`, and `/`, with at least one character that is not an ASCII digit (`#1990s`, `#café`, `#日本語`, and `#✅done` are tags; `#1984` is not)
+- Inline detection skips code (fenced, indented, and inline), wikilinks (`[[...]]`), images, a markdown link's destination or label (its text is read), HTML blocks and comments, and math (`$…$`, `$$…$$`), so a heading anchor or wikilink alias is never mistaken for a tag; `%% … %%` comments are still read, as Obsidian reads them
+- Inline tags follow Obsidian's grammar: a tag starts at line start, after whitespace, after another tag (`#a#b` is two tags), or right after markup such as `**`, `_…_`, `==`, `[`, a table cell's `|`, `<br>`, or a `\`-escape (`**#x**` is a tag; `(#x`, `.#x`, `a *#x`, and `\#x` are not) and runs through letters and digits in any script, emoji, `_`, `-`, and `/`, with at least one character that is not an ASCII digit (`#1990s`, `#café`, `#日本語`, and `#✅done` are tags; `#1984` is not)
 - `add` / `remove` report `applied` vs. `skipped` tags plus the full `tags` set after the change; `list` ignores the input `tags` array
 
 ---
@@ -313,7 +313,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 ### Prerequisites
 
 - [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin, **v4.0.0 through v5.x**, installed and enabled in your vault. Generate an API key in **Settings → Community Plugins → Local REST API** and copy it into `OBSIDIAN_API_KEY`. Plugin v6.0 removes the markdown-patch 1.x wire format this server pins for section-targeted writes and the document map.
+- The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin, **v4.0.0 or later**, installed and enabled in your vault. Generate an API key in **Settings → Community Plugins → Local REST API** and copy it into `OBSIDIAN_API_KEY`. Section-targeted writes and the document map speak markdown-patch 2.0 to plugin v5.0 and later and the 1.x format to v4.x; the server reads the plugin version once and picks the format itself. Two table-row writes (`contentType: "json"`) that markdown-patch 2.0 cannot express go out as 1.x on v5.x too: rows written under a heading, and rows written through a block ID on its own line below the table. Plugin v6.0 removes 1.x, so on v6.0 those two shapes fail; target the table by an ID on its last row instead.
 - Periodic-note targets (`target: { "type": "periodic" }`) work across that whole range: natively on plugin **v5.0.1 and earlier**, and on **v5.0.2 and later** — which moved the `/periodic/` routes out of the plugin — once the companion [periodic-notes API extension](https://github.com/coddingtonbear/obsidian-local-rest-api-periodic-notes) is installed. Without that extension on v5.0.2+, periodic targets fail with a `periodic_unsupported` error naming it; `obsidian://status` lists the registered extensions if you want to check first. Every other target type is unaffected.
 - An MCP client that can answer an input request (elicitation). `obsidian_delete_note` always asks for confirmation before deleting, so a client without that support can read and write notes but cannot delete one.
 - This server defaults to `http://127.0.0.1:27123` for simplicity. Enable **"Non-encrypted (HTTP) Server"** in the plugin settings to use it. To use the always-on HTTPS port instead, set `OBSIDIAN_BASE_URL=https://127.0.0.1:27124`; the plugin's self-signed cert is handled by `OBSIDIAN_VERIFY_SSL=false` (the default), which relaxes verification for this server's requests to that endpoint only.
