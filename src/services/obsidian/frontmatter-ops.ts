@@ -447,9 +447,52 @@ const INLINE_DOUBLE_MATH = /(?<=(?:^|[^\\])(?:\\\\)*)\$\$(?:(?!\n *\r?\n)[\s\S])
  * or tab; the closer is not preceded by one and not followed by a digit, and a
  * `$` that fails those is passed over rather than ending the span. That is what
  * keeps `cost $5 and #rc for $10` out of math while `m $a #ra b$ n` is in it.
+ *
+ * Only the opener is a regex; `inlineMathCloser` finds the closer. A lazy
+ * regex body would rescan to the end of the paragraph from every opener that
+ * never closes — quadratic in a table of prices (issue #143).
  */
-const INLINE_MATH =
-  /(?<=(?:^|[^\\])(?:\\\\)*)\$(?![ \t$])(?:(?!\n *\r?\n)[\s\S])*?(?<![ \t])(?<=(?:^|[^\\])(?:\\\\)*)\$(?!\d)/;
+const INLINE_MATH_OPEN = /(?<inlineMath>(?<=(?:^|[^\\])(?:\\\\)*)\$(?![ \t$]))/;
+
+/** The start of an empty or spaces-only line, which inline math cannot cross. */
+const PARAGRAPH_BREAK = /\n *\r?\n/y;
+
+/**
+ * The closer of the inline math span each opener in `content` starts, or
+ * `undefined` when it has none. Whether a `$` can close a span does not depend
+ * on where the span opened, so the closers and paragraph breaks are listed
+ * once and each opener takes the first closer after it, provided no break
+ * comes first. Openers must be looked up in ascending order.
+ */
+function inlineMathCloser(content: string): (open: number) => number | undefined {
+  const closers: number[] = [];
+  const breaks: number[] = [];
+  for (let i = 0; i < content.length; i++) {
+    if (content[i] === '$' && closesInlineMath(content, i)) closers.push(i);
+    if (content[i] === '\n') {
+      PARAGRAPH_BREAK.lastIndex = i;
+      if (PARAGRAPH_BREAK.test(content)) breaks.push(i);
+    }
+  }
+  let c = 0;
+  let b = 0;
+  return (open) => {
+    while ((closers[c] ?? Infinity) <= open) c++;
+    while ((breaks[b] ?? Infinity) <= open) b++;
+    const close = closers[c];
+    if (close === undefined || (breaks[b] ?? Infinity) < close) return;
+    return close;
+  };
+}
+
+/** Whether the `$` at `i` can close inline math: unescaped, after no space or tab, before no digit. */
+function closesInlineMath(content: string, i: number): boolean {
+  const before = content[i - 1];
+  if (before === ' ' || before === '\t' || /[0-9]/.test(content[i + 1] ?? '')) return false;
+  let backslashes = 0;
+  while (content[i - 1 - backslashes] === '\\') backslashes++;
+  return backslashes % 2 === 0;
+}
 
 /**
  * Markup Obsidian parses as a node of its own, so a `#` right after it opens a
@@ -648,7 +691,7 @@ function splitProtectedSegments(content: string): Segment[] {
       HTML_COMMENT,
       DISPLAY_MATH,
       INLINE_DOUBLE_MATH,
-      INLINE_MATH,
+      INLINE_MATH_OPEN,
       ESCAPE,
       HTML_TAG,
       EMPHASIS_RUN,
@@ -658,10 +701,22 @@ function splitProtectedSegments(content: string): Segment[] {
       .join('|'),
     'g',
   );
+  const mathCloser = inlineMathCloser(content);
   for (;;) {
     const m = re.exec(content);
     if (!m) break;
-    const matched = m[0] ?? '';
+    let matched = m[0] ?? '';
+    if (m.groups?.inlineMath !== undefined) {
+      /**
+       * The `$$` constructs are tried before this one and nothing after it
+       * opens with `$`, so an opener with no closer leaves this position to
+       * plain text and the scan resumes one character on.
+       */
+      const close = mathCloser(m.index);
+      if (close === undefined) continue;
+      matched = content.slice(m.index, close + 1);
+      re.lastIndex = close + 1;
+    }
     if (m.index > cursor) {
       segments.push({ protected: false, text: content.slice(cursor, m.index) });
     }

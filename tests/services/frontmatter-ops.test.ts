@@ -1149,6 +1149,18 @@ describe('inline tags — boundary, HTML comments, and math (Obsidian readback)'
     const input = `a${marker.repeat(30)}\t<!-- #xy --> #xz`;
     expect(listTagsFromContent(input, {}).inline).toEqual(['xz']);
   });
+
+  /**
+   * A `$` that opens inline math takes the first valid closer after it, and
+   * which `$` signs are valid closers does not depend on the opener, so a
+   * paragraph whose `$` signs never close must not be rescanned from each one.
+   */
+  it.each([
+    ['unclosed openers', 'x $a ', []],
+    ['prices', 'cost $5 and #rc for $10 ', ['rc']],
+  ])('scans a paragraph of %s in linear time', (_label, unit, expected) => {
+    expect(listTagsFromContent(unit.repeat(40_000), {}).inline).toEqual(expected);
+  });
 });
 
 describe('reconcileTags / remove inline — link spans', () => {
