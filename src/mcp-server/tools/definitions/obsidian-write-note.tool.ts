@@ -7,11 +7,12 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { parseAtxHeading } from '@/services/obsidian/section-extractor.js';
 import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schemas.js';
 
 export const obsidianWriteNote = tool('obsidian_write_note', {
   description:
-    'Create or overwrite a note. With `section`, replaces just that heading/block/frontmatter section in place — use `obsidian_get_note` with `format: "document-map"` to discover available targets. A nested heading may be named either by its full `Parent::Child` path or by a bare leaf name that matches exactly one heading; a leaf shared by several headings is rejected with `ambiguous_section`. Whole-file writes fail with `file_exists` against an existing note unless `overwrite: true` — for in-place edits, prefer `obsidian_patch_note` (sections), `obsidian_append_to_note` (append), or `obsidian_replace_in_note` (find-and-replace). For heading sections, `content` is the new body; the heading line is preserved automatically.',
+    'Create or overwrite a note. With `section`, replaces just that heading/block/frontmatter section in place — use `obsidian_get_note` with `format: "document-map"` to discover available targets. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too. Whole-file writes fail with `file_exists` against an existing note unless `overwrite: true` — for in-place edits, prefer `obsidian_patch_note` (sections), `obsidian_append_to_note` (append), or `obsidian_replace_in_note` (find-and-replace). For heading sections, `content` is the new body; the heading line is preserved automatically.',
   annotations: { idempotentHint: true, destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -124,9 +125,9 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       reason: 'ambiguous_section',
       thrownBy: 'service',
       code: JsonRpcErrorCode.Conflict,
-      when: 'A bare heading leaf name matches more than one heading in the note, so the replacement target is undetermined.',
+      when: 'A bare heading leaf name matches more than one heading in the note, or the resolved full heading path occurs more than once, so the replacement target is undetermined.',
       recovery:
-        'Retry with one of the full Parent::Child heading paths listed in `candidates` on the error data.',
+        'Retry with a distinct full Parent::Child heading path from `candidates` on the error data; when every candidate is the same path, rename the repeated headings first.',
     },
     {
       reason: 'path_is_directory',
@@ -217,18 +218,17 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
 });
 
 /**
- * If `content` opens with a markdown heading whose text matches the leaf of
- * `headingTarget` (delimited by `::`), drop that heading line plus a single
- * blank line. Upstream PATCH-replace operates on the section *body*, so a
- * caller-supplied heading line would otherwise be embedded as a duplicate.
+ * If `content` opens with an ATX heading whose text — read by the same parser
+ * the section scan uses — matches the leaf of `headingTarget` (delimited by
+ * `::`), drop that heading line plus a single blank line. Upstream
+ * PATCH-replace operates on the section *body*, so a caller-supplied heading
+ * line would otherwise be embedded as a duplicate.
  */
 function stripLeadingHeading(content: string, headingTarget: string): string {
   const leaf = headingTarget.split('::').pop()?.trim();
   if (!leaf) return content;
   const lines = content.split('\n');
-  const first = lines[0]?.trimEnd() ?? '';
-  const m = /^(#{1,6})\s+(.+)$/.exec(first);
-  if (!m || m[2]?.trim() !== leaf) return content;
+  if (parseAtxHeading(lines[0] ?? '')?.text !== leaf) return content;
   lines.shift();
   if (lines[0]?.trim() === '') lines.shift();
   return lines.join('\n');

@@ -9,7 +9,7 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianAppendToNote } from '@/mcp-server/tools/definitions/obsidian-append-to-note.tool.js';
-import { setupHarness } from '../helpers.js';
+import { documentMapV2, repeatKey, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -100,7 +100,7 @@ describe('obsidian_append_to_note (section)', () => {
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(200));
     pool
       .intercept({ path: '/vault/Note.md', method: 'GET' })
-      .reply(200, { headings: ['Daily'], blocks: [], frontmatterFields: [] });
+      .reply(200, documentMapV2({ Daily: {} }));
 
     let seenHeaders: Record<string, string> = {};
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
@@ -141,11 +141,9 @@ describe('obsidian_append_to_note (section)', () => {
   it('expands a bare heading leaf to its full path and reports the resolved target', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(200));
-    pool.intercept({ path: '/vault/Note.md', method: 'GET' }).reply(200, {
-      headings: ['Sandbox', 'Sandbox::Section A'],
-      blocks: [],
-      frontmatterFields: [],
-    });
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, documentMapV2({ Sandbox: { 'Section A': {} } }));
 
     let seenTarget = '';
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
@@ -166,6 +164,29 @@ describe('obsidian_append_to_note (section)', () => {
 
     expect(seenTarget).toBe('Sandbox::Section A');
     expect(out.sectionTarget).toBe('Sandbox::Section A');
+  });
+
+  it('rejects a root-level heading that repeats in the note without appending', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(200));
+    // # Daily / - monday / # Daily / - tuesday
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, documentMapV2({ Daily: {}, [repeatKey('Daily', 1)]: {} }));
+    // No PATCH intercept — a write here would surface "No mock intercept".
+
+    await expect(
+      obsidianAppendToNote.handler(
+        obsidianAppendToNote.input.parse({
+          target: { type: 'path', path: 'Note.md' },
+          section: { type: 'heading', target: 'Daily' },
+          content: '- new task',
+        }),
+        createMockContext({ errors: obsidianAppendToNote.errors }),
+      ),
+    ).rejects.toMatchObject({
+      data: { reason: 'ambiguous_section', candidates: ['Daily', 'Daily'] },
+    });
   });
 
   it('throws note_missing when the pre-write HEAD shows the file does not exist', async () => {

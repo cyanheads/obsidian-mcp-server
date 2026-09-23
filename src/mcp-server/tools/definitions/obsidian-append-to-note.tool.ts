@@ -14,7 +14,7 @@ import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schema
 
 export const obsidianAppendToNote = tool('obsidian_append_to_note', {
   description:
-    'Append content to a note. **Without `section`: appends to the end of the file, or creates the file if it does not exist (your content becomes the full file).** With `section`: appends to the end of that heading/block/frontmatter — use `obsidian_get_note` with `format: "document-map"` to discover available targets. A nested heading may be named either by its full `Parent::Child` path or by a bare leaf name that matches exactly one heading; a leaf shared by several headings is rejected with `ambiguous_section`. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
+    'Append content to a note. **Without `section`: appends to the end of the file, or creates the file if it does not exist (your content becomes the full file).** With `section`: appends to the end of that heading/block/frontmatter — use `obsidian_get_note` with `format: "document-map"` to discover available targets. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -118,9 +118,9 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
       reason: 'ambiguous_section',
       thrownBy: 'service',
       code: JsonRpcErrorCode.Conflict,
-      when: 'A bare heading leaf name matches more than one heading in the note, so the append target is undetermined.',
+      when: 'A bare heading leaf name matches more than one heading in the note, or the resolved full heading path occurs more than once, so the append target is undetermined.',
       recovery:
-        'Retry with one of the full Parent::Child heading paths listed in `candidates` on the error data.',
+        'Retry with a distinct full Parent::Child heading path from `candidates` on the error data; when every candidate is the same path, rename the repeated headings first.',
     },
     {
       reason: 'content_preexists',

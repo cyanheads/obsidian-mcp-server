@@ -447,6 +447,50 @@ describe('obsidian_get_note / section heading resolution', () => {
     expect(result.candidates).toEqual(['Dup', 'Dup']);
   });
 
+  it('reads a document-map locator under an untitled heading back as that locator', async () => {
+    mockNote('##\n\n### Request body\n\nbody text\n\n### Returns\n\nreturns text\n');
+    const result = await readSection('::Request body');
+    expect(result.valueText).toBe('### Request body\n\nbody text');
+    expect(result.sectionTarget).toBe('::Request body');
+    expect(result.candidates).toBeUndefined();
+  });
+
+  it('discloses a full path that repeats and says writes reject it', async () => {
+    mockNote(['# Root', '## Dup', 'first', '## Dup', 'second'].join('\n'));
+    const ctx = createMockContext({ errors: obsidianGetNote.errors });
+    const result = await readSection('Root::Dup', ctx);
+    expect(result.valueText).toBe('## Dup\nfirst');
+    expect(result.sectionTarget).toBe('Root::Dup');
+    expect(result.candidates).toEqual(['Root::Dup', 'Root::Dup']);
+    expect(getEnrichment(ctx).notice).toBe(
+      'Heading `Root::Dup` is ambiguous — 2 headings share that name; read `Root::Dup`. See `candidates` for the rest. Every one has the same full path, so the write tools reject it with `ambiguous_section`.',
+    );
+  });
+
+  it('carries a repeated full path to structuredContent and content[]', async () => {
+    mockNote(['# Root', '## Dup', 'first', '## Dup', 'second'].join('\n'));
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'section',
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Root::Dup' },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const structured = res.structuredContent as {
+      notice?: string;
+      result: { candidates?: string[]; sectionTarget?: string; valueText?: string };
+    };
+    expect(structured.result).toMatchObject({
+      sectionTarget: 'Root::Dup',
+      candidates: ['Root::Dup', 'Root::Dup'],
+      valueText: '## Dup\nfirst',
+    });
+    expect(structured.notice).toContain('ambiguous_section');
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('*Candidates:* Root::Dup, Root::Dup');
+    expect(text).toContain('## Dup\nfirst');
+  });
+
   it('resolves the path below a frontmatter block', async () => {
     mockNote(['---', 'title: Foo', '---', '', '# Root', '## Nested', 'nested body'].join('\n'));
     const result = await readSection('Nested');

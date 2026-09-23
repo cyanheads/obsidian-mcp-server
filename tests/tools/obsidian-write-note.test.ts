@@ -9,11 +9,19 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianWriteNote } from '@/mcp-server/tools/definitions/obsidian-write-note.tool.js';
-import { setupHarness } from '../helpers.js';
+import { documentMapV2, type HeadingTree, repeatKey, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
 const cl = (n: number) => ({ headers: { 'content-length': String(n) } });
+
+/** Answer the document-map read a heading-targeted write makes before its PATCH. */
+function serveMap(headings: HeadingTree): void {
+  harness
+    .current()
+    .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
+    .reply(200, documentMapV2(headings));
+}
 
 describe('obsidian_write_note (whole file)', () => {
   it('PUTs the body with text/markdown when the note does not exist', async () => {
@@ -112,6 +120,7 @@ describe('obsidian_write_note (section)', () => {
   it('PATCHes with replace + heading delimiter (force-apply: no Reject header)', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
+    serveMap({ Top: { Sub: {} } });
 
     let seenHeaders: Record<string, string> = {};
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
@@ -150,6 +159,7 @@ describe('obsidian_write_note (section)', () => {
   it('strips a leading duplicate heading line from content when targeting a heading', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
+    serveMap({ Top: { 'Section A': {} } });
 
     let seenBody = '';
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
@@ -173,6 +183,7 @@ describe('obsidian_write_note (section)', () => {
   it('preserves content unchanged when the leading heading does not match the target', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
+    serveMap({ Top: { 'Section A': {} } });
 
     let seenBody = '';
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
@@ -191,6 +202,68 @@ describe('obsidian_write_note (section)', () => {
     );
 
     expect(seenBody).toBe('## Different Heading\n\nbody');
+  });
+
+  /** Captures the PATCH body of a heading-section write of `content` to `target`. */
+  async function writtenBody(
+    target: string,
+    headings: HeadingTree,
+    content: string,
+  ): Promise<string> {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
+    serveMap(headings);
+    let seenBody = '';
+    pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
+      seenBody = String(opts.body ?? '');
+      return { statusCode: 200, data: '' };
+    });
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
+
+    await obsidianWriteNote.handler(
+      obsidianWriteNote.input.parse({
+        target: { type: 'path', path: 'Note.md' },
+        section: { type: 'heading', target },
+        content,
+      }),
+      createMockContext({ errors: obsidianWriteNote.errors }),
+    );
+    return seenBody;
+  }
+
+  it('strips a CRLF leading heading line and the blank line after it', async () => {
+    const body = await writtenBody(
+      'Top::Section A',
+      { Top: { 'Section A': {} } },
+      '## Section A\r\n\r\nbody',
+    );
+    expect(body).toBe('body');
+  });
+
+  it('strips a leading heading written with a closing sequence', async () => {
+    const body = await writtenBody('T::Closed', { T: { Closed: {} } }, '## Closed ##\n\nnew body');
+    expect(body).toBe('new body');
+  });
+
+  it('rejects a heading path that repeats in the note without writing', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
+    // # Root / ## Dup / ## Dup
+    serveMap({ Root: { Dup: {}, [repeatKey('Dup', 1)]: {} } });
+    // No PATCH intercept — a write here would surface "No mock intercept".
+
+    await expect(
+      obsidianWriteNote.handler(
+        obsidianWriteNote.input.parse({
+          target: { type: 'path', path: 'Note.md' },
+          section: { type: 'heading', target: 'Root::Dup' },
+          content: 'x',
+        }),
+        createMockContext({ errors: obsidianWriteNote.errors }),
+      ),
+    ).rejects.toMatchObject({
+      data: { reason: 'ambiguous_section', candidates: ['Root::Dup', 'Root::Dup'] },
+    });
   });
 
   it('uses application/json when contentType is "json"', async () => {

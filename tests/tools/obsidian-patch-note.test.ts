@@ -5,10 +5,10 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianPatchNote } from '@/mcp-server/tools/definitions/obsidian-patch-note.tool.js';
-import { setupHarness } from '../helpers.js';
+import { documentMapV2, repeatKey, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -66,11 +66,9 @@ describe('obsidian_patch_note', () => {
   it('echoes the resolved heading path when a bare leaf was expanded', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
-    pool.intercept({ path: '/vault/Note.md', method: 'GET' }).reply(200, {
-      headings: ['Sandbox', 'Sandbox::Section A'],
-      blocks: [],
-      frontmatterFields: [],
-    });
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, documentMapV2({ Sandbox: { 'Section A': {} } }));
 
     let seenTarget = '';
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
@@ -97,11 +95,9 @@ describe('obsidian_patch_note', () => {
   it('surfaces an ambiguous bare leaf as a Conflict naming every candidate', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
-    pool.intercept({ path: '/vault/Note.md', method: 'GET' }).reply(200, {
-      headings: ['Top', 'Top::Child', 'Other', 'Other::Child'],
-      blocks: [],
-      frontmatterFields: [],
-    });
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, documentMapV2({ Top: { Child: {} }, Other: { Child: {} } }));
     // No PATCH intercept — a write here would surface "No mock intercept".
 
     await expect(
@@ -121,6 +117,40 @@ describe('obsidian_patch_note', () => {
         candidates: ['Top::Child', 'Other::Child'],
       },
     });
+  });
+
+  it('carries a repeated heading path to both wire surfaces as ambiguous_section', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
+    // # Root / ## Dup / ## Dup
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, documentMapV2({ Root: { Dup: {}, [repeatKey('Dup', 1)]: {} } }));
+    // No PATCH intercept — a write here would surface "No mock intercept".
+
+    const res = await runToolContract(obsidianPatchNote, {
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Root::Dup' },
+      operation: 'append',
+      content: 'x',
+    });
+
+    expect(res.isError).toBe(true);
+    const error = (
+      res.structuredContent as {
+        error: { code: number; data: { candidates: string[]; path: string; reason: string } };
+      }
+    ).error;
+    expect(error.code).toBe(JsonRpcErrorCode.Conflict);
+    expect(error.data).toMatchObject({
+      reason: 'ambiguous_section',
+      path: 'Note.md',
+      candidates: ['Root::Dup', 'Root::Dup'],
+    });
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain("Heading 'Root::Dup' occurs 2 times in Note.md");
+    expect(text).toContain('obsidian_replace_in_note');
+    expect(text).toContain('reason ambiguous_section');
   });
 
   it('classifies a 404 as NotFound (pre-PATCH HEAD throws note_missing)', async () => {

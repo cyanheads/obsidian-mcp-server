@@ -17,7 +17,7 @@ import {
 
 export const obsidianPatchNote = tool('obsidian_patch_note', {
   description:
-    'Edit a heading, block reference, or frontmatter field in place — append to, prepend to, or replace the target\'s body. Use `obsidian_get_note` with `format: "document-map"` to discover available targets first. A nested heading may be named either by its full `Parent::Child` path or by a bare leaf name that matches exactly one heading; a leaf shared by several headings is rejected with `ambiguous_section`.',
+    'Edit a heading, block reference, or frontmatter field in place — append to, prepend to, or replace the target\'s body. Use `obsidian_get_note` with `format: "document-map"` to discover available targets first. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -111,9 +111,9 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
       reason: 'ambiguous_section',
       thrownBy: 'service',
       code: JsonRpcErrorCode.Conflict,
-      when: 'A bare heading leaf name matches more than one heading in the note, so the write target is undetermined.',
+      when: 'A bare heading leaf name matches more than one heading in the note, or the resolved full heading path occurs more than once, so the write target is undetermined.',
       recovery:
-        'Retry with one of the full Parent::Child heading paths listed in `candidates` on the error data.',
+        'Retry with a distinct full Parent::Child heading path from `candidates` on the error data; when every candidate is the same path, rename the repeated headings first.',
     },
     {
       reason: 'content_preexists',

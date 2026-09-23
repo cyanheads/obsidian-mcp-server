@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { extractSection } from '@/services/obsidian/section-extractor.js';
+import { extractSection, listHeadingPaths } from '@/services/obsidian/section-extractor.js';
 import type { NoteJson } from '@/services/obsidian/types.js';
 
 const baseStat = { ctime: 0, mtime: 0, size: 0 };
@@ -204,6 +204,206 @@ describe('extractSection / heading resolution', () => {
       const writeSideMatches = upstreamHeadings.filter((h) => h.split('::').pop() === 'Shared');
       expect(out.candidates).toEqual(writeSideMatches);
     });
+  });
+});
+
+/**
+ * Every heading locator the plugin's document map emits must read back to that
+ * heading. Each `headings` array below was captured from the live Local REST API
+ * document-map endpoint (markdown-patch format 1) for the fixture beside it.
+ */
+describe('extractSection / document-map locators round-trip', () => {
+  const FIXTURES: Array<[name: string, md: string, headings: string[]]> = [
+    [
+      'untitled top-level heading',
+      '##\n\n### Request body\n\nbody text\n\n### Returns\n\nreturns text\n',
+      ['::Request body', '::Returns'],
+    ],
+    [
+      'untitled heading under a titled one',
+      '# Top\n\n##\n\n### Child\n\ntext\n',
+      ['Top', 'Top::', 'Top::::Child'],
+    ],
+    [
+      'two untitled top-level headings',
+      '#\n\n## Child A\n\na\n\n#\n\n## Child B\n\nb\n',
+      ['::Child A', '::Child B'],
+    ],
+    [
+      'tab, closing sequence, indent, and trailing-space untitled heading',
+      '#\tTab Title\n\n## Closed ##\n\n   ## Indented\n\n##   \n### After trailing-space empty\n\nx\n',
+      [
+        'Tab Title',
+        'Tab Title::Closed',
+        'Tab Title::Indented',
+        'Tab Title::',
+        'Tab Title::::After trailing-space empty',
+      ],
+    ],
+    [
+      'untitled tab heading and an all-hash heading',
+      '#\t\n## After tab empty\n\n### ###\n#### After closing-seq empty\n\ny\n',
+      ['::After tab empty', '::After tab empty::', '::After tab empty::::After closing-seq empty'],
+    ],
+    ['repeated root heading', '# Dup\nfirst body\n# Dup\nsecond body\n', ['Dup']],
+    ['repeated nested heading', '# Root\n## Dup\nfirst\n## Dup\nsecond\n', ['Root', 'Root::Dup']],
+    ['nested untitled headings', '#\n##\n### X\n\nx\n', ['::', '::::X']],
+    [
+      'leaf shared across levels',
+      '# A\n## B\n### C\nbc body\n## C\nac body\n',
+      ['A', 'A::B', 'A::B::C', 'A::C'],
+    ],
+    ['repeated parent', '# A\n## B\nb\n# A\n## C\nc\n', ['A', 'A::B', 'A::C']],
+    [
+      'closing sequences the plugin keeps or strips',
+      '# T\n## Foo\t##\n### Bar ##  \n## Baz#\n## #\n',
+      ['T', 'T::Foo\t##', 'T::Foo\t##::Bar', 'T::Baz#', 'T::'],
+    ],
+    [
+      'CRLF line endings',
+      '##\r\n\r\n### Request body\r\n\r\nbody text\r\n\r\n### Returns\r\n\r\nreturns text\r\n',
+      ['::Request body', '::Returns'],
+    ],
+    ['untitled CRLF heading', '# T\n##\r\n### Sub\r\n', ['T', 'T::', 'T::::Sub']],
+  ];
+
+  describe.each(FIXTURES)('%s', (_name, md, headings) => {
+    it.each(headings)('reads %j back as its own locator', (locator) => {
+      const out = extractSection(note(md), { type: 'heading', target: locator });
+      expect(out.sectionTarget).toBe(locator);
+    });
+
+    it('lists the same paths the document map does, repeats collapsed', () => {
+      expect([...new Set(listHeadingPaths(md).filter((p) => p !== ''))]).toEqual(headings);
+    });
+  });
+
+  it('reads the issue repro by its map locator and by its bare leaf alike', () => {
+    const md = '##\n\n### Request body\n\nbody text\n\n### Returns\n\nreturns text\n';
+    const qualified = extractSection(note(md), { type: 'heading', target: '::Request body' });
+    expect(qualified).toEqual({
+      value: '### Request body\n\nbody text',
+      sectionTarget: '::Request body',
+    });
+    expect(extractSection(note(md), { type: 'heading', target: 'Request body' })).toEqual(
+      qualified,
+    );
+  });
+
+  it.each([
+    ['# Top\n##\n### Child\ntext', 'Top::', '##\n### Child\ntext'],
+    ['#\n## Child A\na\n#\n## Child B\nb', '::Child B', '## Child B\nb'],
+    ['# T\n## Closed ##\nclosed\n   ## Indented\nindented', 'T::Closed', '## Closed ##\nclosed'],
+    [
+      '# T\n## Closed ##\nclosed\n   ## Indented\nindented',
+      'T::Indented',
+      '   ## Indented\nindented',
+    ],
+    ['#\t\n## After\n### ###\n#### Deep\ny', '::After::', '### ###\n#### Deep\ny'],
+    ['# A\n## B\nb\n# A\n## C\nc', 'A::C', '## C\nc'],
+    ['# A\n## B\n### C\nbc\n## C\nac', 'A::C', '## C\nac'],
+  ])('reads the heading a map locator names in %j (%s)', (md, locator, value) => {
+    expect(extractSection(note(md), { type: 'heading', target: locator })).toEqual({
+      value,
+      sectionTarget: locator,
+    });
+  });
+
+  it('falls back to the segment walk for a path that skips an untitled level', () => {
+    const md = '# Top\n\n##\n\n### Child\n\ntext\n';
+    const out = extractSection(note(md), { type: 'heading', target: 'Top::Child' });
+    expect(out.value).toBe('### Child\n\ntext');
+    expect(out.sectionTarget).toBe('Top::::Child');
+  });
+
+  it.each([
+    ['a bare ##', '##'],
+    ['trailing spaces', '##   '],
+    ['a tab', '##\t'],
+    ['a carriage return', '##\r'],
+    ['a closing sequence', '## ##'],
+    ['a lone closing hash', '## #'],
+  ])('ends the section above at an untitled heading with %s', (_label, line) => {
+    const md = ['## X', 'x body', line, '### Sub', 'sub body'].join('\n');
+    expect(extractSection(note(md), { type: 'heading', target: 'X' }).value).toBe('## X\nx body');
+  });
+
+  it.each([
+    ['### ###', 'T::'],
+    ['#\t', ''],
+    ['##\r', 'T::'],
+    ['   ## Indented', 'T::Indented'],
+    ['## Closed ##', 'T::Closed'],
+    ['# foo#', 'foo#'],
+    ['#hashtag', undefined],
+    ['####### x', undefined],
+    ['    # x', undefined],
+  ])('scans %j as heading path %j', (line, path) => {
+    const paths = listHeadingPaths(`# T\n${line}`);
+    expect(paths).toEqual(path === undefined ? ['T'] : ['T', path]);
+  });
+
+  it('skips heading lines inside a fenced block', () => {
+    expect(listHeadingPaths('# T\n```\n## Fenced\n```\n## Real\n')).toEqual(['T', 'T::Real']);
+  });
+
+  it('returns only its paragraph for a block reference directly under an untitled heading', () => {
+    const md = ['##', 'paragraph ^b'].join('\n');
+    expect(extractSection(note(md), { type: 'block', target: 'b' }).value).toBe('paragraph ^b');
+  });
+
+  it.each(['Root::::Child', 'Root::'])(
+    'throws NotFound for %j, which names an untitled heading the note does not have',
+    (target) => {
+      const md = ['# Root', '## Child', 'child body'].join('\n');
+      expect(() => extractSection(note(md), { type: 'heading', target })).toThrow(/not found/i);
+    },
+  );
+
+  it('discloses every occurrence of a full path that repeats and reads the first', () => {
+    const md = ['# Root', '## Dup', 'first', '## Dup', 'second'].join('\n');
+    const out = extractSection(note(md), { type: 'heading', target: 'Root::Dup' });
+    expect(out.value).toBe('## Dup\nfirst');
+    expect(out.sectionTarget).toBe('Root::Dup');
+    expect(out.candidates).toEqual(['Root::Dup', 'Root::Dup']);
+  });
+});
+
+/**
+ * Lines that are not ATX headings under CommonMark or the plugin's parser,
+ * and CRLF bodies. Pinned so a wider heading scan cannot start matching them.
+ */
+describe('extractSection / heading lines the scan leaves alone', () => {
+  it.each([
+    ['a hashtag with no space', '#hashtag line'],
+    ['seven hashes', '####### seven'],
+    ['a four-space-indented line (indented code)', '    # indented code'],
+  ])('does not end a section at %s', (_label, line) => {
+    const md = ['# Top', line, 'top body', '# Next', 'next body'].join('\n');
+    const { value } = extractSection(note(md), { type: 'heading', target: 'Top' });
+    expect(value).toBe(['# Top', line, 'top body'].join('\n'));
+  });
+
+  it('keeps a trailing hash that has no space before it as heading text', () => {
+    const md = ['# foo#', 'body'].join('\n');
+    const out = extractSection(note(md), { type: 'heading', target: 'foo#' });
+    expect(out.value).toBe(['# foo#', 'body'].join('\n'));
+    expect(out.sectionTarget).toBe('foo#');
+  });
+
+  it('resolves nested paths in a CRLF body, keeping the carriage returns in the value', () => {
+    const md = '# Root\r\n## Child\r\nbody\r\n# Other\r\n';
+    const qualified = extractSection(note(md), { type: 'heading', target: 'Root::Child' });
+    expect(qualified.value).toBe('## Child\r\nbody\r');
+    expect(qualified.sectionTarget).toBe('Root::Child');
+    const leaf = extractSection(note(md), { type: 'heading', target: 'Child' });
+    expect(leaf.sectionTarget).toBe('Root::Child');
+    expect(leaf.candidates).toBeUndefined();
+  });
+
+  it('stops a block walk-back at a titled heading line', () => {
+    const md = ['## Title', 'paragraph ^b'].join('\n');
+    expect(extractSection(note(md), { type: 'block', target: 'b' }).value).toBe('paragraph ^b');
   });
 });
 

@@ -47,7 +47,7 @@ export const SectionSchema = z.object({
     .string()
     .min(1)
     .describe(
-      'Heading name — either the full path (`"Parent::Child"`) or a bare leaf name that matches exactly one heading — a block reference without the leading caret (e.g. "2d9b4a", not "^2d9b4a"), or a frontmatter field name.',
+      'Heading, block, or frontmatter locator. Heading: the full `Parent::Child` path as `obsidian_get_note` `format: "document-map"` lists it, or a bare leaf name matched at any depth. A leaf shared by several headings reads the first (every full path comes back in `candidates`); a write rejects it with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one. A full path that occurs more than once in the note reads the first; a write rejects it with `ambiguous_section`. Block: the reference ID without the caret (e.g. "2d9b4a", not "^2d9b4a"). Frontmatter: the field name.',
     ),
 });
 

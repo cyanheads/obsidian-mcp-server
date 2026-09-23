@@ -107,7 +107,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
               .array(z.string())
               .optional()
               .describe(
-                'Every full heading path sharing the bare leaf name in `section.target`, in document order. Present only when more than one heading matched; the read still returns the first. Same field the write tools carry as `ambiguous_section` error data — re-issue with one of these to pin the section.',
+                'Every full heading path `section.target` could name, in document order: each heading sharing a bare leaf name, or each repeat of a full path that occurs more than once in the note (the strings are then identical). Present only when more than one heading matched; the read still returns the first. Same field the write tools carry as `ambiguous_section` error data — re-issue with a distinct path from this list to pin the section.',
               ),
             valueText: z
               .string()
@@ -129,7 +129,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       .string()
       .optional()
       .describe(
-        'Guidance when a bare heading leaf matched several headings — names the path that was read and points at `candidates` for the rest.',
+        'Guidance when a heading locator matched several headings — names the path that was read and points at `candidates` for the rest.',
       ),
   },
   auth: ['tool:obsidian_get_note:read'],
@@ -310,8 +310,9 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     }
     const { candidates, sectionTarget, value } = extracted;
     if (candidates) {
+      const repeatedPath = candidates.every((c) => c === sectionTarget);
       ctx.enrich.notice(
-        `Heading \`${input.section.target}\` is ambiguous — ${candidates.length} headings share that name; read \`${sectionTarget}\`. See \`candidates\` for the rest.`,
+        `Heading \`${input.section.target}\` is ambiguous — ${candidates.length} headings share that name; read \`${sectionTarget}\`. See \`candidates\` for the rest.${repeatedPath ? ' Every one has the same full path, so the write tools reject it with `ambiguous_section`.' : ''}`,
       );
     }
     return {
