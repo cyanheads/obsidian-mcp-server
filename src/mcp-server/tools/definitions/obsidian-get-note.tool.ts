@@ -287,7 +287,6 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     if (!input.section) {
       throw ctx.fail('section_required', '`section` is required when `format` is "section".', {
         format: input.format,
-        ...ctx.recoveryFor('section_required'),
       });
     }
     const { result: note } = await withCaseFallback(ctx, svc, target, (t) =>
@@ -304,7 +303,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       throw ctx.fail(
         'section_missing',
         err.message,
-        { path: note.path, section: input.section, ...ctx.recoveryFor('section_missing') },
+        { path: note.path, section: input.section },
         { cause: err },
       );
     }

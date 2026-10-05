@@ -12,7 +12,9 @@
  * @module tests/helpers
  */
 
+import type { AnyToolDefinition, z } from '@cyanheads/mcp-ts-core';
 import type { McpError } from '@cyanheads/mcp-ts-core/errors';
+import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { Headers, type HeadersInit, Response } from 'undici';
 import { afterEach, beforeEach, expect } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
@@ -112,6 +114,27 @@ export async function rejectionOf<E = McpError>(p: Promise<unknown>): Promise<E>
     () => expect.unreachable('expected a rejection'),
     (e: unknown) => e as E,
   );
+}
+
+/** The error half of a tool's `structuredContent`, as `runToolContract` builds it. */
+export interface ContractError {
+  code: number;
+  data: Record<string, unknown>;
+  message: string;
+}
+
+/**
+ * Run `definition` through `runToolContract` — the production error pipeline,
+ * which fills a declared reason's contract `recovery` as `data.recovery.hint` —
+ * and hand back the envelope's error. Fails the test if the call succeeds.
+ */
+export async function contractErrorOf<T extends AnyToolDefinition>(
+  definition: T,
+  input: z.input<T['input']>,
+): Promise<ContractError> {
+  const res = await runToolContract(definition, input);
+  expect(res.isError).toBe(true);
+  return (res.structuredContent as { error: ContractError }).error;
 }
 
 /**

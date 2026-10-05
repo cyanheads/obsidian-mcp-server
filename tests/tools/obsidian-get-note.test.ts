@@ -7,7 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianGetNote } from '@/mcp-server/tools/definitions/obsidian-get-note.tool.js';
-import { repeatKey, servePluginVersion, setupHarness } from '../helpers.js';
+import { contractErrorOf, repeatKey, servePluginVersion, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -92,12 +92,7 @@ describe('obsidian_get_note / path names a folder', () => {
     if (label === 'document-map') servePluginVersion(pool, '5.2.0');
     pool.intercept({ path: '/vault/Inbox', method: 'GET' }).reply(200, listing, asFolder);
 
-    await expect(
-      obsidianGetNote.handler(
-        obsidianGetNote.input.parse(args),
-        createMockContext({ errors: obsidianGetNote.errors }),
-      ),
-    ).rejects.toMatchObject({
+    expect(await contractErrorOf(obsidianGetNote, args)).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'path_is_directory',

@@ -15,7 +15,7 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
+import { contractErrorOf, makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -235,12 +235,9 @@ describe('obsidian_open_in_ui', () => {
         return { statusCode: 200, data: '' };
       });
 
-    await expect(
-      obsidianOpenInUi.handler(
-        obsidianOpenInUi.input.parse({ path: 'mynote.md', failIfMissing: false }),
-        createMockContext({ errors: obsidianOpenInUi.errors }),
-      ),
-    ).rejects.toMatchObject({
+    expect(
+      await contractErrorOf(obsidianOpenInUi, { path: 'mynote.md', failIfMissing: false }),
+    ).toMatchObject({
       code: JsonRpcErrorCode.Conflict,
       data: {
         reason: 'ambiguous_path',

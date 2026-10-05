@@ -67,7 +67,6 @@ export const obsidianListCommands = tool('obsidian_list_commands', {
       if (safetyIssue) {
         throw ctx.fail('regex_unsafe', `Unsafe nameRegex: ${safetyIssue}`, {
           nameRegex: input.nameRegex,
-          ...ctx.recoveryFor('regex_unsafe'),
         });
       }
       try {
@@ -76,7 +75,7 @@ export const obsidianListCommands = tool('obsidian_list_commands', {
         throw ctx.fail(
           'regex_invalid',
           `Invalid nameRegex: ${(err as Error).message}`,
-          { nameRegex: input.nameRegex, ...ctx.recoveryFor('regex_invalid') },
+          { nameRegex: input.nameRegex },
           { cause: err },
         );
       }

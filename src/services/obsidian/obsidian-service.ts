@@ -508,7 +508,7 @@ export class ObsidianService {
     });
     if (res.status === 404) return null;
     if (!res.ok) await this.#throwForStatus(res, url, ctx, { requestedUrl: requestUrl });
-    this.#assertNotDirectory(res, url, ctx);
+    this.#assertNotDirectory(res, url);
     return parseContentLength(res, url);
   }
 
@@ -523,7 +523,6 @@ export class ObsidianService {
       throw notFound(`Note not found: ${display}`, {
         path: display,
         reason: 'note_missing',
-        ...ctx.recoveryFor('note_missing'),
       });
     }
     return size;
@@ -594,7 +593,6 @@ export class ObsidianService {
         {
           reason: 'context_length_too_large',
           contextLength,
-          ...ctx.recoveryFor('context_length_too_large'),
         },
         { cause: err },
       );
@@ -680,7 +678,6 @@ export class ObsidianService {
         {
           reason: 'omnisearch_unreachable',
           url: this.#omnisearchUrl,
-          ...ctx.recoveryFor('omnisearch_unreachable'),
         },
         { cause: err },
       );
@@ -692,7 +689,6 @@ export class ObsidianService {
           reason: 'omnisearch_unreachable',
           url: this.#omnisearchUrl,
           status: res.status,
-          ...ctx.recoveryFor('omnisearch_unreachable'),
         },
       );
     }
@@ -1196,10 +1192,10 @@ export class ObsidianService {
         });
       }
       if (init.noteRead) {
-        this.#assertNotDirectory(res, pathAndQuery, ctx);
+        this.#assertNotDirectory(res, pathAndQuery);
       }
       if (init.listRead) {
-        this.#assertNotFile(res, pathAndQuery, ctx);
+        this.#assertNotFile(res, pathAndQuery);
       }
       return res;
     };
@@ -1240,7 +1236,7 @@ export class ObsidianService {
    * where a path can name a directory; `/active/` and `/periodic/` always
    * resolve to one file.
    */
-  #assertNotDirectory(res: UndiciResponse, path: string, ctx: Context): void {
+  #assertNotDirectory(res: UndiciResponse, path: string): void {
     if (!path.startsWith('/vault/')) return;
     if (res.headers.get('content-disposition') !== null) return;
     const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
@@ -1249,7 +1245,6 @@ export class ObsidianService {
     throw validationError(`${display} is a directory, not a note.`, {
       path: display,
       reason: 'path_is_directory',
-      ...ctx.recoveryFor('path_is_directory'),
     });
   }
 
@@ -1262,14 +1257,13 @@ export class ObsidianService {
    * `SyntaxError` on markdown and — worse — succeeds on a vault `.json` file,
    * handing the walk a listing with no `files` array.
    */
-  #assertNotFile(res: UndiciResponse, path: string, ctx: Context): void {
+  #assertNotFile(res: UndiciResponse, path: string): void {
     if (!path.startsWith('/vault/')) return;
     if (res.headers.get('content-disposition') === null) return;
     const display = displayPath(path);
     throw validationError(`${display} is a file, not a directory.`, {
       path: display,
       reason: 'path_is_file',
-      ...ctx.recoveryFor('path_is_file'),
     });
   }
 
@@ -1322,7 +1316,8 @@ export class ObsidianService {
    * (`data.path` on a note route, `data.commandId` on a command, neither on a
    * route that carries no caller input — see `callerIdentifier`), the HTTP
    * status (`data.status`, default branch), and the calling tool's own
-   * contract `reason` + `recovery`. The upstream's response body never
+   * contract `reason` (whose `recovery` the framework fills at the handler
+   * boundary). The upstream's response body never
    * crosses, in any branch, under any key.
    *
    * That is stricter than redaction, deliberately. The Local REST API
@@ -1371,7 +1366,7 @@ export class ObsidianService {
     const cause = new UpstreamErrorText(upstreamMsg, opts.requestedUrl);
     const data = (reason?: string) => ({
       ...callerIdentifier(path),
-      ...(reason !== undefined ? { reason, ...ctx.recoveryFor(reason) } : {}),
+      ...(reason !== undefined ? { reason } : {}),
     });
     const contentPreexists = () =>
       validationError(
@@ -1604,10 +1599,10 @@ export function encodeVaultPath(path: string): string {
   for (const seg of segments) {
     if (seg === '.' || seg === '..') {
       /**
-       * Recovery is written inline rather than resolved from the calling
-       * tool's contract: this is a free function with no `ctx` to hand to
-       * `ctx.recoveryFor`, and the guidance is the same static sentence every
-       * contract declares for `path_traversal`.
+       * Recovery is written inline rather than left to the framework's
+       * contract fill: this free function is also reached from definitions
+       * that declare no `path_traversal` entry, and the guidance is the same
+       * static sentence every contract declares for it.
        */
       throw validationError(`Path traversal not allowed: '${path}'`, {
         path,
@@ -1924,7 +1919,7 @@ function patchRejection(upstreamMsg: string, errorCode: unknown): string | undef
     errorCode === 40080 || errorCode === 40081 || /\bcould not be applied\b/i.test(upstreamMsg);
   if (!refused) return;
   if (/\bis not a table\b/i.test(upstreamMsg)) {
-    return 'the target block is not a table, so it cannot take table rows';
+    return 'the target is not a table, so it cannot take table rows';
   }
   /**
    * The 1.x engine reports a row whose cell count does not match the table
@@ -1932,7 +1927,7 @@ function patchRejection(upstreamMsg: string, errorCode: unknown): string | undef
    * table" — so the sentence names both.
    */
   if (/content-type-invalid-for-target/i.test(upstreamMsg)) {
-    return "the target block is not a table, or a row's cell count does not match the table's column count";
+    return "the target is not a table, or a row's cell count does not match the table's column count";
   }
   if (/table-content-incorrect-column-count|\bcell\(s\);.*\bcolumn\(s\)/i.test(upstreamMsg)) {
     return "a row's cell count does not match the table's column count";
@@ -1987,7 +1982,7 @@ function callerIdentifier(
  * The recovery hint is written inline, as `encodeVaultPath` writes
  * `path_traversal`'s: both failures are the operator's to fix and reachable
  * from every tool and resource — including the two resources that declare no
- * `errors[]` for `ctx.recoveryFor` to resolve against.
+ * `errors[]` for the framework's contract fill to resolve against.
  */
 function classifyFetchRejection(err: unknown): McpError | undefined {
   const codes = [err, err instanceof Error ? err.cause : undefined].flatMap((e) => {

@@ -181,7 +181,6 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
       if (safetyIssue) {
         throw ctx.fail('regex_unsafe', `Unsafe nameRegex: ${safetyIssue}`, {
           nameRegex: input.nameRegex,
-          ...ctx.recoveryFor('regex_unsafe'),
         });
       }
       try {
@@ -190,7 +189,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
         throw ctx.fail(
           'regex_invalid',
           `Invalid nameRegex: ${(err as Error).message}`,
-          { nameRegex: input.nameRegex, ...ctx.recoveryFor('regex_invalid') },
+          { nameRegex: input.nameRegex },
           { cause: err },
         );
       }

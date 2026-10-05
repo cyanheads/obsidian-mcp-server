@@ -322,7 +322,6 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       if (input.pathPrefix && input.mode !== 'text') {
         throw ctx.fail('path_prefix_invalid_mode', '`pathPrefix` is only valid in text mode.', {
           mode: input.mode,
-          ...ctx.recoveryFor('path_prefix_invalid_mode'),
         });
       }
 
@@ -332,7 +331,6 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
         if (!input.query) {
           throw ctx.fail('query_required', '`query` is required for text mode.', {
             mode: input.mode,
-            ...ctx.recoveryFor('query_required'),
           });
         }
         ctx.enrich.echo(input.query);
@@ -355,7 +353,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
           throw ctx.fail(
             'logic_required',
             '`logic` (JSONLogic tree) is required for jsonlogic mode.',
-            { mode: input.mode, ...ctx.recoveryFor('logic_required') },
+            { mode: input.mode },
           );
         }
         const raw = await svc.searchJsonLogic(ctx, input.logic);
@@ -373,7 +371,6 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       if (!input.query) {
         throw ctx.fail('query_required', '`query` is required for omnisearch mode.', {
           mode: input.mode,
-          ...ctx.recoveryFor('query_required'),
         });
       }
       ctx.enrich.echo(input.query);

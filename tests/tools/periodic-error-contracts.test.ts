@@ -3,15 +3,15 @@
  * tool that accepts a `periodic` target. Local REST API v5.0.2 removed the
  * built-in `/periodic/` routes, so on a current plugin without the companion
  * extension the route-miss 404 is indistinguishable from "no note for that
- * period" — each cell drives the real handler against that upstream and
- * asserts the thrown error carries the reason *and* the recovery hint the
- * tool's own `errors[]` advertises.
+ * period" — each cell drives the real handler through `runToolContract`
+ * against that upstream and asserts the error envelope carries the reason
+ * *and* the recovery hint the tool's own `errors[]` advertises.
  * @module tests/tools/periodic-error-contracts.test
  */
 
 import type { AnyToolDefinition } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { obsidianAppendToNote } from '@/mcp-server/tools/definitions/obsidian-append-to-note.tool.js';
 import { obsidianDeleteNote } from '@/mcp-server/tools/definitions/obsidian-delete-note.tool.js';
@@ -26,7 +26,7 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { makeTestConfig, mockResponse } from '../helpers.js';
+import { contractErrorOf, makeTestConfig, mockResponse } from '../helpers.js';
 
 const PERIODIC_EXTENSION_ID = 'local-rest-api-periodic-notes';
 
@@ -95,11 +95,7 @@ function declaredRecovery(tool: AnyToolDefinition, reason: string): string {
   return entry.recovery;
 }
 
-const run = (cell: Cell) =>
-  cell.tool.handler(
-    cell.tool.input.parse(cell.input),
-    createMockContext({ errors: cell.tool.errors }),
-  );
+const run = (cell: Cell) => contractErrorOf(cell.tool, cell.input);
 
 afterEach(() => {
   setObsidianService(undefined);
@@ -109,7 +105,7 @@ describe('periodic_unsupported reaches every tool that declares it', () => {
   it.each(MATRIX.map((c) => [c.tool.name, c] as const))('%s', async (_name, cell) => {
     installUpstream({ extension: false });
 
-    await expect(run(cell)).rejects.toMatchObject({
+    expect(await run(cell)).toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: {
         reason: 'periodic_unsupported',
@@ -123,7 +119,7 @@ describe('periodic_not_found survives on an install that serves the routes', () 
   it.each(MATRIX.map((c) => [c.tool.name, c] as const))('%s', async (_name, cell) => {
     installUpstream({ extension: true });
 
-    await expect(run(cell)).rejects.toMatchObject({
+    expect(await run(cell)).toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: {
         reason: 'periodic_not_found',

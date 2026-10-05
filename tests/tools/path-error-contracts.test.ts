@@ -1,16 +1,15 @@
 /**
  * @fileoverview Contract conformance for the two path error reasons every
- * path-accepting tool declares. Each cell drives the real handler against a
- * folder-shaped upstream (or a dot-segment path) and asserts the thrown error
- * carries the reason *and* the recovery hint that tool's own `errors[]`
- * advertises — a declared reason nothing can throw, or a hint that has drifted
+ * path-accepting tool declares. Each cell drives the real handler through
+ * `runToolContract` against a folder-shaped upstream (or a dot-segment path)
+ * and asserts the error envelope carries the reason *and* the recovery hint
+ * that tool's own `errors[]` advertises — a declared reason nothing can throw, or a hint that has drifted
  * from the contract, fails here rather than shipping as a dead entry.
  * @module tests/tools/path-error-contracts.test
  */
 
 import type { AnyToolDefinition } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { obsidianAppendToNote } from '@/mcp-server/tools/definitions/obsidian-append-to-note.tool.js';
 import { obsidianDeleteNote } from '@/mcp-server/tools/definitions/obsidian-delete-note.tool.js';
@@ -26,7 +25,7 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { makeTestConfig, mockResponse } from '../helpers.js';
+import { contractErrorOf, makeTestConfig, mockResponse } from '../helpers.js';
 
 /** A folder path and a dot-segment path, substituted into each tool's own input shape. */
 const FOLDER = 'Inbox';
@@ -106,12 +105,7 @@ describe('path_is_directory reaches every tool that declares it', () => {
   it.each(MATRIX.map((c) => [c.tool.name, c] as const))('%s', async (_name, cell) => {
     installFolderUpstream();
 
-    await expect(
-      cell.tool.handler(
-        cell.tool.input.parse(cell.input(FOLDER)),
-        createMockContext({ errors: cell.tool.errors }),
-      ),
-    ).rejects.toMatchObject({
+    expect(await contractErrorOf(cell.tool, cell.input(FOLDER))).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'path_is_directory',
@@ -126,12 +120,7 @@ describe('path_traversal reaches every tool that declares it', () => {
   it.each(MATRIX.map((c) => [c.tool.name, c] as const))('%s', async (_name, cell) => {
     const requests = installFolderUpstream();
 
-    await expect(
-      cell.tool.handler(
-        cell.tool.input.parse(cell.input(TRAVERSAL)),
-        createMockContext({ errors: cell.tool.errors }),
-      ),
-    ).rejects.toMatchObject({
+    expect(await contractErrorOf(cell.tool, cell.input(TRAVERSAL))).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'path_traversal',

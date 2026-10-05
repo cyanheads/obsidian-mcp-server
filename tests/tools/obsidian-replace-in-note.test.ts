@@ -7,7 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianReplaceInNote } from '@/mcp-server/tools/definitions/obsidian-replace-in-note.tool.js';
-import { setupHarness } from '../helpers.js';
+import { contractErrorOf, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -462,16 +462,13 @@ describe('obsidian_replace_in_note / frontmatter validation', () => {
     async (_label, search, replace) => {
       const puts = stubReadOnly(FM_NOTE);
 
-      await expect(
-        obsidianReplaceInNote.handler(
-          obsidianReplaceInNote.input.parse({
-            target: { type: 'path', path: 'N.md' },
-            scope: 'both',
-            replacements: [{ search, replace }],
-          }),
-          createMockContext({ errors: obsidianReplaceInNote.errors }),
-        ),
-      ).rejects.toMatchObject({
+      expect(
+        await contractErrorOf(obsidianReplaceInNote, {
+          target: { type: 'path', path: 'N.md' },
+          scope: 'both',
+          replacements: [{ search, replace }],
+        }),
+      ).toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
         data: {
           reason: 'frontmatter_invalid',

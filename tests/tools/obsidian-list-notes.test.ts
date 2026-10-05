@@ -8,7 +8,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianListNotes } from '@/mcp-server/tools/definitions/obsidian-list-notes.tool.js';
-import { setupHarness } from '../helpers.js';
+import { contractErrorOf, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -240,12 +240,7 @@ describe('obsidian_list_notes / bad paths', () => {
       .pool.intercept({ path: '/vault/Note.md/', method: 'GET' })
       .reply(200, '# hello', { headers: fileHeaders });
 
-    await expect(
-      obsidianListNotes.handler(
-        obsidianListNotes.input.parse({ path: 'Note.md' }),
-        createMockContext({ errors: obsidianListNotes.errors }),
-      ),
-    ).rejects.toMatchObject({
+    expect(await contractErrorOf(obsidianListNotes, { path: 'Note.md' })).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'path_is_file',
@@ -261,12 +256,9 @@ describe('obsidian_list_notes / bad paths', () => {
       .pool.intercept({ path: '/vault/Inbox/scratch-dir/', method: 'GET' })
       .reply(404, { message: 'Not Found', errorCode: 40400 });
 
-    await expect(
-      obsidianListNotes.handler(
-        obsidianListNotes.input.parse({ path: 'Inbox/scratch-dir', depth: 3 }),
-        createMockContext({ errors: obsidianListNotes.errors }),
-      ),
-    ).rejects.toMatchObject({
+    expect(
+      await contractErrorOf(obsidianListNotes, { path: 'Inbox/scratch-dir', depth: 3 }),
+    ).toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: {
         reason: 'directory_missing',

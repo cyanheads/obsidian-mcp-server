@@ -229,7 +229,6 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
         if (safetyIssue) {
           throw ctx.fail('regex_unsafe', `Unsafe regex '${r.search}': ${safetyIssue}`, {
             search: r.search,
-            ...ctx.recoveryFor('regex_unsafe'),
           });
         }
         let re: RegExp;
@@ -239,7 +238,7 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
           throw ctx.fail(
             'regex_invalid',
             `Invalid regex '${r.search}': ${(err as Error).message}`,
-            { search: r.search, ...ctx.recoveryFor('regex_invalid') },
+            { search: r.search },
             { cause: err },
           );
         }
@@ -308,7 +307,7 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
         throw ctx.fail(
           'frontmatter_invalid',
           `Replacements left the frontmatter of ${note.path} unparseable: ${problem}`,
-          { path: note.path, ...ctx.recoveryFor('frontmatter_invalid') },
+          { path: note.path },
         );
       }
     }

@@ -175,7 +175,6 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
       if (input.value === undefined) {
         throw ctx.fail('value_required', '`value` is required when operation is "set".', {
           operation: input.operation,
-          ...ctx.recoveryFor('value_required'),
         });
       }
       const path = await svc.resolvePath(ctx, target);
@@ -211,7 +210,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
       throw ctx.fail(
         'frontmatter_invalid',
         `Cannot delete \`${input.key}\` from ${note.path}: its frontmatter block is not safely editable — ${edit.problem}`,
-        { path: note.path, ...ctx.recoveryFor('frontmatter_invalid') },
+        { path: note.path },
       );
     }
     const newContent = edit.content;

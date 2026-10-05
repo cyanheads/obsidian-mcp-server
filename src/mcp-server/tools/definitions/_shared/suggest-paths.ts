@@ -12,7 +12,8 @@
  *    NotFound enriched with the candidates in the message and
  *    `error.data.suggestions[]`.
  *
- * Read/open/delete tools wrap their service calls with `withCaseFallback`.
+ * `obsidian_get_note` and `obsidian_open_in_ui` wrap their service calls with
+ * `withCaseFallback`; writes and deletes match the exact path.
  * @module mcp-server/tools/definitions/_shared/suggest-paths
  */
 
@@ -77,7 +78,6 @@ export async function withCaseFallback<T>(
           path: target.path,
           reason: 'ambiguous_path',
           matches: probe.caseMatches,
-          ...ctx.recoveryFor('ambiguous_path'),
         },
         { cause: err },
       );

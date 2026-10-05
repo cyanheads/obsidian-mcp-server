@@ -113,7 +113,6 @@ export const obsidianListTags = tool('obsidian_list_tags', {
       if (safetyIssue) {
         throw ctx.fail('regex_unsafe', `Unsafe nameRegex: ${safetyIssue}`, {
           nameRegex: input.nameRegex,
-          ...ctx.recoveryFor('regex_unsafe'),
         });
       }
       try {
@@ -122,7 +121,7 @@ export const obsidianListTags = tool('obsidian_list_tags', {
         throw ctx.fail(
           'regex_invalid',
           `Invalid nameRegex: ${(err as Error).message}`,
-          { nameRegex: input.nameRegex, ...ctx.recoveryFor('regex_invalid') },
+          { nameRegex: input.nameRegex },
           { cause: err },
         );
       }

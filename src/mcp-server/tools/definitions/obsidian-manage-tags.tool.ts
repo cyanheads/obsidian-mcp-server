@@ -190,7 +190,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       throw ctx.fail(
         'tags_required',
         '`tags` is required and must be non-empty for add/remove operations.',
-        { operation: input.operation, ...ctx.recoveryFor('tags_required') },
+        { operation: input.operation },
       );
     }
 
@@ -199,7 +199,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       throw ctx.fail(
         'frontmatter_invalid',
         `Cannot ${input.operation} tags in ${note.path}: its frontmatter block is not safely editable — ${reconciled.problem}`,
-        { path: note.path, ...ctx.recoveryFor('frontmatter_invalid') },
+        { path: note.path },
       );
     }
     // Delivered bytes — not note.stat.size (see ObsidianService.tryGetSize).

@@ -604,31 +604,22 @@ describe('#throwForStatus / the identifier key follows the route (issue #130)', 
     },
   );
 
-  it('keeps reason, recovery, and the command message on the command_unknown 404', async () => {
+  /**
+   * The framework fills the calling tool's contract `recovery` from
+   * `data.reason` at the handler boundary, so the service's `data` carries the
+   * identifier and the reason alone.
+   */
+  it('keeps reason and the command message on the command_unknown 404', async () => {
     pool
       .intercept({ path: '/commands/app%3Azq7f31-cmd/', method: 'POST' })
       .reply(404, POISONED_400, { headers: { 'content-type': 'application/json' } });
-    const contractCtx = createMockContext({
-      errors: [
-        {
-          reason: 'command_unknown',
-          code: JsonRpcErrorCode.NotFound,
-          when: 'The command ID is not registered.',
-          recovery: 'Call obsidian_list_commands to discover the registered command IDs.',
-        },
-      ],
-    });
 
-    const err = await throwsMcpError(() => service.executeCommand(contractCtx, 'app:zq7f31-cmd'));
+    const err = await throwsMcpError(() => service.executeCommand(ctx, 'app:zq7f31-cmd'));
 
     expect(err.message).toBe(
       'Unknown Obsidian command: app:zq7f31-cmd. Use `obsidian_list_commands` to discover valid command IDs.',
     );
-    expect(err.data).toEqual({
-      commandId: 'app:zq7f31-cmd',
-      reason: 'command_unknown',
-      recovery: { hint: 'Call obsidian_list_commands to discover the registered command IDs.' },
-    });
+    expect(err.data).toEqual({ commandId: 'app:zq7f31-cmd', reason: 'command_unknown' });
   });
 
   it('keeps status, retryAfter, and retryable on the default branch of a route with no identifier', async () => {

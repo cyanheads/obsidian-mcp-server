@@ -1207,28 +1207,13 @@ describe('ObsidianService directory guard on note reads', () => {
     expect(await svc.tryGetSize(ctx, { type: 'path', path: 'data.json' })).toBe(19);
   });
 
-  it('carries the contract recovery hint when the caller declares path_is_directory', async () => {
+  it('throws path_is_directory without a recovery, leaving the contract fill to the framework', async () => {
     pool
       .intercept({ path: '/vault/Inbox', method: 'GET' })
       .reply(200, listing, { headers: listingHeaders });
-    const contractCtx = createMockContext({
-      errors: [
-        {
-          reason: 'path_is_directory',
-          code: JsonRpcErrorCode.ValidationError,
-          when: 'folder',
-          recovery: 'Call obsidian_list_notes with this path to list the folder.',
-        },
-      ],
-    });
 
-    await expect(
-      service.getNoteContent(contractCtx, { type: 'path', path: 'Inbox' }),
-    ).rejects.toMatchObject({
-      data: {
-        recovery: { hint: 'Call obsidian_list_notes with this path to list the folder.' },
-      },
-    });
+    const err = await rejectionOf(service.getNoteContent(ctx, { type: 'path', path: 'Inbox' }));
+    expect(err.data).toEqual({ path: 'Inbox', reason: 'path_is_directory' });
   });
 
   it('serves a vault .json file — application/json with a filename — as a normal note', async () => {
@@ -1341,26 +1326,13 @@ describe('ObsidianService file guard on directory listings', () => {
     });
   });
 
-  it('carries the calling tool contract recovery for path_is_file', async () => {
+  it('throws path_is_file without a recovery, leaving the contract fill to the framework', async () => {
     pool
       .intercept({ path: '/vault/Note.md/', method: 'GET' })
       .reply(200, '# hello', { headers: fileHeaders });
-    const contractCtx = createMockContext({
-      errors: [
-        {
-          reason: 'path_is_file',
-          code: JsonRpcErrorCode.ValidationError,
-          when: 'file',
-          recovery: 'Read it with obsidian_get_note, or list the parent folder instead.',
-        },
-      ],
-    });
 
-    await expect(service.listFiles(contractCtx, 'Note.md')).rejects.toMatchObject({
-      data: {
-        recovery: { hint: 'Read it with obsidian_get_note, or list the parent folder instead.' },
-      },
-    });
+    const err = await rejectionOf(service.listFiles(ctx, 'Note.md'));
+    expect(err.data).toEqual({ path: 'Note.md', reason: 'path_is_file' });
   });
 
   it('classifies a listing 404 as directory_missing, not note_missing', async () => {

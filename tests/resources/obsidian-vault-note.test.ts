@@ -136,10 +136,11 @@ describe('obsidian://vault/{+path}', () => {
       ),
     ).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      data: {
-        reason: 'path_is_directory',
-        recovery: { hint: expect.stringContaining('obsidian_list_notes') },
-      },
+      data: { reason: 'path_is_directory' },
     });
+    // The resource handler factory fills this declared recovery onto the wire.
+    expect(
+      obsidianVaultNote.errors?.find((e) => e.reason === 'path_is_directory')?.recovery,
+    ).toContain('obsidian_list_notes');
   });
 });

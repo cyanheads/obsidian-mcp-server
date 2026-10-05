@@ -18,6 +18,7 @@ import {
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
 import {
+  contractErrorOf,
   makeTestConfig,
   mockResponse,
   type ReplyFn,
@@ -840,12 +841,9 @@ describe('obsidian_search_notes / logic_invalid', () => {
         { headers: { 'content-type': 'application/json' } },
       );
 
-    await expect(
-      obsidianSearchNotes.handler(
-        obsidianSearchNotes.input.parse({ mode: 'jsonlogic', logic: { bogus: [1, 2] } }),
-        createMockContext({ errors: obsidianSearchNotes.errors }),
-      ),
-    ).rejects.toMatchObject({
+    expect(
+      await contractErrorOf(obsidianSearchNotes, { mode: 'jsonlogic', logic: { bogus: [1, 2] } }),
+    ).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'logic_invalid', recovery: { hint: declaredRecovery } },
     });
@@ -1192,7 +1190,9 @@ describe('obsidian_search_notes / context_length_too_large', () => {
     (e) => e.reason === 'context_length_too_large',
   )?.recovery;
 
-  const replyWith = (status: number, body: unknown) => {
+  const input = { mode: 'text', query: 'the', contextLength: 500 } as const;
+
+  const stubSearch = (status: number, body: unknown) => {
     harness
       .current()
       .pool.intercept({
@@ -1200,8 +1200,12 @@ describe('obsidian_search_notes / context_length_too_large', () => {
         method: 'POST',
       })
       .reply(status, body, { headers: { 'content-type': 'application/json' } });
+  };
+
+  const replyWith = (status: number, body: unknown) => {
+    stubSearch(status, body);
     return obsidianSearchNotes.handler(
-      obsidianSearchNotes.input.parse({ mode: 'text', query: 'the', contextLength: 500 }),
+      obsidianSearchNotes.input.parse(input),
       createMockContext({ errors: obsidianSearchNotes.errors }),
     );
   };
@@ -1221,7 +1225,8 @@ describe('obsidian_search_notes / context_length_too_large', () => {
   });
 
   it('maps the upstream RangeError to a typed, recoverable validation error', async () => {
-    await expect(replyWith(500, RANGE_ERROR)).rejects.toMatchObject({
+    stubSearch(500, RANGE_ERROR);
+    expect(await contractErrorOf(obsidianSearchNotes, input)).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'context_length_too_large',
