@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.6.1](changelog/3.6.x/3.6.1.md) — 2026-10-05 · ⚠️ Breaking · 🛡️ Security
+
+obsidian_delete_note now deletes only on a round that redeems a server-stored consent record, HTTP startup requires a stateful session, and the server moves to mcp-ts-core 0.13.12, whose tool errors carry a request ID and whose argument hints lead with the field path.
+
 ## [3.6.0](changelog/3.6.x/3.6.0.md) — 2026-09-23
 
 obsidian_patch_note, obsidian_append_to_note, obsidian_write_note, and the document map now speak markdown-patch 2.0 on Local REST API v5.x, required before plugin v6.0 removes the 1.x format they used to pin.

@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** obsidian-mcp-server
-**Version:** 3.6.0
+**Version:** 3.6.1
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.12`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
