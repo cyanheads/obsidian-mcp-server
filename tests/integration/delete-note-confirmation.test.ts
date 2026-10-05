@@ -4,26 +4,34 @@
  * protocol era of the client and on `MCP_SESSION_MODE`. A 2025-era client has
  * no `input_required` re-invoke — the SDK's legacy shim has to issue a real
  * `elicitation/create` from a live session — so only a stateful session can
- * carry it. `src/index.ts` declares `sessionMode: 'stateful'` for exactly that
- * reason, and nothing below the transport can prove it holds.
+ * carry it. `src/index.ts` declares `sessionMode: { default: 'stateful',
+ * require: 'stateful' }` for exactly that reason, and nothing below the
+ * transport can prove it holds.
  *
- * So this runs the real server as a subprocess over Streamable HTTP and speaks
- * raw JSON-RPC to it as a `2025-06-18` client, against an in-test stub of the
- * Local REST API. Two cases: the default (stateful) session completes the
- * confirmation and the vault sees exactly one DELETE; under an explicit
- * `MCP_SESSION_MODE=stateless` the call is refused with
- * `client_capability_missing` and the vault sees none.
+ * So this runs the real server as a subprocess and, over Streamable HTTP,
+ * speaks raw JSON-RPC to it as a `2025-06-18` client against an in-test stub of
+ * the Local REST API. The default (stateful) session completes the
+ * confirmation and the vault sees exactly one DELETE; an explicit
+ * `MCP_SESSION_MODE=stateless` refuses to start over HTTP with a
+ * `ConfigurationError`, while stdio with the same variable starts and answers
+ * `initialize`.
+ *
+ * Every child runs from an empty scratch directory: the server loads `.env`
+ * from its working directory, and the repo's own `.env` must not reach it.
  *
  * @module tests/integration/delete-note-confirmation.test
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { createServer as createSocketServer } from 'node:net';
-import { resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 const ENTRYPOINT = resolve(process.cwd(), 'src/index.ts');
+const NOTE_BODY = '# Note\n\nbody\n';
 const NOTE_PATH = '/vault/Note.md';
 const PROTOCOL_VERSION = '2025-06-18';
 const MCP_HEADERS: Record<string, string> = {
@@ -51,10 +59,10 @@ interface VaultStub {
 }
 
 /**
- * The slice of the Local REST API `obsidian_delete_note` touches: a HEAD for
- * the size probe the confirmation message quotes, and the DELETE itself. `GET
- * /` answers the capability probe so an unexpected 404 there cannot colour a
- * failure.
+ * The slice of the Local REST API `obsidian_delete_note` touches: a GET for the
+ * content the confirmation quotes and its consent record hashes, and the DELETE
+ * itself. `GET /` answers the capability probe so an unexpected 404 there
+ * cannot colour a failure.
  */
 async function startVaultStub(): Promise<VaultStub> {
   const calls: string[] = [];
@@ -62,13 +70,12 @@ async function startVaultStub(): Promise<VaultStub> {
     const path = (req.url ?? '').split('?')[0] ?? '';
     calls.push(`${req.method} ${path}`);
 
-    if (req.method === 'HEAD' && path === NOTE_PATH) {
+    if (req.method === 'GET' && path === NOTE_PATH) {
       res.writeHead(200, {
-        'content-length': '42',
-        'content-type': 'text/markdown',
+        'content-type': 'text/markdown; charset=utf-8',
         'content-disposition': 'attachment; filename="Note.md"',
       });
-      res.end();
+      res.end(NOTE_BODY);
       return;
     }
     if (req.method === 'DELETE' && path === NOTE_PATH) {
@@ -135,24 +142,35 @@ interface ServerHandle {
   port: number;
 }
 
-async function startServer(vaultPort: number, env: Record<string, string>): Promise<ServerHandle> {
-  const port = await freePort();
+/** An empty working directory for every child, so no `.env` is loaded into it. */
+let scratchCwd: string;
+beforeAll(() => {
+  scratchCwd = mkdtempSync(join(tmpdir(), 'obsidian-mcp-integration-'));
+});
+afterAll(() => {
+  rmSync(scratchCwd, { recursive: true, force: true });
+});
+
+interface Spawned {
+  child: ChildProcess;
+  /** Everything the child has written to stdout and stderr so far. */
+  output: () => string;
+}
+
+function spawnServer(env: Record<string, string>, stdin: 'ignore' | 'pipe' = 'ignore'): Spawned {
   const child = spawn(BUN, [ENTRYPOINT], {
+    cwd: scratchCwd,
     env: {
       ...process.env,
-      MCP_TRANSPORT_TYPE: 'http',
-      MCP_HTTP_PORT: String(port),
-      MCP_HTTP_HOST: '127.0.0.1',
       MCP_LOG_LEVEL: 'error',
       MCP_AUTH_MODE: 'none',
       OBSIDIAN_API_KEY: 'integration-test-key',
-      OBSIDIAN_BASE_URL: `http://127.0.0.1:${vaultPort}`,
       // Port 1 refuses instantly, so the startup Omnisearch probe neither waits
       // out its timeout nor finds whatever happens to be running on this host.
       OBSIDIAN_OMNISEARCH_URL: 'http://127.0.0.1:1',
       ...env,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: [stdin, 'pipe', 'pipe'],
   });
 
   let output = '';
@@ -162,13 +180,43 @@ async function startServer(vaultPort: number, env: Record<string, string>): Prom
   child.stderr?.on('data', (chunk: Buffer) => {
     output += chunk.toString();
   });
+  return { child, output: () => output };
+}
+
+/** Resolves with the exit code of a child expected to stop on its own. */
+function exitOf(child: ChildProcess, timeoutMs = 20_000): Promise<number | null> {
+  return stage(
+    'server exit',
+    new Promise<number | null>((done, fail) => {
+      if (child.exitCode !== null) {
+        done(child.exitCode);
+        return;
+      }
+      child.on('error', fail);
+      child.on('exit', (code) => done(code));
+    }),
+    timeoutMs,
+  );
+}
+
+async function startServer(vaultPort: number, env: Record<string, string>): Promise<ServerHandle> {
+  const port = await freePort();
+  const { child, output } = spawnServer({
+    MCP_TRANSPORT_TYPE: 'http',
+    MCP_HTTP_PORT: String(port),
+    MCP_HTTP_HOST: '127.0.0.1',
+    OBSIDIAN_BASE_URL: `http://127.0.0.1:${vaultPort}`,
+    ...env,
+  });
 
   /** Settles only on a failure to start, so the poll below can race against it. */
   const died = new Promise<never>((_, fail) => {
     child.on('error', (err) => fail(new Error(`could not spawn ${BUN}: ${err.message}`)));
     child.on('exit', (code) =>
       fail(
-        new Error(`server exited with code ${code} before serving. Output: ${output.slice(-800)}`),
+        new Error(
+          `server exited with code ${code} before serving. Output: ${output().slice(-800)}`,
+        ),
       ),
     );
   });
@@ -202,7 +250,7 @@ async function startServer(vaultPort: number, env: Record<string, string>): Prom
 
   await kill(child);
   throw new Error(
-    `server never became healthy on port ${port} (last probe: ${lastProbeError}). Output: ${output.slice(-800)}`,
+    `server never became healthy on port ${port} (last probe: ${lastProbeError}). Output: ${output().slice(-800)}`,
   );
 }
 
@@ -437,25 +485,83 @@ describe('obsidian_delete_note confirmation over HTTP, 2025-era client', () => {
 
     expect(vault.calls.filter((call) => call === `DELETE ${NOTE_PATH}`)).toHaveLength(1);
   });
+});
 
-  it('refuses under MCP_SESSION_MODE=stateless and deletes nothing', async () => {
-    const { client, vault } = await bootstrap({ MCP_SESSION_MODE: 'stateless' });
+describe('the stateful-session requirement', () => {
+  const children: ChildProcess[] = [];
 
-    const call = await client.callTool(2, 'obsidian_delete_note', {
-      target: { type: 'path', path: 'Note.md' },
+  afterEach(async () => {
+    await Promise.all(children.splice(0).map((child) => kill(child)));
+  });
+
+  it('refuses to start over HTTP under MCP_SESSION_MODE=stateless', async () => {
+    const { child, output } = spawnServer({
+      MCP_TRANSPORT_TYPE: 'http',
+      MCP_HTTP_PORT: String(await freePort()),
+      MCP_HTTP_HOST: '127.0.0.1',
+      MCP_SESSION_MODE: 'stateless',
+      OBSIDIAN_BASE_URL: 'http://127.0.0.1:1',
     });
-    expect(call.status).toBe(200);
-    const stream = new FrameStream(call.body as ReadableStream<Uint8Array>);
+    children.push(child);
 
-    const result = await stream.until((frame) => frame.id === 2);
-    await stream.cancel();
+    const code = await exitOf(child);
 
-    expect(result.result?.isError).toBe(true);
-    const structured = result.result?.structuredContent as {
-      error?: { data?: { reason?: string } };
-    };
-    expect(structured.error?.data?.reason).toBe('client_capability_missing');
+    expect(code).not.toBe(0);
+    expect(output()).toContain("sessionMode.require: 'stateful'");
+    expect(output()).toContain('MCP_SESSION_MODE=stateless');
+  });
 
-    expect(vault.calls.filter((call) => call.startsWith('DELETE'))).toHaveLength(0);
+  it('starts on stdio under MCP_SESSION_MODE=stateless and answers initialize', async () => {
+    const { child, output } = spawnServer(
+      {
+        MCP_TRANSPORT_TYPE: 'stdio',
+        MCP_SESSION_MODE: 'stateless',
+        OBSIDIAN_BASE_URL: 'http://127.0.0.1:1',
+      },
+      'pipe',
+    );
+    children.push(child);
+
+    child.stdin?.write(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: 'session-requirement-integration', version: '1.0.0' },
+        },
+      })}\n`,
+    );
+
+    /** stdout carries newline-delimited JSON-RPC; stderr's log lines fail the parse and are skipped. */
+    const answered = () =>
+      output()
+        .split('\n')
+        .some((line) => {
+          try {
+            const msg = JSON.parse(line) as { id?: unknown; result?: unknown };
+            return msg.id === 1 && msg.result !== undefined;
+          } catch {
+            return false;
+          }
+        });
+
+    const initialized = await stage(
+      'stdio initialize',
+      new Promise<boolean>((done) => {
+        const check = () => {
+          if (answered()) done(true);
+        };
+        child.stdout?.on('data', check);
+        child.on('exit', () => done(false));
+        check();
+      }),
+      20_000,
+    );
+
+    expect(initialized, output().slice(-800)).toBe(true);
+    expect(child.exitCode).toBeNull();
   });
 });

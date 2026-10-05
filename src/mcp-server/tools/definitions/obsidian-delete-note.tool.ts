@@ -1,18 +1,37 @@
 /**
  * @fileoverview obsidian_delete_note — permanently delete a note. Suspends via
  * `ctx.requestInput` to confirm with the user before the DELETE, and is
- * re-entered with the answer on `ctx.inputs`.
+ * re-entered with the answer on `ctx.inputs`. The answer counts only on a
+ * round that redeems the consent record this handler stored when it asked.
  * @module mcp-server/tools/definitions/obsidian-delete-note.tool
  */
 
+import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { TargetSchema } from './_shared/schemas.js';
 
+const OPERATION = 'obsidian_delete_note';
+const CONSENT_TTL_SECONDS = 600;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 /** Answered by the client in the confirmation round; re-validated on re-entry. */
 const DeleteConfirmation = z.object({
   confirm: z.boolean().describe('Set to true to delete the note. Any other value cancels.'),
+});
+
+/**
+ * What a confirmation prompt confirmed, stored in `ctx.state` under
+ * `consent/<id>` when the handler asks; only the id travels as `requestState`.
+ */
+const ConsentRecord = z.object({
+  operation: z.string().describe('Tool the record was minted for.'),
+  clientId: z.string().describe('Authenticated client that was asked; empty without auth.'),
+  subject: z.string().describe('Authenticated subject that was asked; empty without auth.'),
+  target: z.string().describe('Resolved vault path the user confirmed.'),
+  contentHash: z.string().describe('SHA-256 of the note content the user confirmed.'),
 });
 
 export const obsidianDeleteNote = tool('obsidian_delete_note', {
@@ -109,33 +128,63 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
   ],
 
   async handler(input, ctx) {
-    const svc = getObsidianService();
+    /**
+     * Redeem first: whatever this round carries, the record it names is spent
+     * before anything acts on the answer. An accepted answer on `ctx.inputs` is
+     * not proof the user was asked — a client that declared elicitation can
+     * pre-answer a call nothing prompted for — so only the record this handler
+     * stored when it asked makes the answer count.
+     *
+     * Single-use holds against a sequential replay, not concurrent retries:
+     * `ctx.state` has no atomic read-and-delete, so retries carrying one id at
+     * the same moment can each read the record before a delete lands, and the
+     * Local REST API DELETE takes no idempotency key to dedupe them upstream.
+     * The losing DELETE finds the file gone and fails `note_missing`, so the
+     * race removes nothing beyond the confirmed note unless that path is
+     * recreated in between. Tracked as cyanheads/mcp-ts-core#593 (an atomic
+     * `ctx.state.take`).
+     */
+    const id = ctx.inputs.state();
+    const record = id && UUID.test(id) ? await ctx.state.get(`consent/${id}`, ConsentRecord) : null;
+    if (record) await ctx.state.delete(`consent/${id}`);
 
+    const svc = getObsidianService();
     const path = await svc.resolvePath(ctx, input.target);
     const pathTarget = { type: 'path' as const, path };
 
     /**
-     * Probe size before asking for confirmation so the user sees how much
-     * they're about to destroy. Throws `note_missing` if the file is already
-     * gone — preempts a confusing post-confirmation DELETE 404. The probe runs
-     * again on re-entry, so the size is re-verified against the answer round.
+     * One read serves the prompt and the record: the bytes the user is told
+     * they're destroying, and the hash a later round must still match. Throws
+     * `note_missing` before any prompt when the file is already gone, and
+     * `path_is_directory` for a folder, so no DELETE is ever reached for one.
      */
-    const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
+    const content = await svc.getNoteContent(ctx, pathTarget);
+    const previousSizeInBytes = Buffer.byteLength(content);
+    const expected = {
+      operation: OPERATION,
+      clientId: ctx.auth?.clientId ?? '',
+      subject: ctx.auth?.sub ?? '',
+      target: path,
+      contentHash: createHash('sha256').update(content).digest('hex'),
+    };
+    const matches = record !== null && isDeepStrictEqual(record, expected);
 
     /**
-     * A declined or cancelled prompt is a dead end, not a round to retry —
-     * re-asking would burn the round budget until the client gives up.
+     * A declined or cancelled prompt the user was actually shown is a dead end,
+     * not a round to retry — re-asking would burn the round budget until the
+     * client gives up.
      */
     const view = ctx.inputs.view('confirm');
-    if (view.kind === 'elicit' && view.action !== 'accept') {
+    if (matches && view.kind === 'elicit' && view.action !== 'accept') {
       throw ctx.fail('cancelled', `User sent '${view.action}' for the deletion confirmation.`, {
         path,
-        ...ctx.recoveryFor('cancelled'),
       });
     }
 
-    const answer = ctx.inputs.accepted('confirm', DeleteConfirmation);
+    const answer = matches ? ctx.inputs.accepted('confirm', DeleteConfirmation) : undefined;
     if (!answer) {
+      const fresh = randomUUID();
+      await ctx.state.set(`consent/${fresh}`, expected, { ttl: CONSENT_TTL_SECONDS });
       return ctx.requestInput({
         inputRequests: {
           confirm: inputRequired.elicit({
@@ -143,14 +192,12 @@ export const obsidianDeleteNote = tool('obsidian_delete_note', {
             requestedSchema: DeleteConfirmation,
           }),
         },
+        requestState: fresh,
       });
     }
 
     if (!answer.confirm) {
-      throw ctx.fail('cancelled', 'Deletion cancelled by user.', {
-        path,
-        ...ctx.recoveryFor('cancelled'),
-      });
+      throw ctx.fail('cancelled', 'Deletion cancelled by user.', { path });
     }
 
     await svc.deleteNote(ctx, pathTarget);

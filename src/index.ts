@@ -106,12 +106,13 @@ const { services } = await createApp({
   instructions: buildInstructions(),
   /**
    * `obsidian_delete_note` confirms through `ctx.requestInput`, which a
-   * 2025-era HTTP client can only answer on a stateful session. Declared as the
-   * default, not a requirement — an explicit `MCP_SESSION_MODE=stateless` still
-   * starts; the delete confirmation is then refused with
-   * `client_capability_missing` on those clients.
+   * 2025-era HTTP client can only answer on a stateful session — under
+   * stateless HTTP the tool would be unusable for them. Required, not just
+   * defaulted: over HTTP, a resolved `stateless` mode (an explicit
+   * `MCP_SESSION_MODE=stateless`) fails startup with a `ConfigurationError`.
+   * stdio is never refused; `MCP_SESSION_MODE` has no effect there.
    */
-  sessionMode: 'stateful',
+  sessionMode: { default: 'stateful', require: 'stateful' },
   teardown: () => obsidian.close(),
 });
 
