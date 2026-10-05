@@ -12,18 +12,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "obsidian-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "npx",
       "version": "3.6.0",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
-      ],
       "environmentVariables": [
         {
           "name": "OBSIDIAN_API_KEY",
@@ -100,19 +90,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "obsidian-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "npx",
       "version": "3.6.0",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "OBSIDIAN_API_KEY",
           "description": "Bearer token for the Obsidian Local REST API plugin (Settings → Community Plugins → Local REST API).",
