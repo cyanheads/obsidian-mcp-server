@@ -1,10 +1,10 @@
 ---
 name: api-context
 description: >
-  Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.enrich`, `ctx.content`), and when to use each.
+  Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.clientCapabilities`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.5"
+  version: "2.11"
   audience: external
   type: reference
 ---
@@ -24,7 +24,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 
 interface Context extends RequestContext {
   // Identity & tracing (inherited from RequestContext — see § RequestContext)
-  readonly requestId: string;       // Unique per request, auto-generated
+  readonly requestId: string;       // Per request; returned on its errors as data.requestId
   readonly timestamp: string;       // ISO 8601 request start time
   readonly tenantId?: string;       // JWT 'tid' claim; 'default' for stdio and HTTP+MCP_AUTH_MODE=none
   readonly sessionId?: string;      // Mcp-Session-Id (HTTP stateful/auto); undefined elsewhere unless opted in
@@ -42,8 +42,12 @@ interface Context extends RequestContext {
   readonly state: ContextState;
 
   // Multi-round-trip input — always present, both eras (see § ctx.requestInput)
-  readonly requestInput: RequestInputFn;   // (spec) => never — suspends and asks the caller
-  readonly inputs: ContextInputs;          // reader over a retried request's responses
+  readonly requestInput: RequestInputFn;   // (spec, options?) => never — suspends and asks the caller
+  readonly inputs: ContextInputs;          // the request's responses, limited to what the client declared
+  // What the client declared: the SDK-parsed `initialize` value (2025 era) or the
+  // request's envelope as sent (2026-07-28); undefined when no view exists
+  // (see § ctx.clientCapabilities)
+  readonly clientCapabilities: ClientCapabilities | undefined;
 
   // List-changed / resource-updated notifications — wired in every handler ctx;
   // delivery is request-scoped (see § list-changed notifications)
@@ -70,8 +74,9 @@ interface Context extends RequestContext {
   // pushes a raw ContentBlock.
   readonly content: ContentCollect;
 
-  // Opt-in contract resolver — always present (returns {} when no contract is attached
-  // or the reason is unknown), strictly typed on HandlerContext<R> against declared reasons.
+  // Contract resolver — always present (returns {} when no contract is attached or the
+  // reason is unknown), strictly typed on HandlerContext<R> against declared reasons.
+  // The framework already sends a declared hint with any failure carrying the reason.
   recoveryFor(reason: string): { recovery: { hint: string } } | {};
 }
 ```
@@ -82,7 +87,7 @@ interface Context extends RequestContext {
 
 | Field | Always present | Source |
 |:------|:--------------|:-------|
-| `requestId` | Yes | Auto-generated UUID per request |
+| `requestId` | Yes | A generated `XXXXX-XXXXX` token, one per call — never the client's JSON-RPC id, which the call's log records carry as `jsonRpcId` instead. Every log record of the call carries it, and the framework returns it on the call's error envelope as `data.requestId`. A 2025-era `ctx.requestInput` round trip re-enters the handler under a new token; the shared `jsonRpcId` ties the entries together |
 | `timestamp` | Yes | ISO 8601, request start |
 | `tenantId` | Stdio and HTTP+`MCP_AUTH_MODE=none` (as `'default'`); JWT `tid` claim in HTTP+`jwt`/`oauth` | JWT / single-tenant default |
 | `sessionId` | HTTP `stateful` / `auto` mode; undefined for stdio and stateless HTTP unless opted in | `Mcp-Session-Id` header (or server-minted) — see [§ `ctx.sessionId`](#ctxsessionid) |
@@ -94,7 +99,7 @@ interface Context extends RequestContext {
 
 ## `RequestContext` — the one canonical request shape
 
-`Context extends RequestContext`. There is a single request-shape type; the handler-facing `Context` adds handler-only surfaces (`log`, `state`, `signal`, `requestInput`, `inputs`, `enrich`, `content`, `uri`) on top of it and redeclares none of the identity fields. A handler's `ctx` is therefore assignable anywhere a `RequestContext` is — services, storage, the framework logger — with no slice helper and no cast.
+`Context extends RequestContext`. There is a single request-shape type; the handler-facing `Context` adds handler-only surfaces (`log`, `state`, `signal`, `requestInput`, `inputs`, `clientCapabilities`, `enrich`, `content`, `uri`) on top of it and redeclares none of the identity fields. A handler's `ctx` is therefore assignable anywhere a `RequestContext` is — services, storage, the framework logger — with no slice helper and no cast.
 
 ```ts
 import { requestContextService, withExtra } from '@cyanheads/mcp-ts-core/utils';
@@ -109,7 +114,7 @@ await fetchUser('123', ctx);   // ctx is a Context — no conversion
 
 `RequestContext` has **no index signature**. Its fields are exactly: `auth`, `extra`, `operation`, `requestId`, `sessionId`, `spanId`, `tenantId`, `timestamp`, `traceId`. A misspelled canonical field (`tenatId`) is a compile error instead of a silently-ignored key.
 
-Operation-specific correlation data goes in **`extra`** — the one deliberate open bag (`Readonly<Record<string, unknown>>`). The logger flattens `extra` into the emitted line, so log output looks the same as a top-level spread.
+Operation-specific correlation data goes in **`extra`** — the one deliberate open bag (`Readonly<Record<string, unknown>>`). The logger flattens `extra` into the emitted line, so log output looks the same as a top-level spread — except that an `extra` key named like a canonical field the context sets never replaces it.
 
 ### Adding correlation data
 
@@ -117,11 +122,11 @@ Three supported ways, most common first:
 
 ```ts
 // 1. Per-log-call metadata — the common case. Nothing lands on the context.
-ctx.log.info('Retrying upstream call', { attempt, url });
+ctx.log.info('Retrying upstream call', { attempt, endpoint: 'search' });
 
 // 2. A copy of this context carrying extra fields. `withExtra` MERGES into any
 //    bag the parent already had; a hand-written `{ ...ctx, extra: {…} }` replaces it.
-logger.warning('Retrying upstream call', withExtra(ctx, { attempt, url }));
+logger.warning('Retrying upstream call', withExtra(ctx, { attempt, endpoint: 'search' }));
 
 // 3. A derived context for a sub-operation. `additionalContext` lands on `extra`,
 //    merged over whatever the parent already carried.
@@ -149,7 +154,7 @@ Never re-open the shape to get past a type error: no index signature, no widenin
 
 Request-scoped structured logger. Every log line is automatically annotated with `requestId`, `traceId`, and `tenantId` — no manual spreading needed.
 
-**Dual-sink.** Each call writes to Pino *and* mirrors onto the MCP wire as a `notifications/message` (the framework advertises the `logging` capability, and the SDK filters by the level the client set via `logging/setLevel`). The wire payload is `{ message, ...data }`; `ctx.log.error` adds `error: <message>`. Delivery is fire-and-forget — a client that never upgraded to SSE, set a higher level, or already disconnected drops the notification, and a failed send never fails the handler. Treat `ctx.log` as client-visible: it is no longer a server-only sink, so don't log anything there you wouldn't put in a tool result.
+**Dual-sink.** Each call writes to Pino *and* mirrors onto the MCP wire as a `notifications/message` (the framework advertises the `logging` capability). One level check gates both sinks: `MCP_LOG_LEVEL` (or a runtime `logger.setLevel()`) is a floor for the client stream as well as the process log, compared on the RFC 5424 order, so a `notice` floor drops `info` from both. The SDK then filters by the client's own level — `logging/setLevel`, or the `io.modelcontextprotocol/logLevel` a 2026-07-28 request carries — which can only narrow the floor, never widen it. The wire payload is `{ message, ...data }` with every sensitive field masked as `[REDACTED]` at any depth: the same field list the logs are redacted with, extensible through `sanitization.setSensitiveFields`, matched as `sanitizeForLogging` matches it — case- and separator-insensitive (`API_KEY` is `apiKey`), and on any one word of a compound name, so `accessToken` (and `tokenCount`) are masked. The caller's `data` object is never modified. `ctx.log.error` adds `error: <message>`. `message` and `error` are reserved wire keys, written after `data`: a `message` in `data` never replaces the log line on the wire, and on `ctx.log.error` with an `Error` the `error` key is always that error's message. The process log line still carries the caller's own fields, except one reusing a canonical name the context already sets (`requestId`, `traceId`, `spanId`, `tenantId`, …) — there the context's value wins, so the line stays correlated to its request. Delivery is fire-and-forget — a client that never upgraded to SSE, set a higher level, or already disconnected drops the notification, and a failed send never fails the handler. Treat `ctx.log` as client-visible: it is no longer a server-only sink, so don't log anything there you wouldn't put in a tool result.
 
 ### Methods
 
@@ -210,7 +215,7 @@ interface ContextState {
 ### Usage
 
 ```ts
-// Store — accepts any serializable value, no manual JSON.stringify needed
+// Store — accepts any JSON-serializable value, no manual JSON.stringify needed
 await ctx.state.set('item/123', { name: 'Widget', count: 42 });
 await ctx.state.set('session/xyz', token, { ttl: 3600 }); // TTL in seconds
 
@@ -236,6 +241,7 @@ if (page.cursor) { /* more pages available */ }
 
 - Throws `McpError(InvalidRequest)` if `tenantId` is missing. Won't happen in stdio (any auth mode) or HTTP+`MCP_AUTH_MODE=none` — both default to `'default'`. Can happen in HTTP+`MCP_AUTH_MODE=jwt`/`oauth` when the token lacks a `tid` claim (intentional fail-closed: distinct authenticated callers must not silently share state).
 - Keys are tenant-prefixed internally; handlers never need to namespace manually.
+- **Values round-trip as JSON** on every provider, `in-memory` included: reads return the JSON form, so a `Date` comes back as its ISO string, a `Map` as `{}`, and a returned object never shares identity with the one written. Validate reads with a schema that matches the stored form (`z.string()` for a date, not `z.date()`). A `bigint`, a cyclic reference, or a top-level `undefined`, function, or symbol throws `McpError(SerializationError)` before anything is written; in `setMany`, one such value rejects the whole batch.
 - **Key charset:** `^[a-zA-Z0-9_.\-/]+$`, 1024 chars max, no `..`. Slashes are the namespace separator — a colon (`item:123`) throws `McpError(ValidationError)` on every call. The rule covers `list` prefixes and every key in a batch operation. `createMockContext().state` enforces it identically, so an illegal key fails in the test rather than in a deployment.
 - **Workers persistence:** The `in-memory` provider loses data on cold starts. Use `cloudflare-kv`, `cloudflare-r2`, or `cloudflare-d1` for durable storage in Workers.
 
@@ -326,7 +332,20 @@ Always present, on every transport and both protocol eras. A handler that needs 
 
 One code path serves both eras. A 2026-07-28 client fulfils the embedded requests and retries the call; for a 2025-era session the SDK's legacy shim fulfils the same returns by issuing real `elicitation/create` / `sampling/createMessage` / `roots/list` round trips and re-entering the handler itself.
 
-**A 2025-era client that declared no matching capability is refused, with an envelope.** URL-mode elicitation needs `elicitation.url`, form-mode needs `elicitation.form` (a bare `elicitation: {}` satisfies it), sampling needs `sampling` — `sampling.tools` when the request carries `tools` / `toolChoice` — and `roots/list` needs `roots`. `ctx.requestInput` runs the check on the result it builds and throws the refusal instead of the signal, so it never reaches the wire and the handler fails where it stands — the execution measurement records it as a failed call, and each family's usual error path shapes it. A tool gets `isError` with `structuredContent.error.code = -32600` (`InvalidRequest`), `data.reason: 'client_capability_missing'`, and a `data.recovery.hint` naming the capability; a resource read gets the same code, reason, and hint through the JSON-RPC error envelope. A prompt's `generate` receives no `ctx`, so it has no `ctx.requestInput` to gate. The check runs on every round, so a handler that elicits first and samples second is gated again on the second. A return carrying only `requestState` asks the client for nothing and is never gated. On the 2026-07-28 leg the SDK owns this check and a violation surfaces as its `MissingRequiredClientCapabilityError` (`-32021`) instead.
+**A 2025-era client that declared no matching capability is refused, with an envelope.** URL-mode elicitation needs `elicitation.url`, form-mode needs `elicitation.form` (a bare `elicitation: {}` satisfies it), sampling needs `sampling` — `sampling.tools` when the request carries `tools` / `toolChoice` — and `roots/list` needs `roots`. `ctx.requestInput` runs the check on the result it builds and throws the refusal instead of the signal, so it never reaches the wire and the handler fails where it stands — the execution measurement records it as a failed call, its `Error in tool:<name>` record logs at `notice` (a property of the client's connection, not a server fault), and each family's usual error path shapes it. A tool gets `isError` with `structuredContent.error.code = -32600` (`InvalidRequest`), `data.reason: 'client_capability_missing'`, and a `data.recovery.hint` naming the capability; a resource read gets the same code, reason, and hint through the JSON-RPC error envelope. A prompt's `generate` receives no `ctx`, so it has no `ctx.requestInput` to gate. The check runs on every round, so a handler that elicits first and samples second is gated again on the second. A return carrying only `requestState` asks the client for nothing and is never gated. On the 2026-07-28 leg the SDK owns this check and a violation surfaces as its `MissingRequiredClientCapabilityError` (`-32021`) instead.
+
+**The refusal's hint ends at reconnecting** — ``Reconnect with a client that declares the `elicitation.form` capability.`` — and offers no other way to supply the answer, because a consent gate deliberately has no input field for it: the model would fill it in. A handler whose own arguments can stand in for the answer says so per call with the optional second argument, a sentence appended to the hint after a space:
+
+```ts
+return ctx.requestInput(
+  { inputRequests: { noun: inputRequired.elicit({ message: 'I need a noun.', requestedSchema: Answer }) } },
+  { fallbackHint: 'Or call again with noun supplied.' },
+);
+```
+
+The option shapes that refusal alone, on a tool call and a resource read alike. A connection that can serve the request never sees it, and the 2026-07-28 leg's `-32021` is untouched.
+
+**Responses of a kind the client never declared never reach `ctx.inputs`, on either era.** The SDK lifts `inputResponses` off every client request — a first call and a 2025-era request included — so a client can arrive pre-answered with nothing having asked. The framework keeps only what the client's declared capabilities cover, at the same mode level the refusal above applies to requests: an elicit result carrying `content` is a form-mode answer and needs `elicitation.form` (a bare `elicitation: {}` counts), while one without — a URL-mode accept, a decline, a cancel — needs `elicitation` in any mode; a sampling result needs `sampling`, and `sampling.tools` when its content holds a `tool_use` or `tool_result` block; a roots result needs `roots`. An entry of no recognizable kind is dropped, and a request with no capability view — a 2025-era request under `MCP_SESSION_MODE=stateless` — carries none. A form gate facing a client without `elicitation.form` — a URL-only client included — therefore asks, and is refused, instead of acting on an answer nobody was shown. Legitimate rounds are untouched: the 2025 shim only issues requests the connection declared, and on 2026-07-28 the SDK refuses an embedded request the envelope does not cover. A client that *did* declare the capability can still pre-answer — which is what the consent record below is for.
 
 **`MCP_SESSION_MODE` decides whether that second leg exists.** Under `stateful` / `auto` the shim has the session it needs. Under `stateless` each 2025-era request is served by a fresh instance that never saw `initialize`, so its client-capability view is empty and the round trip is refused rather than attempted — fail-closed, but the handler never gets its answer. The refusal carries the same envelope, with a message and hint that name the per-request case and point at a stateful session. Ship `stateless` on a server whose destructive tools gate on `ctx.requestInput` and those tools become unusable for v1 HTTP clients. 2026-07-28 clients are unaffected in either mode: that revision has no server→client request channel at all, which is precisely why `input_required` exists. stdio is unaffected in either mode.
 
@@ -340,36 +359,98 @@ Read `ctx.inputs` first, request only what is still missing, and write the call 
 import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
 import { validationError } from '@cyanheads/mcp-ts-core/errors';
 
-const Confirm = z.object({
-  confirm: z.boolean().describe('Whether to proceed with the deletion.'),
-});
+const Format = z.object({ format: z.enum(['json', 'csv']).describe('Export format') });
 
-export const deletePath = tool('delete_path', {
-  description: 'Delete a path after confirming with the user.',
-  input: z.object({ path: z.string().describe('Path to delete') }),
-  output: z.object({ deleted: z.string().describe('The path that was deleted') }),
-  annotations: { destructiveHint: true },
+export const exportReport = tool('export_report', {
+  description: 'Export a report, asking for the format when the caller left it out.',
+  input: z.object({
+    reportId: z.string().describe('Report to export'),
+    format: z.enum(['json', 'csv']).optional().describe('Export format; asked for when omitted'),
+  }),
+  output: z.object({ url: z.string().describe('Download URL') }),
 
   handler(input, ctx) {
     // A declined or cancelled prompt is a dead end, not a round to retry —
     // re-asking loops until the round budget runs out.
-    const view = ctx.inputs.view('confirm');
+    const view = ctx.inputs.view('format');
     if (view.kind === 'elicit' && view.action !== 'accept') {
-      throw validationError(`User ${view.action} the confirmation.`);
+      throw validationError(`User ${view.action} the format prompt.`);
     }
 
-    const answer = ctx.inputs.accepted('confirm', Confirm);
+    const format = input.format ?? ctx.inputs.accepted('format', Format)?.format;
+    if (!format) {
+      return ctx.requestInput(
+        { inputRequests: { format: inputRequired.elicit({ message: 'Which format?', requestedSchema: Format }) } },
+        { fallbackHint: 'Or call again with format supplied.' },
+      );
+    }
+    // `format` is narrowed here.
+    return { url: exportAs(input.reportId, format) };
+  },
+});
+```
+
+`ctx.requestInput` returns `never`, so `return ctx.requestInput(...)` type-checks against any output type. Calling it as a bare statement works at runtime — and is the only option from a service-layer helper — but TypeScript will not narrow across it.
+
+### Consent gates — redeem a server record
+
+A destructive handler cannot take an accepted answer on `ctx.inputs` as proof the user was asked: a client that declared `elicitation` can send `inputResponses` on a call nothing prompted for, and any `requestState` — sealed or not — can be replayed within its lifetime. What proves the round is a record the server wrote when it asked. Store what the prompt confirmed in `ctx.state` under a random id — the operation, the authenticated caller, the target, and a hash of what the target holds — send only that id as `requestState`, and **redeem the record — read it and delete it — before anything else in the handler**. An unknown, used, or expired id, or a record naming another operation, caller, target, or content, is a fresh prompt, never a proceed.
+
+```ts
+import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
+
+const Confirm = z.object({ confirm: z.boolean().describe('Whether to proceed with the deletion.') });
+const Consent = z.object({
+  operation: z.string().describe('Tool the record was minted for'),
+  clientId: z.string().describe('Authenticated client that was asked; empty without auth'),
+  subject: z.string().describe('Authenticated subject that was asked; empty without auth'),
+  target: z.string().describe('Path the user confirmed'),
+  contentHash: z.string().describe('Hash of what the path held when the user confirmed'),
+});
+
+export const deletePath = tool('delete_path', {
+  description: 'Delete a path after the user confirms it.',
+  input: z.object({ path: z.string().describe('Path to delete') }),
+  output: z.object({ deleted: z.string().describe('The path that was deleted') }),
+  annotations: { destructiveHint: true },
+
+  async handler(input, ctx) {
+    // 1. Redeem first: whatever this round carries, the record is spent now.
+    const id = ctx.inputs.state();
+    const record = id && /^[0-9a-f-]{36}$/.test(id) ? await ctx.state.get(`consent/${id}`, Consent) : null;
+    if (record) await ctx.state.delete(`consent/${id}`);
+
+    // 2. What this call would confirm: this operation, for this caller, on this target as it is now.
+    const expected = {
+      operation: 'delete_path',
+      clientId: ctx.auth?.clientId ?? '',
+      subject: ctx.auth?.sub ?? '',
+      target: input.path,
+      contentHash: await hashOf(input.path),
+    };
+    const matches = record !== null && isDeepStrictEqual(record, expected);
+
+    // 3. Only a matching record makes the answer on ctx.inputs mean anything.
+    const view = ctx.inputs.view('confirm');
+    if (matches && view.kind === 'elicit' && view.action !== 'accept') {
+      throw validationError(`User ${view.action} the deletion.`);
+    }
+    const answer = matches ? ctx.inputs.accepted('confirm', Confirm) : undefined;
+
+    // 4. No matching record, or no answer: ask, with a fresh record.
     if (!answer) {
+      const fresh = randomUUID();
+      await ctx.state.set(`consent/${fresh}`, expected, { ttl: 600 });
       return ctx.requestInput({
         inputRequests: {
-          confirm: inputRequired.elicit({
-            message: `Delete ${input.path}?`,
-            requestedSchema: Confirm,
-          }),
+          confirm: inputRequired.elicit({ message: `Delete ${input.path}?`, requestedSchema: Confirm }),
         },
+        requestState: fresh,
       });
     }
-    // `answer` is narrowed here.
     if (!answer.confirm) throw validationError('Deletion not confirmed.');
 
     return { deleted: remove(input.path) };
@@ -377,7 +458,33 @@ export const deletePath = tool('delete_path', {
 });
 ```
 
-`ctx.requestInput` returns `never`, so `return ctx.requestInput(...)` type-checks against any output type. Calling it as a bare statement works at runtime — and is the only option from a service-layer helper — but TypeScript will not narrow across it.
+- **Bind the record to the operation and the caller.** Without `operation`, an id minted by another consent-gated tool — or by a resource read's round, whose `operation` is the `ctx.uri.href` it read — confirms this one. Without `clientId` and `subject`, another user in the same tenant redeems an id they were handed: sealing binds the state to its principal only while `MCP_REQUEST_STATE_KEY` is set, and the record binds the caller either way. `ctx.state` is tenant-scoped already. On stdio and under `MCP_AUTH_MODE=none` both fields are empty — every caller is the same principal there.
+- **Redeeming is single-use against a sequential replay, not against concurrent retries.** `ctx.state` has no atomic read-and-delete, so retries carrying one id at the same moment can each read the record before any delete lands — five concurrent retries on `filesystem` acted five times. Until an atomic `take` exists ([#593](https://github.com/cyanheads/mcp-ts-core/issues/593)), make an action that must not repeat idempotent per record (pass the record id as the upstream idempotency key), or accept that risk knowingly.
+- **The record's storage must be shared by every instance a retry can reach.** A 2026-07-28 retry is a new request — under stateless HTTP, behind a load balancer, or on Workers it can land on another instance, which finds nothing in a process-local `in-memory` store and asks again (safe, but the user never gets through). Use `filesystem`, `supabase`, or `cloudflare-d1` there. Never `cloudflare-kv`: it is eventually consistent, so a retry served elsewhere may not see the record yet, and a replay can outrun the delete, which widens the race above. 2025-era rounds stay inside the process that asked.
+- **Carrying the target in `requestState` and comparing it on re-entry is replayable.** Signing the state proves only that this server once minted it; the same sealed string confirms the same deletion again until it expires. Single-use has to be enforced on the server.
+- **`ctx.clientCapabilities` is never a reason to skip the prompt.** A gate that proceeds when `elicitation` is absent is the bypass the gate exists to prevent; let the `client_capability_missing` refusal (2025 era) or `-32021` (2026-07-28) stand.
+- **Declare `sessionMode: { default: 'stateful', require: 'stateful' }`** when the server also serves 2025-era clients over HTTP — see above.
+
+### `ctx.clientCapabilities` — asking only when the client can answer
+
+The capabilities the client declared for this request: on a 2025-era connection the SDK's parsed `initialize` value, on 2026-07-28 the request's own `io.modelcontextprotocol/clientCapabilities` envelope as sent. `{}` when it declared none; `undefined` when no view exists — a 2025-era request served per-request under `MCP_SESSION_MODE=stateless`. `extensions` carries declared extensions such as `io.modelcontextprotocol/ui`.
+
+The two sources differ in shape. A bare `elicitation: {}` counts as declaring `elicitation.form` either way, but the SDK normalizes it while parsing `initialize`, so on a 2025-era connection it reads back as `{ elicitation: { form: {} } }`, and on 2026-07-28 as `{ elicitation: {} }`. A check for form mode that looks only at `elicitation.form` misses the bare 2026-07-28 declaration.
+
+Use it for **optional** context, where a client that cannot answer should fall through to another source rather than fail the call — which a 2026-07-28 request cannot do otherwise, since its `-32021` is raised after the handler has returned. Read `ctx.inputs` first, so the retry does not ask again:
+
+```ts
+handler(input, ctx) {
+  const roots = ctx.inputs.view('roots');
+  if (roots.kind === 'roots') return fromRoots(roots.roots);
+  if (ctx.clientCapabilities?.roots) {
+    return ctx.requestInput({ inputRequests: { roots: inputRequired.listRoots() } });
+  }
+  return fromLaunchDirectory();   // the next source — no error, nothing sent
+}
+```
+
+Never use it to decide whether to ask for consent (see above).
 
 ### Building the embedded requests
 
@@ -397,28 +504,33 @@ At least one of `inputRequests` or `requestState` must be supplied — the build
 ```ts
 return ctx.requestInput({
   inputRequests: { confirm: inputRequired.elicit({ message, requestedSchema: Confirm }) },
-  requestState: JSON.stringify({ jobId }),
+  requestState: jobId,
 });
 // Next round:
 const state = ctx.inputs.state<string>();
 ```
 
-`requestState` round-trips **through the client** and comes back as attacker-controlled input. Integrity-protect (HMAC/AEAD) anything that influences authorization, resource access, or business logic, and reject state that fails verification — the SDK does not do this for you.
+`requestState` round-trips **through the client**. Keep it an opaque handle — an id for a record in `ctx.state` — rather than the data itself.
 
-### `ctx.inputs` — reading a retried request's responses
+**Set `MCP_REQUEST_STATE_KEY` to seal it.** With the key (≥ 32 bytes) configured, the framework signs the string a handler returns — on tool, resource, and prompt results alike — into the SDK codec's envelope, bound to the request's authenticated `clientId`, `subject`, and `tenantId` and valid for 900 s, and every server instance verifies an echoed state before the handler runs. A forged, tampered, expired, other-principal, or other-key state is answered as `-32602` with `data.reason: 'invalid_request_state'` and never reaches the handler. Handlers change nothing: they still return a plain string, and `ctx.inputs.state()` returns that original string. Every instance a retry can reach — stateless replicas, Worker isolates, a restarted process — needs the same key; there is no per-process random key. Unset, no verifier runs and the handler reads whatever string the client sent. The sealed state is signed, not encrypted: the client can read the payload, so never put a secret in it.
 
-Empty on the first round; populated on re-entry.
+Signed is not single-use: a sealed state still verifies every time it is replayed within 900 s, and it names no operation — a state one tool sealed verifies on a call to another. Anything that must happen once — a consent gate above all — redeems a server record bound to its operation.
+
+### `ctx.inputs` — reading the request's responses
+
+Populated once the client (or the legacy shim) has answered a `ctx.requestInput`, limited to the answers the client's declared capabilities cover — kind and mode, as described above.
 
 | Member | Returns |
 |:---|:---|
 | `accepted(key, schema?)` | The accepted form-mode content for `key`, or `undefined` when the key is missing, the user declined or cancelled, the response was another kind, or (with a schema) validation failed |
 | `view(key)` | Discriminated view of one entry: `{ kind: 'missing' }` \| `{ kind: 'elicit', action, content? }` \| `{ kind: 'sampling', result }` \| `{ kind: 'roots', roots }` |
-| `state<T>()` | This round's `requestState` — verified value, raw wire string when no verifier is configured, or `undefined` on the first round |
+| `state<T>()` | The `requestState` this round carried — the handler's own string, verified and unsealed when `MCP_REQUEST_STATE_KEY` is set, the raw wire string otherwise — or `undefined` when the round carried none |
 | `dropped` | Keys the SDK dropped because the client sent a wrapped rather than a bare response object. Re-issue those requests instead of hard-failing |
-| `responses` | The raw response map, for kinds the helpers don't cover |
+| `responses` | The raw response map, for kinds the helpers don't cover — filtered the same way |
 
-Two rules follow from what the SDK does *not* do:
+Three rules follow from what the SDK does *not* do:
 
+- **A response is client-supplied, even from a capable client.** It can arrive on a call nothing asked, so it proves a prompt was answered only alongside a record the handler redeemed.
 - **Responses are never re-validated against the schema the request advertised.** Pass the schema to `accepted(key, schema)` wherever the content matters, and treat every value as untrusted client input.
 - **`undefined` from `accepted()` collapses five different outcomes into one.** Missing, declined, cancelled, wrong response kind, and schema-invalid are indistinguishable through it. Branch on `view(key)` when decline/cancel needs different handling from "not asked yet" — as above, re-issuing a request the user already declined just burns rounds.
 
@@ -430,6 +542,18 @@ Two rules follow from what the SDK does *not* do:
 const ctx = createMockContext({
   inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
 });
+```
+
+`createMockContext({ clientCapabilities })` seeds `ctx.clientCapabilities` and applies the production filter to the seeded responses; omitted, `ctx.clientCapabilities` is `undefined` and nothing is filtered. Each mock context has its own `ctx.state`, so to drive a consent gate's second round, copy the record its first round stored into the second context before calling the handler. The record carries the caller, so seed the same `auth` (or none) on both:
+
+```ts
+const first = createMockContext();
+const asked = await expectInputRequired(() => deletePath.handler(input, first));
+const record = await first.state.get(`consent/${asked.requestState}`);
+
+const ctx = createMockContext({ inputResponses: accept, requestState: asked.requestState });
+await ctx.state.set(`consent/${asked.requestState}`, record);
+await expect(deletePath.handler(input, ctx)).resolves.toEqual({ deleted: input.path });
 ```
 
 **Convention:** only call `ctx.requestInput` from tool, resource, and prompt handlers — not from services.
@@ -604,12 +728,14 @@ The contract is opt-in. See `framework-skills/api-errors/SKILL.md` for the full 
 
 ## `ctx.recoveryFor`
 
-Always present on `Context`. Resolves the contract `recovery` for a given reason and returns the canonical wire shape `{ recovery: { hint } }`, ready to spread into `data`. The first member of a planned **family of opt-in resolution helpers** (future: `troubleshootingFor`, `userMessageFor`, …).
+Always present on `Context`. Resolves the contract `recovery` for a given reason and returns the canonical wire shape `{ recovery: { hint } }`, ready to spread into `data`.
+
+It is not what puts the hint on the wire. The handler factory fills `data.recovery.hint` from the matching `errors[]` entry for any failure that carries a declared reason and no hint of its own — a bare `ctx.fail('reason')` and a service throw alike — so a static hint needs no call here:
 
 ```ts
 async handler(input, ctx) {
-  // Static recovery — pulled from the contract entry, no string duplication.
-  if (queue.full()) throw ctx.fail('queue_full', undefined, { ...ctx.recoveryFor('queue_full') });
+  // Static recovery — the framework fills the contract's hint onto the wire.
+  if (queue.full()) throw ctx.fail('queue_full');
 
   // Dynamic recovery — interpolate runtime context, override the contract default.
   if (!matched) throw ctx.fail('no_match', `No items for "${input.query}"`, {
@@ -617,6 +743,8 @@ async handler(input, ctx) {
   });
 }
 ```
+
+Reach for `ctx.recoveryFor` when the hint has to ride the thrown error itself — a test asserting `data.recovery` on the handler's own throw — or when a site deliberately sends another entry's guidance.
 
 ### Signature
 
@@ -636,13 +764,11 @@ ctx.recoveryFor(reason: R): { recovery: { hint: string } }
 | Unknown reason | Returns `{}` (TS prevents this for typed callers; runtime is loose for JS / stale contracts). |
 | Declared reason | Returns `{ recovery: { hint: <contract.recovery> } }` — spread into `data`. |
 | Override | Caller can override by spreading `recoveryFor` first then writing `recovery: { hint: '...' }` after — last write wins. |
-| Service usage | Services that accept `ctx: Context` can spread `ctx.recoveryFor('reason')` directly; the no-op fallback means they don't need to know which tool called them. |
+| Service usage | A service throwing a factory error with `data: { reason }` gets the declared hint from the framework's fill; it needs no `ctx` for it. |
 
-### Why opt-in resolution, not auto-population
+### The wire hint follows the reason
 
-The framework never injects `data.recovery.hint` without an explicit signal at the throw site. Authors opt in by typing `ctx.recoveryFor('reason')` — the same way `ctx.fail('reason')` opts into resolving the contract `code`. The contract is the single source of truth for the recovery hint; the resolver is a typed lookup keyed by the same reason the author already typed. No magic, no hidden transformation.
-
-The `≥5 words` lint rule on contract `recovery` (validated at lint time) makes this load-bearing — every `ctx.recoveryFor` call site benefits from the thoughtfulness the contract enforced.
+The contract is the single source of truth for the recovery hint, and the framework applies it where the failure leaves the handler: in the tool and resource factories, before the failure is logged and the envelope built, matched on `data.reason` alone. A throw-site `recovery` of any shape wins. The thrown `McpError` is never changed, so a handler-level test sees exactly what the throw site wrote; `runToolContract` applies the same fill, so a contract test sees the production envelope. The `≥5 words` lint rule on contract `recovery` is what makes the default worth sending.
 
 ---
 
@@ -712,9 +838,11 @@ For tools that cap a list (i.e. have a `limit`/`per_page`/`page_size`/`max_resul
 
 ```ts
 enrichment: {
-  truncated: z.boolean().describe('True when the list was capped.'),
-  shown: z.number().describe('Number of items returned.'),
-  cap: z.number().describe('The limit that was applied.'),
+  // Optional: truncated() writes these only when the cap is hit, and a required
+  // enrichment field left unset fails the effective-output parse on every complete result.
+  truncated: z.boolean().optional().describe('True when the list was capped.'),
+  shown: z.number().optional().describe('Number of items returned.'),
+  cap: z.number().optional().describe('The limit that was applied.'),
   truncationCeiling: z.number().optional().describe('Upper bound for omitted items (threshold bound).'),
 },
 async handler(input, ctx) {
@@ -809,8 +937,9 @@ Test content blocks with `getContentBlocks(ctx)` from `@cyanheads/mcp-ts-core/te
 | `ctx.signal` | `AbortSignal` | Always |
 | `ctx.enrich` | `Enrich` | Always; typed on `HandlerContext<R, E>` when an `enrichment` block is declared |
 | `ctx.content` | `ContentCollect` | Always — prepends image/audio blocks to `content[]`, never `structuredContent` |
-| `ctx.requestInput` | `(spec) => never` | Always — suspends the handler and asks the caller for more input |
-| `ctx.inputs` | `ContextInputs` | Always; empty until the request is retried with responses |
+| `ctx.requestInput` | `(spec, options?) => never` | Always — suspends the handler and asks the caller for more input; `options.fallbackHint` extends a 2025-era capability refusal's hint |
+| `ctx.inputs` | `ContextInputs` | Always; carries only the answers the client's declared capabilities cover (kind and mode), none when no capability view exists |
+| `ctx.clientCapabilities` | `ClientCapabilities \| undefined` | Always as a key; `{}` when the client declared none, `undefined` when no view exists (2025-era stateless HTTP) |
 | `ctx.notifyResourceListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped (see [§ list-changed notifications](#list-changed-notifications-ctxnotify)) |
 | `ctx.notifyResourceUpdated` | `function \| undefined` | Always in handler ctx; limited to URIs the client subscribed to, through the listen filter (2026) or the subscribe registry (2025) |
 | `ctx.notifyPromptListChanged` | `function \| undefined` | Always in handler ctx; delivery request-scoped |

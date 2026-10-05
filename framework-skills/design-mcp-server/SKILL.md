@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.28"
+  version: "2.31"
   audience: external
   type: workflow
 ---
@@ -26,6 +26,7 @@ Gather before designing. Ask the user if not obvious from context:
 2. **Data sources / source of truth** — APIs, databases, file systems, external services? Or is the server itself the source (in-memory state, pure computation, local-only utility, embedded model)?
 3. **Target users** — what will the LLM (and its human) be trying to accomplish?
 4. **Scope constraints** — read-only? write access? admin operations? what's off-limits?
+5. **Deployment** — local stdio, hosted HTTP, Cloudflare Workers? The answer gates primitives: DataCanvas and `MirrorService` don't run on Workers, and a tool that asks the caller for input mid-call needs a stateful HTTP session (see the Client round-trip row in Step 3).
 
 If the domain has a public API, read its docs before designing. For internal-only servers, skip API research and go straight to user goals. Don't design from vibes either way.
 
@@ -63,6 +64,7 @@ Research inline by default — fetch docs, read SDK readmes, confirm assumptions
 - Fetch API docs, confirm endpoint availability, auth methods, rate limits
 - Check for official SDKs or client libraries (npm packages)
 - Note any API quirks, pagination patterns, or data format considerations
+- Read the terms of use: whether storing, caching, or redistributing the data is permitted, whether AI or LLM use is, and what attribution the data carries. Note the credential model too — keyless, one operator key, or a key each user supplies. The terms decide whether the server can be hosted for others at all, whether a local mirror is allowed, and what the server instructions must credit.
 
 When research is genuinely parallelizable (multiple independent APIs, several SDKs to evaluate), spawn background agents for the independent legs while you proceed with domain mapping. Skip the overhead for a single API — just read it yourself.
 
@@ -75,10 +77,13 @@ When research is genuinely parallelizable (multiple independent APIs, several SD
 - **Error shapes** — trigger real 400/404/429 responses to see the actual error format, not just what docs claim.
 - **Unknown-param behavior** — send one deliberately misspelled parameter. If the API silently ignores it (plausible but unfiltered results instead of an error), every typo'd or unverified param name becomes a silent-wrongness bug — the service layer then needs a strict allowlist of confirmed spellings, and new filters require a probe before they ship.
 - **Omission semantics** — for each major optional parameter, check what omitting it actually returns. Some APIs default to the intuitive scope; others silently widen (all historical versions, all statuses, global instead of regional). A default that changes result *meaning* becomes a server-side default plus an echoed output field, not something left to the agent.
+- **Branch frequency, for bundled or bulk data** — when the "API" is a dataset the server ships, probe not only whether each record shape exists but what *fraction* of records takes it: count the records where an optional field is absent, where a value is an array instead of a scalar, where an id maps to many keys rather than one, where a status is missing. A shape found in 0.1% of records is an edge case to handle; one found in 70% is the main path, and a design that specifies only the scalar case leaves the implementer to invent the common one.
 
 **Stopping condition:** at minimum, probe one list/search endpoint, one single-item GET, one error case (force a 404 or 400), and one unknown-param request. For large APIs with many resource types, add one probe per major noun. Stop when the response shapes and error envelope are confirmed.
 
 This step prevents building a service layer against assumed response shapes that don't match reality.
+
+Probe with real data; write the design with made-up data. Every example value that reaches `docs/design.md` — names, emails, phone numbers, hosts, IP addresses, identifiers tied to a person — is synthetic, and no key, token, or private hostname appears in it. The doc is tracked, and git history keeps whatever its first commit carried.
 
 ### 2. Map User Goals, Then Domain Operations
 
@@ -111,7 +116,7 @@ The user-goal list shapes the tool surface; the operation list fills in the gaps
 | **App Tool** | **Rare — default to a standard tool.** Only when a human will actively interact with the result in real time *and* the target client supports MCP Apps. Most clients are tool-only and most agent workflows are read-by-LLM, not viewed-by-human. App tools add an iframe + CSP, `app.ontoolresult`/`callServerTool` plumbing, host-context wiring, and a `format()` text twin that still has to be content-complete (since most clients only see that). Two surfaces to keep in sync, two failure modes per change. | Dense tabular state a human scrubs through; form-based human approval in an MCP Apps-capable client |
 | **Resource** | *Additionally* expose as a resource when the data is addressable by stable URI, read-only, and useful as injectable context. | Config, schemas, status, entity-by-ID lookups |
 | **Prompt** | Reusable message template that structures how the LLM approaches a task | Analysis framework, report template, review checklist |
-| **Client round-trip** | Not a registered primitive — a handler *returns* `ctx.requestInput(...)` to ask the client for what only it has, and is re-entered with the answer: a confirmation or form (`inputRequired.elicit`), an authorization or hosted-form URL (`inputRequired.elicitUrl`), the client model's judgment (`inputRequired.createMessage` — borrow the caller's model rather than bundling one), filesystem roots (`inputRequired.listRoots`). Design it into the tool that needs it; see Workflow tool safety and `api-context`. | Destructive-arm confirmation, OAuth consent, summarize-with-the-client's-model |
+| **Client round-trip** | Not a registered primitive — a handler *returns* `ctx.requestInput(...)` to ask the client for what only it has, and is re-entered with the answer: a confirmation or form (`inputRequired.elicit`), an authorization or hosted-form URL (`inputRequired.elicitUrl`), the client model's judgment (`inputRequired.createMessage` — borrow the caller's model rather than bundling one), filesystem roots (`inputRequired.listRoots`). Design it into the tool that needs it; see Workflow tool safety and `api-context`. A server with any such tool declares `createApp({ sessionMode: { default: 'stateful', require: 'stateful' } })` — under stateless HTTP a 2025-era client's round trip is refused, so the tool is unusable rather than guarded. | Destructive-arm confirmation, OAuth consent, summarize-with-the-client's-model |
 | **Neither** | Internal detail, admin-only, not useful to an LLM | Token refresh, webhook setup, migrations |
 
 What the tool surface needs to cover depends on the server: a read-only research server has different economics than a CRUD project management server. Consider the domain, the expected agent workflows, whether it wraps one API or many, and what data relationships exist.
@@ -132,7 +137,7 @@ This is the highest-leverage step. Tool definitions — names, descriptions, par
 
 #### Tool shapes you'll encounter
 
-Most tools follow the `{server}_{verb}_{noun}` default — one focused responsibility, one clear verb, often (but not always) one upstream call. API-wrapping examples: `pubmed_search_articles`, `pubmed_fetch_articles`. Internal-only examples: `markdown_format_text`, `regex_test_pattern`, `tokens_count_text` — same naming convention, no external dep. Two variants warrant explicit design pressures of their own:
+Most tools follow the `{server}_{verb}_{noun}` default — one focused responsibility, one clear verb, often (but not always) one upstream call. API-wrapping examples: `pubmed_search_articles`, `pubmed_fetch_articles`. Internal-only examples: `markdown_format_text`, `regex_test_pattern`, `tokens_count_text` — same naming convention, no external dep. Three variants warrant explicit design pressures of their own:
 
 | Shape | Purpose | Typical form | Examples |
 |:------|:--------|:-------------|:---------|
@@ -168,24 +173,29 @@ Two patterns:
 
 **Source fallback chains** — try sources in priority order, fall through on failure or empty results. Best when sources cover the *same corpus* with different depth or availability. The output should indicate which source provided the data so the agent (and human) can assess provenance. When the fallback changes what is being searched — a different corpus, different identifiers, different licensing — don't chain: expose the second source as a sibling tool so the agent chooses the corpus knowingly (the shipped `pubmed-mcp-server` keeps `pubmed_europepmc_search` separate for exactly this reason).
 
-**Multi-source fan-out** — query multiple sources in parallel, merge results. Best when sources provide complementary data about the same entity. Use `Promise.allSettled` so one failing source doesn't tank the whole call.
+**Multi-source fan-out** — query multiple sources in parallel, merge results. Best when sources provide complementary data about the same entity. Use `Promise.allSettled` so one *unavailable* source doesn't tank the whole call — but a rejected input is wrong for every source. Rethrow an input-class rejection (`ValidationError`, `InvalidParams`) from any source instead of folding it into a per-source failure: a source that ignores the bad value would otherwise answer for it, and the agent reads a caller mistake as an outage to retry.
 
 ```ts
 // Handler pseudocode — indicator enrichment across threat intel sources
 async handler(input, ctx) {
-  const [vt, abuse, greynoise] = await Promise.allSettled([
+  const settled = await Promise.allSettled([
     vtService.lookup(input.indicator),
     abuseIpService.check(input.indicator),
     greynoiseService.query(input.indicator),
   ]);
+  for (const r of settled) {
+    if (r.status === 'rejected' && isInputError(r.reason)) throw r.reason; // the caller's mistake, not an outage
+  }
+  const [vt, abuse, greynoise] = settled;
   return {
     indicator: input.indicator,
     sources: {
-      virustotal: vt.status === 'fulfilled' ? vt.value : { error: vt.reason.message },
-      abuseipdb: abuse.status === 'fulfilled' ? abuse.value : { error: abuse.reason.message },
-      greynoise: greynoise.status === 'fulfilled' ? greynoise.value : { error: greynoise.reason.message },
+      // { status: 'ok', data } | { status: 'unavailable', error } — provenance per source
+      virustotal: toSourceResult(vt),
+      abuseipdb: toSourceResult(abuse),
+      greynoise: toSourceResult(greynoise),
     },
-    // Server synthesizes a verdict from available data — the agent gets a conclusion, not raw API dumps
+    // Server synthesizes a verdict from the sources that answered — the agent gets a conclusion, not raw API dumps
     assessment: synthesizeVerdict(vt, abuse, greynoise),
   };
 }
@@ -222,18 +232,22 @@ const wrapupInstructions = tool('git_wrapup_instructions', {
   output: z.object({
     guidance: z.string()
       .describe('Markdown playbook content, tailored to current account state.'),
-    diagnostics: z.record(z.unknown())
+    diagnostics: z.record(z.string(), z.unknown())
       .describe('Live state used to tailor the guidance (e.g., staged file count, branch divergence, recent commit cadence).'),
     nextToolSuggestions: z.array(z.object({
       toolName: z.string().describe('Tool to call next.'),
       reason: z.string().describe('Why this step is recommended given current state.'),
-      args: z.record(z.unknown()).describe('Arguments pre-filled from diagnostics.'),
+      args: z.record(z.string(), z.unknown()).describe('Arguments pre-filled from diagnostics; {} when the tool takes none.'),
     })).describe('Recommended follow-up calls with arguments already populated.'),
   }),
 });
 ```
 
 Prior art: [`git_wrapup_instructions`](https://github.com/cyanheads/git-mcp-server) walks through staging, commit, and push with repo state inspected. If a server has recurring "how do I do X well given my state" questions, an instruction tool typically beats N topic-specific tools and duplicating guidance in tool descriptions.
+
+**One suggestion shape, every server.** Each entry is exactly `{ toolName, reason, args }` — no per-server renames (`tool`, `rationale`, `suggestedArgs`, `arguments`), which force every client to special-case every server. `args` is always present (`{}` for a tool that takes none), and the array is always present, empty when nothing is worth suggesting. A tool on another server is never an entry: this server cannot know it is installed, so name it in the `guidance` prose instead.
+
+**Data tools qualify on the same terms.** A data tool carries `nextToolSuggestions` when the right next call depends on its own result and the arguments come from that result — a status sweep that finds a degraded vendor, a connect call that learns which services the upstream supports. A fixed chain (search → get by the returned ID) does not: the IDs in the result and the server instructions already carry it, and a suggestion on every call is token noise.
 
 **Suggestions are scoped to what this deployment registers.** A `nextToolSuggestions` entry is an executable call, so it is only correct when its target is enabled under the same configuration — a tool wrapped in `disabledTool()` is absent from `tools/list`, and a suggestion naming it hands the agent a call that fails on dispatch. Build the array from the same config the registration reads, and when the target is off, drop the entry rather than the explanation: `guidance` can still say the capability is unavailable in this deployment and what to do instead. The audit and a worked example live under *Feature-flagged tools* in `add-tool/SKILL.md`.
 
@@ -249,9 +263,9 @@ A reference tool is the surface's decoder ring: which codes exist, what they mea
 
 Tools that perform multi-step mutations (the Workflow shape) have two safety considerations beyond single-call tools. Both are about giving the agent — and the human behind it — a chance to catch a bad invocation before it commits.
 
-**Confirmation-gated destructive modes, with an annotation fallback.** When a workflow's `mode` parameter switches between safe and destructive arms (`draft` vs `send`, `plan` vs `apply`), gate the destructive arm on a confirmation the handler asks for via `ctx.requestInput(...)`, so a human approves before the irreversible step fires. The handler is re-entered with the answer on `ctx.inputs`; it does not `await` mid-call.
+**Confirmation-gated destructive modes, with an annotation fallback.** When a workflow's `mode` parameter switches between safe and destructive arms (`draft` vs `send`, `plan` vs `apply`), gate the destructive arm on a confirmation the handler asks for via `ctx.requestInput(...)`, so a human approves before the irreversible step fires. The handler is re-entered with the answer on `ctx.inputs`; it does not `await` mid-call. The answer alone does not prove the prompt was shown — a client can send one unasked, and any `requestState` replays within its lifetime — so the gate stores the operation, the caller, the confirmed target, and a hash of what it holds in a `ctx.state` record keyed by a random id, sends only that id as `requestState`, and redeems the record before the destructive arm runs (`api-context` § *Consent gates*). Plan shared storage for that record when a 2026-07-28 retry can reach another instance (`filesystem`, `supabase`, or `cloudflare-d1` — not `cloudflare-kv`), and set `MCP_REQUEST_STATE_KEY` so a retry can only carry state the server minted. Redeeming is not atomic — concurrent retries on one id can each pass the gate until `ctx.state` gains an atomic `take` ([#593](https://github.com/cyanheads/mcp-ts-core/issues/593)) — so an arm that must not run twice is idempotent per record.
 
-The gate is always *reachable* — `ctx.requestInput` is present on every transport and both protocol revisions (2025-11-25 legacy, 2026-07-28 current) — but it is not always *answerable*: a client that never fulfils the `input_required` result simply doesn't retry, and the destructive step never runs. The same holds for a 2025-11-25 HTTP client when the server runs `MCP_SESSION_MODE=stateless`: the legacy round-trip shim still runs, but its capability gate refuses because the serving instance never processed `initialize` — the destructive step never fires. That is the safe outcome, but it makes the tool unusable for those clients, so a server built around such a gate declares `createApp({ sessionMode: { default: 'stateful', require: 'stateful' } })` and refuses to start stateless rather than degrading (`api-context` § `ctx.requestInput`). Keep `destructiveHint: true` in annotations so those clients' own approval flows still surface the risk. A decline is terminal — the handler fails the call rather than re-asking, which would loop until the round budget runs out. The handler shape is in `api-context` § *The shape of a multi-round-trip handler*.
+The gate is always *reachable* — `ctx.requestInput` is present on every transport and both protocol revisions (2025-11-25 legacy, 2026-07-28 current) — but it is not always *answerable*: a client that never fulfils the `input_required` result simply doesn't retry, and — with the record pattern, which proceeds only on a record it redeemed — the destructive step never runs. The same holds for a 2025-11-25 HTTP client when the server runs `MCP_SESSION_MODE=stateless`: the legacy round-trip shim still runs, but its capability gate refuses because the serving instance never processed `initialize` — the destructive step never fires. That is the safe outcome, but it makes the tool unusable for those clients, so a server built around such a gate declares `createApp({ sessionMode: { default: 'stateful', require: 'stateful' } })` and refuses to start stateless rather than degrading (`api-context` § `ctx.requestInput`). Keep `destructiveHint: true` in annotations so those clients' own approval flows still surface the risk. A decline is terminal — the handler fails the call rather than re-asking, which would loop until the round budget runs out. `ctx.clientCapabilities` never decides whether to ask: a gate that skips its prompt when `elicitation` is undeclared is the bypass the gate exists to prevent.
 
 **Safe defaults on parameters that determine blast radius.** When a workflow accepts a parameter that controls how far-reaching a mutation is, default to the safer value. A bulk file-update tool defaulting `mode: 'preview'` (no writes) means a sloppy agent call shows a diff rather than blasting changes; an apply-plan tool defaulting `dryRun: true` means a misread plan previews rather than executes; an object-delete tool requiring an explicit `confirmCount` matching the result-set size means an unscoped query can't silently nuke a million rows. Agents that genuinely want the destructive behavior have to name it explicitly, which surfaces intent in the tool call and in logs.
 
@@ -287,7 +301,8 @@ Descriptions should be as long as needed — concise but complete. Don't artific
 Every `.describe()` is prompt text the LLM reads. Parameters should convey: what the value is, what it affects, and (where non-obvious) how to use it well.
 
 - **Constrain the type.** Enums and literals over free strings. Regex validation for formatted IDs. Ranges for numeric bounds.
-- **The input root is already strict.** `tool()` applies `.strict()` at the root and advertises `additionalProperties: false`, so an unknown top-level key is rejected by name instead of silently stripped; nested objects still strip unless made strict themselves. Declare `.passthrough()` only on a tool that deliberately proxies arbitrary upstream parameters (a raw-query tool), and say so in its description.
+- **The input root is already strict.** `tool()` applies `.strict()` at the root and advertises `additionalProperties: false`, so an unknown top-level key is rejected by name instead of silently stripped; nested objects still strip unless made strict themselves. Open the root with `.passthrough()` (Zod 4 also spells it `.loose()`; `tool()` honors either) only on a tool that deliberately proxies arbitrary upstream parameters (a raw-query tool), and say so in its description.
+- **A blank optional string is unset.** Form-based clients send every optional field they display as `""`. Treat the blank as omitted — left off the upstream request, never forwarded as `param=`, which some APIs read differently from omission — and never design a `.min(1)` onto an optional field to catch it. `add-tool` has the schema pattern that keeps a validator on the field.
 - **Use JSON-Schema-serializable types only.** The MCP SDK serializes schemas to JSON Schema for `tools/list`. Types like `z.custom()`, `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()` throw at runtime. Use structural equivalents (e.g., `z.string().describe('ISO 8601 date')` instead of `z.date()`).
 - **Explain costs and tradeoffs** when a parameter choice has meaningful consequences.
 - **Name alternative approaches** when a simpler path exists.
@@ -317,7 +332,7 @@ nctIds: z.union([z.string(), z.array(z.string()).max(5)])
 | Delimiter-joined list where an array is accepted | `"US,JP,KR"` → `["US","JP","KR"]` | Split on the documented separator |
 | Spelled-out vs. abbreviated name | `"Houston, Texas"` → `"Houston, TX"` | Normalize against the bundled name table |
 
-These are **value**-level, and the mappings are domain knowledge — settle them per input in the design doc's param table. Argument **key** names are not: the framework drops client-added root keys and rewrites declared and case-style key aliases before the schema sees the arguments, and repairs a JSON-stringified array against the tool's own schema after a failed parse. Don't re-implement any of that per server — see `add-tool` § *Three things the framework fixes before the schema sees the arguments*.
+These are **value**-level, and the mappings are domain knowledge — settle them per input in the design doc's param table. Argument **key** names are not: the framework rewrites declared and case-style key aliases and drops client-added root keys before the schema sees the arguments, and repairs a JSON-stringified array or object, or an integer sent for a string, against the tool's own schema after a failed parse — so an ID field stays `z.string()`, never a `string | number` union. Don't re-implement any of that per server — see `add-tool` § *Three things the framework fixes before the schema sees the arguments*.
 
 This resolves one submitted value to one canonical value, and does not loosen the strict token match in [MCP-side list filtering](#mcp-side-list-filtering), which scores a query against many candidate names.
 
@@ -331,6 +346,7 @@ The output schema and `format` function control what the LLM reads back. Design 
 - **Include IDs and references for chaining.** If the agent might act on a result, return the identifiers it needs for follow-up tool calls.
 - **Curate vs. pass-through depends on domain.** Medical/scientific data — don't trim fields that could alter correctness. CRUD responses — return what the agent needs, not the full API payload. Match fidelity to consequence.
 - **Absent upstream data stays absent.** Sparse APIs omit fields; declare those output fields `.optional()` and render "Not available" in `format()` rather than coercing to `false`, `0`, or `""` — a fabricated value is worse than a gap.
+- **Third-party text is data, and `format()` marks it.** When a field carries text other people wrote — posts, reviews, bios, comments, summaries, a user-named place or project — list those fields in the design and plan how `format()` sets them apart: a blockquote or fence for free text, and CR/LF flattened to a space wherever a value is interpolated inline (a heading, a bolded name, a `matched on "…"` line), so a newline in the value can't forge structure in `content[]`. `structuredContent` keeps the value verbatim. Say in the server instructions that this content is data, never instructions; `security-pass` audits the result.
 - **Image and audio bytes ride `ctx.content`, never `output`.** `ctx.content.image(data, mimeType)` / `.audio(...)` emit a `content[]` block once; `output` keeps the metadata the agent reasons over (dimensions, duration, a reference). Base64 in a typed output field ships the bytes twice.
 - **Surface what was done, not just results.** After a write operation, include the post-state so the LLM can chain without an extra round trip.
 - **When the effect lands after the call, wait for it by default.** Some actions are fire-and-forget at the wire — send a wake packet, trigger a job, dispatch a notification, provision a resource — and their immediate result ("sent", "queued", "accepted") answers nothing the agent asked; the agent wants to know whether the machine is up, the job ran, the resource exists. Design the tool to confirm: pre-probe the observable state (cheap; if it is already in the target state, skip the action and say so), act, then poll with early return until the state is observed or a bounded window elapses. Express the window as **one numeric parameter with a default** (`wait_for_s: 30`), where `0` means act and return — not a boolean plus a timeout, which is two parameters for one decision and an awkward default. Every terminal outcome is a *result*, never a throw: `already_<state>`, `<state>` (with elapsed time), `not_<state>` within the window (with `guidance` naming the read-only check tool to re-poll), and `unverified` (window `0`, or nothing to probe). Size the default to cover the common cases while staying inside client tool timeouts, and pair the action with a read-only sibling that probes the same state so an agent can re-check without re-acting.
@@ -341,7 +357,7 @@ The output schema and `format` function control what the LLM reads back. Design 
 - **Continuation is a designed field.** Truncation says the cap was hit; continuation says how to get the rest. Return an opaque `cursor` plus `has_more` (via `extractCursor`/`paginateArray` for local sets), and never invent page numbers over a cursor-based upstream — a page the agent can't ask for is a page it will never see.
 - **Spill big *analytical* results to a queryable surface.** When a tool's row set is something an agent would run SQL over *and* can exceed any reasonable context budget — paginated APIs, streamed exports, big query results — pair an inline preview with a `DataCanvas` table holding the full set (`spillover()` in `api-canvas`), and compute distributions or refinement hints across the full result, not the preview, so aggregate signal stays honest. The gates on when a canvas earns its keep are in Step 7.
 - **Outline one large *document* into sections.** When a single tool call returns one document-shaped record (not many rows) that can exceed context — a ~130KB FDA drug label, a big API entity dominated by a few fat fields — return a section *outline* (top-level keys + per-section byte size) instead of truncating, and let the agent re-call with `sections: [...]` to pull only what it needs. `outlineOnOverflow()` (`@cyanheads/mcp-ts-core/utils`) returns a `full | outline` result; pure measure + key-slice, so Cloudflare Workers-portable, unlike canvas-bound `spillover()`. Distinct from spillover on *shape*: spillover splits a row collection, this outlines one fat record. Schema shape and `format()` parity are in the `techniques` skill's `outline-on-overflow` reference.
-- **Mirror a bulk upstream instead of paginating it live.** When the server wraps a large or slow API whose corpus is queried far more than it changes, sync it once into a persistent local index and query that as the primary data path — not the live API per request. Match the backend to corpus size: below ~10⁴ rows → an in-memory index (server-level, no primitive); ~10⁴–10⁷ → the `MirrorService` (embedded SQLite + FTS5; declare a schema + a `sync` ingester via `defineMirror`/`sqliteMirrorStore`, then `runSync`/`query`, see `api-mirror`); above ~10⁷ → an external store. Distinct lifecycle from DataCanvas: a mirror is long-lived and cross-session, refreshed on a schedule; canvas is ephemeral and per-session.
+- **Mirror a bulk upstream instead of paginating it live.** When the server wraps a large or slow API whose corpus is queried far more than it changes, sync it once into a persistent local index and query that as the primary data path — not the live API per request. Two gates come first. The upstream's terms must permit storing the data (Step 1), and a local index must reproduce what the upstream's *search* returns: an API that ranks server-side — field weighting, synonym or ontology expansion — can't be mirrored for search, because the local index answers the same query with different rows and nothing flags it. Exact-key lookups and structured filters mirror faithfully; for rate-limit relief on a ranked-search API, cache responses per request with a short TTL instead. Match the backend to corpus size: below ~10⁴ rows → an in-memory index (server-level, no primitive); ~10⁴–10⁷ → the `MirrorService` (embedded SQLite + FTS5; declare a schema + a `sync` ingester via `defineMirror`/`sqliteMirrorStore`, then `runSync`/`query`, see `api-mirror`); above ~10⁷ → an external store. Distinct lifecycle from DataCanvas: a mirror is long-lived and cross-session, refreshed on a schedule; canvas is ephemeral and per-session.
 - **Two client surfaces, both content-complete.** Different MCP clients forward different surfaces to the model: some (e.g., Claude Code) read `structuredContent` from `output`, others (e.g., Claude Desktop) read `content[]` from `format()`. `format()` is the markdown twin of `structuredContent`, not a summary — a thin `format()` that returns only a count or title leaves `content[]`-only clients blind (the `format-parity` lint catches this). Agent-facing context that is *not* domain payload — empty-result notices, the query as the server parsed it, echoed defaults, totals — goes in the `enrichment` block via `ctx.enrich(...)`, which reaches both surfaces automatically; hand-authored into `format()` text alone it reaches only one. Field-by-field rendering of that block is in the Design table's Enrichment row.
 
 #### Batch input design
@@ -382,7 +398,7 @@ When a tool wraps a complex query language or filter system, provide a simple sh
 // text_search handles the common case; query handles everything else
 text_search: z.string().optional()
   .describe('Convenience shortcut: full-text search across title and abstract. For structured filters or field-specific matching, use the query parameter instead.'),
-query: z.record(z.unknown()).optional()
+query: z.record(z.string(), z.unknown()).optional()
   .describe('Full query object for structured filters. Supports operators: _eq, _gt, _and, _or, ...'),
 ```
 
@@ -407,18 +423,20 @@ Two params, two behaviors — keep them named distinctly:
 
 Errors are part of the tool's interface — design them during the design phase, not as an afterthought. Three aspects: **the contract** (which failures are public), **classification** (what error code), and **messaging** (what the LLM reads).
 
-**Declare a typed contract for domain failures.** When a tool has known failure modes the agent should plan around (`no_match`, `queue_full`, `vendor_down`), enumerate them as `errors: [{ reason, code, when, recovery, retryable? }]` on the definition. `recovery` is required metadata — the agent's next move when this failure fires (≥ 5 words, lint-validated; spread `ctx.recoveryFor('reason')` into the throw-site `data` to send it on the wire as `data.recovery.hint`). The framework types `ctx.fail(reason, …)` against the declared reason union (typos become TS errors) and auto-populates `data.reason` on the thrown error for stable observability. The error reaches clients with parity across both surfaces — `structuredContent.error` (Claude Code) and `content[]` text (Claude Desktop). Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble from anywhere and don't need to be enumerated. See `api-errors` skill for the full pattern.
+**Declare a typed contract for domain failures.** When a tool has known failure modes the agent should plan around (`no_match`, `queue_full`, `vendor_down`), enumerate them as `errors: [{ reason, code, when, recovery, retryable? }]` on the definition. `recovery` is required metadata — the agent's next move when this failure fires (≥ 5 words, lint-validated; the framework sends it on the wire as `data.recovery.hint` with any failure carrying that reason and no hint of its own). The framework types `ctx.fail(reason, …)` against the declared reason union (typos become TS errors) and auto-populates `data.reason` on the thrown error for stable observability. The error reaches clients with parity across both surfaces — `structuredContent.error` (Claude Code) and `content[]` text (Claude Desktop). Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble from anywhere and don't need to be enumerated. Mark an entry the service layer throws, rather than the handler, with `thrownBy: 'service'` so the conformance lint doesn't report it as a reason the handler never raises. See `api-errors` skill for the full pattern.
 
 **Classify errors by origin.** Different error sources need different codes and different recovery guidance. Map the failure modes for each tool during design:
 
 | Origin | Examples | Error code | Agent can recover? |
 |:-------|:---------|:-----------|:-------------------|
 | **Client input** | Bad ID format, invalid params, missing required field, out-of-range value | `ValidationError` | Yes — fix the input and retry |
-| **Upstream API** | 5xx, timeout, network error | `ServiceUnavailable` | Maybe — retry later, or the upstream is down |
+| **Upstream API** | 5xx, network error | `ServiceUnavailable` | Maybe — retry later, or the upstream is down |
+| **Timeout** | Upstream 408/504, a fetch that ran out its timeout, an exhausted retry deadline | `Timeout` | Maybe — retry, or narrow the request so it finishes sooner |
 | **Rate limit** | 429, quota exhausted, queue full | `RateLimited` (`retryable: true`; `withRetry` honors `Retry-After`) | Yes — wait, then retry or reduce frequency |
 | **Not found** | Valid ID format but entity doesn't exist | `NotFound` (or `ValidationError` if ambiguous) | Yes — check the ID, try a search |
 | **Conflict** | Duplicate key, version mismatch, concurrent modification on a write | `Conflict` | Yes — re-read current state, then retry with it |
-| **Auth/permissions** | Insufficient scopes, expired token | `Forbidden` / `Unauthorized` | Maybe — escalate or re-auth |
+| **Caller auth** | Insufficient scopes, expired token, a rejected key the caller supplied | `Forbidden` / `Unauthorized` | Maybe — escalate or re-auth |
+| **Server credential** | The server's own upstream key is missing, or the upstream rejects it (401/403) | `ConfigurationError` — translated in the service, since the automatic status mapping yields `Unauthorized`/`Forbidden`, which read as the caller's credentials | No — the operator fixes it; the `recovery` names the env var |
 | **Server internal** | Parse failure, missing config, unexpected state | `InternalError` | No — server-side issue |
 
 (`InvalidParams` also exists — the framework's `parseToolArguments` emits it when input fails Zod schema validation before the handler runs. Anything the handler itself throws about inputs uses `ValidationError`.)
@@ -465,15 +483,15 @@ Summarize each tool:
 
 | Aspect | Decision |
 |:-------|:---------|
-| **Name** | Lowercase snake_case with a canonical server prefix. **3 segments is the strong default** (`{server}_{verb}_{noun}` — e.g., `pubmed_search_articles`, `clinicaltrials_find_eligible`). **2 is fine when the operation name is canonical** and no noun adds signal (`git_pull`, `git_status` — "pull" already implies the remote). Don't invent a word to pad to 3. **4 is fine when the noun is inherently two words** (`openfda_search_device_clearances`) or the prefix is multi-part. The prefix is judged on clarity, not length: the brand name or the plain well-known word for the domain both pass (`pubmed_`, `patents_`, `earthquake_`); an abbreviation fails only when it reads as something else out of context (`loc_` → lines of code, `ct_` → CT scan). The verb+noun pair should be unambiguous within the server — if two tools could plausibly share a name, the noun isn't specific enough (`read_fulltext` not `read_text` when structured metadata is a separate concept). **Treat name length as a scope smell only when** the extra segment is the *verb* overreaching (e.g., `foo_create_and_send_notification` → split or use modes). |
+| **Name** | Lowercase snake_case with a canonical server prefix. **3 segments is the strong default** (`{server}_{verb}_{noun}` — e.g., `pubmed_search_articles`, `clinicaltrials_find_eligible`). **2 is fine only when the verb is a complete action whose object the domain implies** (`git_pull`, `git_push`, `git_status`, `git_commit` — the remote, working tree, or repo is implicit); don't invent a word to pad those to 3. A verb that takes a caller-specified object — `search`, `find`, `get`, `list`, `query`, `fetch`, `connect`, `create`, `update` — always carries its noun (`ontology_search` → `ontology_search_terms`, `geofeatures_connect` → `geofeatures_connect_endpoint`). Smell test: if `{server}_{verb}` leaves "…what?" unanswered, the noun is missing. **4 is fine when the noun is inherently two words** (`openfda_search_device_clearances`) or the prefix is multi-part. The prefix is judged on clarity, not length: the brand name or the plain well-known word for the domain both pass (`pubmed_`, `patents_`, `earthquake_`); an abbreviation fails only when it reads as something else out of context (`loc_` → lines of code, `ct_` → CT scan). The verb+noun pair should be unambiguous within the server — if two tools could plausibly share a name, the noun isn't specific enough (`read_fulltext` not `read_text` when structured metadata is a separate concept). **Treat name length as a scope smell only when** the extra segment is the *verb* overreaching (e.g., `foo_create_and_send_notification` → split or use modes). |
 | **Granularity** | Scope each tool to one coherent agent action. The implementation can be a single API call (`pubmed_search_articles`), a multi-step workflow, or internal-only — match the unit to the work, don't constrain by call count. |
 | **Description** | Concrete capability statement. Add operational guidance (prerequisites, constraints, gotchas) when non-obvious. |
 | **Input schema** | `.describe()` on every field. Constrained types (enums, literals, regex). Explain costs/tradeoffs of parameter choices. |
 | **Output schema** | Designed for the LLM's next action. Include chaining IDs. Communicate filtering. Post-write state where useful. |
 | **Errors** | Declare domain failure modes as a typed contract (`errors: [{ reason, code, when, recovery, retryable? }]`) so `ctx.fail` is type-checked and capable clients can preview failures via `tools/list`. Every `recovery` string follows the no-dead-ends rule — it names the next tool call. |
-| **Enrichment** | The success-path counterpart to `errors`: declare the agent-facing context fields the handler populates via `ctx.enrich(...)` — zero-hit notice, echoed defaults, totals, truncation — with a kind-tag (`notice`/`total`/`echo`/`delta`) where one fits and an `enrichmentTrailer.render` for any structured field. Keys stay disjoint from `output`. |
+| **Enrichment** | The success-path counterpart to `errors`: declare the agent-facing context fields the handler populates via `ctx.enrich(...)` — zero-hit notice, echoed defaults, totals, truncation — with a kind-tag (`notice`/`total`/`echo`/`delta`) where one fits and an `enrichmentTrailer.render` for any structured field. Keys stay disjoint from `output`. Declare a field required only when every path writes it — a required field one branch skips fails the output parse on every call that takes another branch. |
 | **Annotations** | `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`. Helps clients auto-approve safely. `destructiveHint` defaults to **true** on any tool that isn't read-only, so a benign write must set `destructiveHint: false` explicitly; a read-only tool omits it entirely (`annotation-coherence` lint). |
-| **Auth scopes** | `tool:<snake_tool_name>:<verb>` or `resource:<kebab-resource-name>:<verb>` (e.g., `tool:inventory_search:read`, `resource:echo-app-ui:read`). Domain-led `<domain>:<verb>` (e.g., `inventory:read`) is an acceptable alternative — pick one convention per server and stay consistent. Skip when the server runs `MCP_AUTH_MODE=none` (stdio-only, local). |
+| **Auth scopes** | `tool:<snake_tool_name>:<verb>` or `resource:<kebab-resource-name>:<verb>` (e.g., `tool:inventory_search:read`, `resource:echo-app-ui:read`). Domain-led `<domain>:<verb>` (e.g., `inventory:read`) is an acceptable alternative — pick one convention per server and stay consistent. Skip when no deployment will run `MCP_AUTH_MODE=jwt` or `oauth` — under `none` (stdio, or single-tenant HTTP) scope checks never run. |
 
 ### 5. Design Resources
 
@@ -513,11 +531,12 @@ For services wrapping external APIs, plan the resilience layer.
 |:--------|:---------|
 | **Retry boundary** | Service method wraps full pipeline (fetch + parse), not just the network call. Use `withRetry` from `/utils`. |
 | **Backoff calibration** | Match base delay to upstream recovery time: 200–500ms (ephemeral), 1–2s (rate-limited), 2–5s (degraded). |
-| **HTTP status check** | `fetchWithTimeout` already handles this — non-OK → `ServiceUnavailable`. |
+| **HTTP status check** | `fetchWithTimeout` already handles this — a non-2xx throws an `McpError` whose code is mapped from the status (400 → `InvalidParams`, 401 → `Unauthorized`, 403 → `Forbidden`, 404 → `NotFound`, 409 → `Conflict`, 422 → `ValidationError`, 429 → `RateLimited`, 408/504 → `Timeout`, other 5xx → `ServiceUnavailable`; the full table is `api-errors` § *HTTP Response → McpError*), with `status` and `body` on `error.data`, plus `retryAfter` when the upstream sent one. Plan error contracts around those codes, not a blanket `ServiceUnavailable`. |
 | **Parse failure classification** | Response handler detects HTML error pages and throws transient errors, not `SerializationError`. |
 | **Exhausted retry messaging** | `withRetry` enriches the final error with attempt count automatically. |
-| **Pacing** | No framework primitive paces requests. When the upstream mandates a rate (one request per second, one per five seconds, N concurrent), decide per service how the tool surface honors it — a queue in the service, a concurrency cap on fan-out, or a documented ceiling in the server instructions — and say which. |
-| **Caller-supplied URLs or hosts** | Route through `fetchWithTimeout`, which carries the SSRF guard (private ranges, DNS rebinding). Never a bare `fetch` on a caller-controlled destination; `security-pass` audits this sink. |
+| **Total deadline** | Retries multiply a per-attempt timeout: four 30s attempts plus backoff outlast a client's 60s request timeout, and the caller gets a transport timeout instead of this server's classified error. Size `withRetry`'s `deadlineMs` to fit inside the client's timeout and thread `attempt.signal` into each fetch (`api-utils`). |
+| **Pacing** | When the upstream mandates a rate (one request per second, N per minute, N concurrent), put a `createPacer` from `/utils` in front of that service — one pacer per upstream budget, composed as `withRetry` outside and the pacer inside — and note the resulting ceiling in the server instructions when it shapes how an agent should batch work. |
+| **Caller-supplied URLs or hosts** | Route through `fetchWithTimeout` with `rejectPrivateIPs: true` — the SSRF guard is off by default. It blocks private, loopback, link-local, and metadata ranges, and is best-effort: DNS rebinding still gets past it, so a deployment that needs hard isolation adds egress controls. Never a bare `fetch` on a caller-controlled destination; `security-pass` audits this sink. |
 
 For API efficiency, design the service methods to minimize upstream calls:
 
@@ -559,6 +578,7 @@ What this server does, what system it wraps, who it's for.
 
 - Bullet list of capabilities and constraints
 - Auth requirements, rate limits, data access scope
+- Deployment targets (stdio / HTTP / Workers), session mode, upstream credential model, and the terms-of-use constraints from Step 1
 
 ## User Goals
 
@@ -589,13 +609,14 @@ message shape).
 
 Draft `instructions` string for `createApp()` — the orientation every client sees at
 initialize: canonical workflow chain, identifier semantics, rate-limit posture. A short
-paragraph; tool descriptions carry the rest.
+paragraph under 2,048 characters, essentials first — Claude Code truncates the string at that
+length, mid-sentence. Tool descriptions carry the rest.
 
 ## Implementation Order
 
 1. Config and server setup
-2. Services (external API clients)
-3. Reference tool (static, no service dependency — grounds field-testing for everything else)
+2. Reference tool (static, no service dependency — grounds field-testing for everything else)
+3. Services (external API clients)
 4. Read-only tools
 5. Write tools
 6. Resources
@@ -611,7 +632,7 @@ Each step is independently testable.
 ## API Reference            <!-- query language, pagination, rate limits; include when worth documenting -->
 ```
 
-Keep it concise. The design doc is a working reference, not a spec document — enough to orient a developer (or agent) implementing the server, not more.
+Keep it concise. The design doc is a working reference, not a spec document — enough to orient a developer (or agent) implementing the server, not more. It stays true after the build: when the implementation diverges — a renamed field, a dropped method, a changed error code — the doc changes in the same commit, with the why under Design Decisions. The next agent reads it as the spec.
 
 **Workflow Analysis example.** For multi-step workflow tools, document the upstream call sequence in a table — it drives several downstream decisions during implementation: the service-layer method shape, retry boundaries, where cleanup or the confirmation round belongs, and what post-action state to fetch for the response.
 
@@ -644,7 +665,10 @@ Execute the plan using the scaffolding skills:
 3. `add-resource` for each standalone resource
 4. `add-prompt` for each prompt
 5. `add-app-tool` *only if any app tools survived the design step* (rare — see the App Tool row in Step 3)
-6. `devcheck` after each addition
+6. `add-test` alongside each definition, declared error contracts included
+7. `devcheck` after each addition
+
+Once the surface is built, `tool-defs-analysis` audits the definition language and `field-test` exercises the tools against the live upstream.
 
 ## Checklist
 
@@ -652,8 +676,8 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 
 - [ ] Server scope decided — workflow identified, audience sized, boundary drawn (standalone single-API vs. multi-source aggregation vs. internal-only)
 - [ ] **If multi-source:** tool surface organized around user workflows, not API identity. Sources are service-layer details.
-- [ ] External APIs/dependencies researched and verified (docs fetched, SDKs identified)
-- [ ] **If wrapping an external API:** live API probed (at minimum: one list/search, one single-item GET, one error case)
+- [ ] External APIs/dependencies researched and verified (docs fetched, SDKs identified, terms of use read — storage, redistribution, AI use, attribution, credential model)
+- [ ] **If wrapping an external API:** live API probed (at minimum: one list/search, one single-item GET, one error case, one unknown-param request)
 - [ ] User goals enumerated first (3–10 outcomes agents will accomplish, scaled to domain size), then domain operations mapped as raw material
 - [ ] Each operation classified as tool, resource, prompt, or excluded
 - [ ] Catastrophically irreversible operations excluded from the tool surface (stay in vendor UI) — not just `destructiveHint`
@@ -672,22 +696,25 @@ Items without an `If …:` prefix apply to every design. Conditional items only 
 - [ ] **If a tool resolves a single identifier:** no-match returns `{ found: false, guidance }` — a result, not a throw — with guidance routing per miss outcome
 - [ ] **If the domain has opaque vocabulary (codes, identifier formats, coverage windows):** reference tool designed (`topic` enum), implemented first, and used as the routing target in recovery strings and notices
 - [ ] Annotations set correctly (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) — benign writes set `destructiveHint: false` explicitly, read-only tools omit it
-- [ ] Server-level `instructions` string drafted — workflow chain, identifier semantics, rate-limit posture (ships via `createApp()` on every initialize)
-- [ ] Design doc written to `docs/design.md`
-- [ ] Design confirmed with user (or user pre-authorized implementation)
+- [ ] Server-level `instructions` string drafted — workflow chain, identifier semantics, rate-limit posture, under 2,048 characters (ships via `createApp()` on every initialize)
 - [ ] **If ops share a noun:** related operations consolidated under one tool with a `mode`/`operation` enum — as a `z.discriminatedUnion` input when the arms need different required fields
 - [ ] **If an upstream API has no native search but the relevant set is bounded:** MCP-side list filtering considered — a distinct local filter param (`filter`/`nameContains`, not `query`), filtering the full set, strict token match (fuzzy only when a caller needs typo tolerance)
 - [ ] **If the server has workflow tools:** call-flow documented (upstream sequence + mode arms) in design doc's Workflow Analysis
 - [ ] **If state-aware procedural guidance adds value:** instruction tool considered with `nextToolSuggestions` pre-filled from diagnostics
 - [ ] **If any tool is config-gated:** nothing routes to it while the gate is off — recovery strings, notices, and `guidance` name a callable target or state the capability is unavailable, and structured follow-ups naming it are emitted only under the config that registers it
-- [ ] **If workflow tools have destructive modes:** destructive arm gated on a `ctx.requestInput` confirmation read back from `ctx.inputs`, with `destructiveHint` annotation so clients that never fulfil the round still surface the risk
+- [ ] **If workflow tools have destructive modes:** destructive arm gated on a `ctx.requestInput` confirmation that redeems a `ctx.state` consent record bound to the operation, caller, and target (shared storage when retries can reach another instance, `MCP_REQUEST_STATE_KEY` set, an arm that must not run twice idempotent per record), with `destructiveHint` annotation so clients that never fulfil the round still surface the risk
+- [ ] **If any tool calls `ctx.requestInput`:** `createApp()` declares `sessionMode` with `require: 'stateful'`
+- [ ] **If any output carries text other people wrote:** those fields listed, `format()` quotes or fences free text and flattens CR/LF in inline slots, and the server instructions say the content is data
 - [ ] **If a parameter determines blast radius:** safe default set (e.g., `mode: 'preview'`, `dryRun: true`, `confirmCount` required)
 - [ ] **If an action's effect is observable only after the call (wake, trigger, dispatch, provision):** confirmation on by default through one numeric window param (`0` = act and return), pre-probe then poll with early return, every outcome a result rather than a throw, and a read-only sibling tool that probes the same state
 - [ ] **App tools default to no.** If one was proposed, verified there's a real human-in-the-loop in an MCP Apps-capable client justifying the iframe/CSP/`format()`-twin maintenance cost — otherwise dropped in favor of a standard tool
 - [ ] **If the server exposes resources:** URIs use `{param}` templates, pagination planned for large lists
 - [ ] **If the server is itself the source of truth (no external API):** state lifecycle planned — tenant-scoped vs. global, TTLs, what survives restart, storage backend chosen
 - [ ] **If the server has external deps or shared state:** service layer planned (or explicitly skipped with reasoning)
-- [ ] **If services wrap external APIs:** resilience planned (retry boundary, backoff, parse classification)
-- [ ] **If multi-source server:** each source has its own service with independent auth/retry/rate-limit config. Fallback chains or fan-out strategy documented per tool. Output includes source provenance.
+- [ ] **If services wrap external APIs:** resilience planned (retry boundary, backoff, parse classification, a total deadline inside the client timeout, a pacer where the upstream mandates a rate, `rejectPrivateIPs` on caller-supplied URLs)
+- [ ] **If multi-source server:** each source has its own service with independent auth/retry/rate-limit config. Fallback chains or fan-out strategy documented per tool. Output includes source provenance. An input rejection from any source fails the call rather than reading as that source's outage.
+- [ ] **If mirroring a bulk upstream:** the terms permit storing the data, and a local index reproduces the upstream's search — no server-side ranking or query expansion on the mirrored path
 - [ ] **If exposing a SQL/analytical workspace is in scope:** DataCanvas considered (`api-canvas` skill), and it earns its keep on *analytical* fit (an agent would SQL it), not row count — a discovery/search surface of categorical metadata doesn't qualify. Any tool emitting a `canvas_id` is paired with a `dataframe_query` (+ `dataframe_describe`) tool in the same surface — a token with no query tool is dead output
 - [ ] **If the server needs runtime config:** env vars identified in `server-config.ts`
+- [ ] Design doc written to `docs/design.md` — every example value synthetic, no keys, tokens, or private hosts
+- [ ] Design confirmed with user (or user pre-authorized implementation)

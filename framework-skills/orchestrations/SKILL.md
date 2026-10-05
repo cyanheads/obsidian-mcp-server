@@ -4,7 +4,7 @@ description: >
   Pick and run a multi-phase workflow that chains foundational task skills (`git-wrapup`, `release-and-publish`, `maintenance`, `field-test`, `setup`, etc.) end-to-end. Routes user intent to a workflow file under `workflows/` — greenfield builds, maintenance + release, field-test + fix, or known-work + release. Single source for the universal rules (no commits without authorization, no destructive git, no marketing language), the orchestrator posture (own the goal, ground sub-agents in primary sources, verify against the goal), and the sub-agent strategy (orient block, parallel fanout, isolation, normalization) that apply across every workflow. Sub-agents are an optional capability — workflows run linearly when fanout isn't available.
 metadata:
   author: cyanheads
-  version: "1.10"
+  version: "1.13"
   audience: external
   type: workflow
 ---
@@ -68,8 +68,8 @@ The orchestrator owns the goals. Workflow phases are not "run skill X" — they 
 
 Before running a phase (or spawning a sub-agent for it), write down four things:
 
-1. **Goal** — the verifiable end state this phase must produce. Concrete and testable: "v0.5.2 tag exists at HEAD with structured-markdown annotation; `bun run devcheck` green; `npm view <pkg>@0.5.2` resolves." Not fuzzy: "ran the release-and-publish skill."
-2. **Primary sources** — the specific files, GH issues, and reference docs the sub-agent must read directly. Inlining content into the prompt is a paraphrase that loses nuance; agents grounded in the source catch details the orchestrator's summary missed. For GH issues, instruct both `gh issue view N --comments` (the comment thread) and the timeline cross-reference query in the Orient block (what references the issue, including cross-repo) — the body alone misses both. The orchestrator reads these sources too (to construct the prompt), but that's prompt construction, not a substitute for the sub-agent reading them.
+1. **Goal** — the verifiable end state this phase must produce. Concrete and testable: "v0.5.2 tag exists at HEAD and passes `bun run release:github -- --check`; `bun run devcheck` green; `npm view <pkg>@0.5.2` resolves." Not fuzzy: "ran the release-and-publish skill."
+2. **Primary sources** — the specific files, GH issues, and reference docs the sub-agent must read directly. Inlining content into the prompt is a paraphrase that loses nuance; agents grounded in the source catch details the orchestrator's summary missed. For GH issues, instruct the three reads in the Orient block — `gh issue view N` (the body), `gh issue view N --comments` (the thread; without a TTY it prints no body), and the timeline cross-reference query (what references the issue, including cross-repo). The orchestrator reads these sources too (to construct the prompt), but that's prompt construction, not a substitute for the sub-agent reading them.
 3. **Path** — the Tier 1 skill(s) and steps that get to the goal. This is what gets handed to the sub-agent.
 4. **Verification** — the read-only checks that confirm the goal was hit. Defined upfront, not as an afterthought.
 
@@ -79,7 +79,7 @@ Why the framing matters:
 - **Sub-agent self-reports describe intent, not always reality.** A goal you wrote down beforehand is the falsification target — the sub-agent's report is a hypothesis to verify against it.
 - **Replanning is local.** When verification fails, the goal is unchanged; the orchestrator picks a different path (re-spawn with the failure context, re-slice the work, intervene directly). Phase rework doesn't cascade.
 
-**Inform without inlining.** An enhanced sub-agent prompt names the specific primary sources and the goal — it does NOT paraphrase them. "Review GH issue #123 (read it via `gh issue view 123 --comments`); the goal is X; verify with Y" is the right shape. Pasting the issue body into the prompt forces the sub-agent to work from a paraphrase. Let the sub-agent read the source and explore for additional context as needed.
+**Inform without inlining.** An enhanced sub-agent prompt names the specific primary sources and the goal — it does NOT paraphrase them. "Review GH issue #123 (read it via `gh issue view 123` and `gh issue view 123 --comments`); the goal is X; verify with Y" is the right shape. Pasting the issue body into the prompt forces the sub-agent to work from a paraphrase. Let the sub-agent read the source and explore for additional context as needed.
 
 ## Sub-Agent Strategy (if available)
 
@@ -122,8 +122,9 @@ order. If any file does not exist, note it and continue.
 5. Read the skill file(s) for this task: `[Tier 1 skill paths]`.
 6. Read the primary sources for this task directly — design docs (`docs/design.md`),
    GH issues, handoff documents, reference/gold-standard files. For a GH issue, read
-   both the comment thread and its cross-references — the body alone misses both:
-     - `gh issue view <N> --comments` — description + comment thread
+   the body, the comment thread, and its cross-references — three separate reads:
+     - `gh issue view <N>` — the body
+     - `gh issue view <N> --comments` — the comment thread (without a TTY it prints no body, so it never replaces the read above)
      - `gh api 'repos/{owner}/{repo}/issues/<N>/timeline' --paginate --jq '.[] | select(.event=="cross-referenced") | .source.issue | "\(.repository.full_name)#\(.number) — \(.title)"'` — issues/PRs that reference this one, including from other repos
    List each source explicitly: `[primary source paths and gh commands]`. Skip this
    step only if no primary source applies (rare).

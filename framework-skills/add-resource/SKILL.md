@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP resource definition. Use when the user asks to add a resource, expose data via URI, or create a readable endpoint.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -22,7 +22,7 @@ Resources use the `resource()` builder from `@cyanheads/mcp-ts-core`. Each resou
 3. **Create the file** at `src/mcp-server/resources/definitions/{{resource-name}}.resource.ts`
 4. **Register** the resource in the project's existing `createApp()` resource list (directly in `src/index.ts` for fresh scaffolds, or via a barrel if the repo already has one)
 5. **Run `bun run devcheck`** to verify
-6. **Smoke-test** with `bun run rebuild && bun run start:stdio` (or `start:http`)
+6. **Smoke-test** with `bun run rebuild && bun run start:stdio < /dev/null` (or `start:http`) — the `Core services constructed` log record must list the new resource in its `resources` field (the message text shows only counts); if it doesn't, the resource never reached `createApp()`
 
 ## Template
 
@@ -63,12 +63,12 @@ export const {{RESOURCE_EXPORT}} = resource('{{scheme}}://{{{paramName}}}/data',
 
 ### With pagination
 
-For resources that return large result sets, include `cursor` in the URI template params and use opaque cursor pagination in the `handler`. The cursor arrives as a validated URI param. `paginateArray` requires a `RequestContext` for logging — create one from `requestContextService`:
+For resources that return large result sets, use opaque cursor pagination in the `handler`. `resources/read` carries no cursor of its own, so the cursor must be a URI template variable — it arrives as a validated URI param. Make it a path segment: a `{?cursor}` query expansion is mandatory in the SDK's template matcher, so the bare URI (no `?cursor=`) stops matching. Serve the first page from an unpaged sibling resource that returns `nextCursor`, or disclose truncation in the body and point callers at a tool that pages. `paginateArray` requires a `RequestContext` for logging — create one from `requestContextService`:
 
 ```typescript
 import { extractCursor, paginateArray, requestContextService } from '@cyanheads/mcp-ts-core/utils';
 
-// URI template: '{{scheme}}://{{{paramName}}}/items'
+// URI template: '{{scheme}}://{{{paramName}}}/items/{cursor}'
 params: z.object({
   {{paramName}}: z.string().describe('{{PARAM_DESCRIPTION}}'),
   cursor: z.string().optional().describe('Opaque pagination cursor'),
@@ -103,10 +103,12 @@ await createApp({
 });
 ```
 
-If the repo already uses `src/mcp-server/resources/definitions/index.ts`, add the export to that barrel instead:
+If the repo already uses `src/mcp-server/resources/definitions/index.ts`, add the resource to that barrel the way it holds the existing ones — it must end up in the array passed to `createApp()`. A bare `export … from` line registers nothing on its own. The standard barrel shape:
 
 ```typescript
-export { {{RESOURCE_EXPORT}} } from './{{resource-name}}.resource.js';
+import { {{RESOURCE_EXPORT}} } from './{{resource-name}}.resource.js';
+
+export const allResourceDefinitions = [/* existing resources */, {{RESOURCE_EXPORT}}];
 ```
 
 ### Optional: declarative `errors[]` contract
@@ -222,4 +224,4 @@ Cacheable operations are `tools/list`, `prompts/list`, `resources/list`, `resour
 - [ ] Pagination used for large result sets (`extractCursor`/`paginateArray`) — applies to both `handler` data and `list()` catalogs with many entries
 - [ ] Registered in the project's existing `createApp()` resource list (directly or via barrel)
 - [ ] `bun run devcheck` passes
-- [ ] Smoke-tested with `bun run rebuild && bun run start:stdio` (or `start:http`)
+- [ ] Smoke-tested with `bun run rebuild && bun run start:stdio < /dev/null` (or `start:http`); the `Core services constructed` record lists the new resource in its `resources` field

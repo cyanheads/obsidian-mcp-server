@@ -639,15 +639,25 @@ const ALL_CHECKS: Check[] = [
     canFix: false,
     getCommand: (ctx) => {
       if (!isGitRepo()) return null; // no repo to grep — fresh scaffold before `git init`
-      // git grep -n (line number) -E (extended regex) -i (case-insensitive)
-      const baseCmd = ['git', 'grep', '-nEi', '\\b(TODO|FIXME)\\b'];
-      // Exclude files where TODO/FIXME appears as prose or intentional stubs
+      // -w is git's own whole-word test: macOS's regex library reads `\b` in an
+      // extended regex as a literal `b`. Case-sensitive, so a lowercase `todo`
+      // variable or stop word is not a marker.
+      const baseCmd = ['git', 'grep', '-nwE', '(TODO|FIXME)'];
+      // Exclude files where TODO/FIXME appears as prose or intentional stubs:
+      // changelogs, tests, this script, and the framework's skill prose wherever
+      // the maintenance sync copies it.
       const excludes = [
         ':!CHANGELOG.md',
         ':!changelog/',
         ':!*.lock',
         ':!scripts/devcheck.ts',
         ':!tests/',
+        ':!framework-skills/',
+        ':!.claude/skills/',
+        ':!.agents/skills/',
+        ':!.codex/skills/',
+        ':!.cursor/skills/',
+        ':!.windsurf/skills/',
       ];
       if (ctx.isHuskyHook && ctx.stagedFiles.length > 0) {
         // Check only staged files in the working tree
@@ -670,28 +680,38 @@ const ALL_CHECKS: Check[] = [
     name: 'Tracked Secrets',
     flag: '--no-secrets',
     canFix: false,
-    // Check if common sensitive files are tracked by git.
+    // Check if common sensitive files are tracked by git. `:(glob)` makes `**/`
+    // match zero or more directories, so each shape is caught at the repository
+    // root too; under it `*` stops at `/`, so the two name-prefix shapes carry a
+    // `/**` twin for the files inside a directory of that name (`secrets/`,
+    // `.env.d/`).
     getCommand: () => {
       if (!isGitRepo()) return null; // no repo — `git ls-files` would exit 128, not a finding
       return [
         'git',
         'ls-files',
-        '*.env*',
-        '**/.npmrc',
-        '**/.netrc',
-        '**/credentials.json',
-        '**/*.pem',
-        '**/*.key',
-        '**/secret*',
-        '**/.htpasswd',
+        ':(glob)**/*.env*',
+        ':(glob)**/*.env*/**',
+        ':(glob)**/.npmrc',
+        ':(glob)**/.netrc',
+        ':(glob)**/credentials.json',
+        ':(glob)**/*.pem',
+        ':(glob)**/*.key',
+        ':(glob)**/secret*',
+        ':(glob)**/secret*/**',
+        ':(glob)**/.htpasswd',
       ];
     },
-    // Success if output is empty OR only contains safe patterns.
+    // Success if output is empty OR only contains safe files: `.env` templates
+    // anywhere, and GitHub's secret scanning config at the one path it reads.
     isSuccess: (result, _mode) => {
       if (result.exitCode !== 0) return false;
-      const SAFE_PATTERNS = ['.env.example', '.env.template', '.env.sample'];
+      const SAFE_SUFFIXES = ['.env.example', '.env.template', '.env.sample'];
+      const SAFE_PATHS = ['.github/secret_scanning.yml'];
       const files = result.stdout.trim().split('\n').filter(Boolean);
-      const dangerous = files.filter((f) => !SAFE_PATTERNS.some((safe) => f.endsWith(safe)));
+      const dangerous = files.filter(
+        (f) => !SAFE_PATHS.includes(f) && !SAFE_SUFFIXES.some((safe) => f.endsWith(safe)),
+      );
       return dangerous.length === 0;
     },
     tip: (c) =>
@@ -711,12 +731,13 @@ const ALL_CHECKS: Check[] = [
     canFix: false,
     // Validates env var alignment between manifest.json (MCPB bundle) and
     // server.json (MCP Registry), plus plugin marketplace manifests (#240), the
-    // bundle-content guards on .mcpbignore (#343), and the README version badge
-    // (#418). Runs when any of those inputs is present; skipped cleanly when
-    // none exist — consumers on an HTTP-only deploy are unaffected. README.md is
-    // a trigger in its own right: the badge check must gate a project that
-    // carries no bundle or plugin metadata at all, which the other three inputs
-    // only covered incidentally.
+    // bundle-content guards on .mcpbignore (#343), the README version badge
+    // (#418), the Dockerfile build platform, and the launch shape of server.json
+    // npm entries (#622). Runs when any of those inputs is present; skipped
+    // cleanly when none exist — consumers on an HTTP-only deploy are unaffected.
+    // README.md, Dockerfile, and server.json are triggers in their own right:
+    // each check must gate a project that carries no bundle or plugin metadata
+    // at all, which the other inputs only covered incidentally.
     getCommand: () => {
       const inputs = [
         'manifest.json',
@@ -725,12 +746,14 @@ const ALL_CHECKS: Check[] = [
         '.codex-plugin/mcp.json',
         '.mcpbignore',
         'README.md',
+        'Dockerfile',
+        'server.json',
       ];
       if (!inputs.some((input) => existsSync(path.join(ROOT_DIR, input)))) return null;
       return ['bun', 'run', 'scripts/lint-packaging.ts'];
     },
     tip: (c) =>
-      `Align env var names between ${c.bold('manifest.json')} ${c.bold('mcp_config.env')} and ${c.bold('server.json')} stdio package ${c.bold('environmentVariables[]')}.`,
+      `Each ${c.bold('✗')} line above names the file and the change that fixes it; ${c.bold('scripts/lint-packaging.ts')} documents every check.`,
   },
   {
     name: 'Framework Antipatterns',
@@ -811,7 +834,8 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-skill-versions',
     canFix: false,
     // Flags framework-skills/<name>/SKILL.md body changes (vs HEAD) that lack a metadata.version
-    // bump (#99). Skipped when framework-skills/ is absent. Drift is demoted to a warning via
+    // bump (#99), and, in the framework repo, a skill bumped more than one step past the last
+    // release tag. Skipped when framework-skills/ is absent. Drift is demoted to a warning via
     // isSuccess — the typo/whitespace carve-out lives in devcheck.config.json
     // `skillVersions.ignore`.
     getCommand: () => {
@@ -821,11 +845,11 @@ const ALL_CHECKS: Check[] = [
     isSuccess: (result) => {
       if (result.exitCode === 0) return true;
       const firstLine =
-        result.stdout.split('\n')[0]?.trim() || 'Skill bodies changed without a version bump.';
+        result.stdout.split('\n')[0]?.trim() || 'Skill versions are out of step with the policy.';
       return { success: true, warning: firstLine };
     },
     tip: (c) =>
-      `Bump ${c.bold('metadata.version')} in the changed ${c.bold('SKILL.md')}, or add it to ${c.bold('devcheck.config.json')} ${c.bold('skillVersions.ignore')}.`,
+      `Bump ${c.bold('metadata.version')} once per release in the changed ${c.bold('SKILL.md')}, or add it to ${c.bold('devcheck.config.json')} ${c.bold('skillVersions.ignore')}.`,
   },
   {
     name: 'Changelog Sync',

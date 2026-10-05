@@ -4,7 +4,7 @@ description: >
   Workflow: field-test one or more existing MCP server projects against the live upstream API, file GH issues for valid findings, deploy fix sub-agents per server, optionally loop until clean, then wrap up and release. Chains the `field-test`, `report-issue-local`, `tool-defs-analysis`, `code-simplifier`, `git-wrapup`, and `release-and-publish` skills. Read `../SKILL.md` first for the universal rules and sub-agent strategy.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: workflow
 ---
@@ -56,8 +56,8 @@ Each phase's Objective column is the goal state per target — the verifiable en
 | 3 | Fix | Per target: priority issues fixed in source, tests updated, `devcheck` + `test` green, each issue commented with fix details, working tree dirty for review | parallel fanout (one sub-agent per target — hard constraint) | gate-free |
 | 4 | Verify | Per target: full diff cold-reviewed; simplified if warranted; each fix re-exercised against the running server with actual tool output in the summary | parallel fanout | **barrier** — orchestrator loop decision (human/evidence-based: proceed, loop, or surface to user) |
 | 5 | Loop decision | Orchestrator decision recorded — proceed to release, loop another field-test cycle, or pause/surface to user. Evidence-based | orchestrator (serial) | **barrier** — release authorization required before advancing |
-| 6 | Wrap-up + release | (Optional) Per target: fixes split into per-file commits with a release commit on top; annotated tag; published per repo visibility; tag annotation is structured markdown with issue backlinks | parallel fanout (Bash git only) | gate-free |
-| 7 | Issue cleanup | Every GH issue that shipped a fix closed with "Fixed in v\<version\>" comment; skipped issues remain open | orchestrator (serial) | — |
+| 6 | Wrap-up + release | (Optional) Per target: fixes grouped into one commit per concern (a file never splits across commits) with a release commit on top; annotated tag passing `bun run release:github -- --check` (flat bullets with issue backlinks, changelog link last); published per repo visibility | parallel fanout (Bash git only) | gate-free |
+| 7 | Issue cleanup | Every GH issue that shipped a fix closed (reason: completed) carrying exactly one what-landed comment that cites the version; skipped issues remain open | orchestrator (serial) | — |
 
 Phase 6 is optional — stop earlier if release isn't authorized. Phase 7 only runs if Phase 6 ran.
 
@@ -92,7 +92,7 @@ Orchestrator verifies filed issues exist via `gh issue list -R <owner>/<repo>` p
 **One sub-agent per target — hard constraint.** No file-locking system exists for concurrent edits; multiple agents touching the same server's `src/` will conflict.
 
 Each sub-agent:
-1. Reads all open issues for its target via `gh issue list` + `gh issue view N --comments` (full thread — body alone misses clarifications)
+1. Reads all open issues for its target via `gh issue list`, then `gh issue view N` and `gh issue view N --comments` per issue (body, then thread — the body alone misses clarifications)
 2. **Validates each issue against source code** — a "fixed" issue is a misdiagnosed one if validation fails
 3. Implements fixes in priority order: security → bugs → UX
 4. Rebuilds after each fix or group of related fixes
@@ -143,19 +143,7 @@ The changelog carries the depth; the tag annotation covers every change at headl
 
 **Version bump.** Default **patch** for field-test fix releases. **Minor** when enhancements are bundled in.
 
-**Tag annotation format.** Tag subject omits the version number. Structured markdown:
-
-```
-Field-test bug fixes across N tools
-
-Fixed:
-- <tool_name>: <one-line fix description> (#<issue>)
-- <tool_name>: <one-line fix description> (#<issue>)
-
-<test count>; `bun run devcheck` clean.
-```
-
-Add a `Security:` section when the changelog frontmatter sets `security: true`.
+**Tag annotation.** Written at release time in the `release-and-publish` step 4 format — a short theme subject, flat bullets with `(#N)` backlinks, the changelog link last; `bun run release:github -- --check` enforces the shape before the push.
 
 **Wrap-up scope.** Determined by repo visibility:
 
@@ -167,9 +155,11 @@ Add a `Security:` section when the changelog frontmatter sets `security: true`.
 ### Phase 7: Issue cleanup
 Close issues that shipped fixes — only those. Skipped issues stay open.
 
+Each issue carries exactly ONE what-landed comment — the fix summary Phase 3 posted, with the version added (`Shipped in v<version>: …`) if it lacks one. Then close without an additional comment:
+
 ```bash
 for n in <fixed-issue-numbers-from-phase-3>; do
-  gh issue close "$n" -R "<owner>/<repo>" --reason completed --comment "Fixed in v<version>."
+  gh issue close "$n" -R "<owner>/<repo>" --reason completed
 done
 ```
 
@@ -205,4 +195,4 @@ Collect specific issue numbers from Phase 3 sub-agent summaries — do not close
 - [ ] Phase 6 (if releasing): version bumped, fix commits + release commit, annotated tag, scope matches private/public status
 - [ ] Phase 7 (if releasing): fixed issues closed; skipped issues remain open
 - [ ] Post-workflow verification: `git ls-remote --tags origin`, `npm view <pkg>@<version>` if public, GH release artifacts attached
-- [ ] Tag/release quality review: tag subject omits version number, structured markdown, no marketing adjectives, issue backlinks present
+- [ ] Tag/release quality review: `bun run release:github -- --check` passed before the push; no marketing adjectives, issue backlinks present

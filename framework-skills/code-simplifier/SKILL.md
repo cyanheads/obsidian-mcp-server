@@ -1,10 +1,10 @@
 ---
 name: code-simplifier
 description: >
-  Code review and cleanup against a working tree of changes, or against a named path or whole codebase. Analyzes `git diff` (or the named target) to simplify, consolidate, and align code with the existing codebase — modernize syntax, remove unnecessary complexity, consolidate duplicated logic, catch efficiency issues. Use after a substantive working session, or when asked to clean up, simplify, reduce slop, consolidate, modernize, tighten up, de-slop, or scan a codebase. For `@cyanheads/mcp-ts-core` projects, includes specific transformations for tool/resource/prompt definitions, the ctx pattern, error factories, and framework idioms.
+  Cleanup pass that edits the working tree — over a session's uncommitted changes, or a named path or whole codebase. Reads `git diff` (or the named target) and simplifies, consolidates, and aligns code with the existing codebase — modernize syntax, cut unnecessary complexity and slop, consolidate duplicated logic, catch efficiency issues. Not a bug hunt: defects are reported, not fixed. Use after a substantive working session, or when asked to clean up, simplify, reduce slop, consolidate, modernize, tighten up, de-slop, or scan a codebase. For `@cyanheads/mcp-ts-core` projects, includes specific transformations for tool/resource/prompt definitions, the ctx pattern, error factories, and framework idioms.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.7"
   audience: external
   type: workflow
 ---
@@ -23,7 +23,7 @@ Cleanup pass over a session's changes or a named target. Reviews the code in sco
 
 Two scopes; the caller's wording picks one, and the diff is the default.
 
-- **Diff** (nothing named): run `git status` to see the shape of the working tree, then `git diff HEAD` for all uncommitted changes (staged and unstaged). Untracked files never appear in the diff — read new files directly. If the diff is empty and there are no untracked files, review the last commit (`git diff HEAD~1 HEAD`); if that is also empty, say the tree is clean and stop. Don't go hunting through the codebase for files to improve.
+- **Diff** (nothing named): run `git status` to see the shape of the working tree, then `git diff HEAD` for all uncommitted changes (staged and unstaged). Untracked files never appear in the diff — list them with `git ls-files --others --exclude-standard` (`git status` collapses a new directory to one line) and read them directly. If the diff is empty and there are no untracked files, review the last commit (`git diff HEAD~1 HEAD`); if that is also empty, say the tree is clean and stop. Don't go hunting through the codebase for files to improve.
 - **Target** (a named path, module, or "the whole codebase"): the named files are the scope, whatever their git state. Work one module or directory at a time and re-run the gate after each, so a large scan never becomes one unverifiable diff. Take the target as named — don't rank or narrow it by commit history.
 
 ### Phase 2: Understand the surrounding codebase
@@ -33,7 +33,7 @@ Don't review changes in isolation. Before any modifications:
 1. **Read the full files** containing changes — not just the diff hunks. Understand imports, surrounding logic, module structure.
 2. **Identify the project language(s)** and select the relevant transformation rules. Discard inapplicable rules.
 3. **Survey adjacent code** — shared utilities, sibling modules, common patterns. You need to know what already exists before deciding something is missing.
-4. **Run the project's gate once before editing** to establish a baseline. Find it in `package.json` scripts — `devcheck` if present, else `check`, else the separate `typecheck` / `lint` / `test` scripts; Python projects gate on `uv run ruff check`, `uv run ruff format --check`, and the configured type checker and test runner. In a Bun project that tests with Vitest, run `bun run test` — bare `bun test` bypasses the script and runs Bun's own runner. If the gate is already red, say so in the summary and don't attribute the failure to your changes.
+4. **Run the project's gate once before editing** to establish a baseline. Use the gate the project's `CLAUDE.md` / `AGENTS.md` names; absent one, take it from `package.json` scripts — `devcheck` if present, else `check`, else the separate `typecheck` / `lint` scripts — or a `Makefile` `check` target. Python projects gate on `uv run ruff check`, `uv run ruff format --check`, and the configured type checker. Add the test suite when the gate doesn't run it — read the script rather than assume (a `devcheck` often stops at lint and typecheck); without tests, nothing shows behavior survived the pass. In a Bun project that tests with Vitest, run `bun run test` — bare `bun test` bypasses the script and runs Bun's own runner. If the gate is already red, say so in the summary and don't attribute the failure to your changes.
 
 ### Phase 3: Review
 
@@ -50,13 +50,15 @@ Evaluate the changes across these dimensions. Not every dimension applies to eve
 
 - **Redundant state** — State that duplicates existing state, cached values that could be derived.
 - **Unnecessary complexity** — Deep nesting that could be guard clauses, premature abstractions, over-engineered solutions to simple problems.
+- **Speculative generality** — Options, parameters, config flags, generic type parameters, and branches that no caller exercises. Flexibility for a hypothetical caller is cost paid now: remove it, and let the first real use add it back. On a published package's public surface it is API — note it instead (see Dead code).
 - **Pass-through layers** — Apply the deletion test to a wrapper, helper, or module: if deleting it and inlining its body makes the complexity vanish, it was a pass-through — inline it. If the same logic would reappear across several callers, it earns its keep. An interface, port, or injected dependency with a single implementation and no test double is a hypothetical seam, not a real one — collapse it until something actually varies across it.
 - **Test-only reach** — A function extracted or exported only so a test can get at it is a shape problem, not a cleanup: name it in the summary with the module it belongs to. Don't restructure it here — the tests would have to move with it.
-- **Dead code** — Unreachable branches, unused variables, commented-out code. An export nothing imports is dead in an application or a package-internal module; on a published package's public surface it is API — leave it and note it in the summary.
+- **Dead code** — Unreachable branches, unused variables, commented-out code, and debug leftovers from the session (`console.log`, `print`, `debugger`) that aren't the program's real output or the project's logger. An export nothing imports is dead in an application or a package-internal module; on a published package's public surface it is API — leave it and note it in the summary.
 - **Defensive code for impossible states** — Guards for cases the type system or upstream validation already prevents. Drop them.
-- **Type escapes** — `any`, `as` casts that paper over a mismatch, non-null `!`, and `@ts-ignore`. Each is a claim the compiler couldn't check: replace with a narrowed type, a type guard, or a parse at the boundary. Keep the ones documenting a genuine type-system or third-party-types limitation, and prefer `@ts-expect-error` with a one-line reason over `@ts-ignore`.
+- **Type escapes** — `any`, `as` casts that paper over a mismatch, non-null `!`, `@ts-ignore`, and Python's `# type: ignore` / `cast()`. Each is a claim the compiler couldn't check: replace with a narrowed type, a type guard, or a parse at the boundary. Keep the ones documenting a genuine type-system or third-party-types limitation — confirm the limitation is gone before removing one — and prefer `@ts-expect-error` with a one-line reason over `@ts-ignore`.
 - **Swallowed errors** — Empty `catch {}`, `catch { return null }`, and `try` blocks that log and continue. A fallback that hides a failure is worse than the crash it prevents: rethrow or let it propagate. When wrapping, preserve the chain (`new Error(msg, { cause })`, `raise X from err`).
-- **Comment noise** — Strip comments that restate the code, commented-out code, and comments describing behavior the diff removed. Keep file headers, export JSDoc, and any comment carrying a *why* — a constraint, a workaround, an upstream bug reference.
+- **Masking defaults** — `?? ''`, `|| []`, `?? 0`, `.get(key, {})` standing in for a value that must exist. The default turns a missing config key or a broken upstream into quietly wrong output further down. When the type already rules out absence, the default is dead — drop it; when the value is optional in the type but required in fact, replace the default with an error that names what's missing, where the value is read. Keep defaults only where absence is a legitimate, expected state.
+- **Comment noise** — Strip comments that restate the code and comments describing behavior the diff removed. Keep file headers, export JSDoc, and any comment carrying a *why* — a constraint, a workaround, an upstream bug reference.
 - **Outdated patterns** — Verbose or legacy syntax where modern equivalents exist. See the transformation tables below.
 
 #### Efficiency
@@ -73,7 +75,7 @@ Evaluate the changes across these dimensions. Not every dimension applies to eve
 - **Gate** — `bun run devcheck` plus the test suite (`bun run test`) is the project gate in Phase 2 step 4 and Phase 4 step 5.
 - **Framework-provided utilities** — Before hand-rolling, check `src/utils/` and `src/errors/` in the project and `node_modules/@cyanheads/mcp-ts-core/` for framework exports: pagination helpers, schema builders, retry primitives, and the `ATTR_*` OTel attribute constants are framework-provided. Raw OTel attribute keys should be `ATTR_*` imports from `@cyanheads/mcp-ts-core/utils`.
 - **Error throwing patterns** — Prefer framework error factories (`McpError`, `validationError`, `notFound`, `httpErrorFromResponse`) over raw `throw new Error()`. Tool handlers should throw — the framework catches, classifies, and instruments.
-- **Error codes** — `InvalidParams` only for malformed JSON-RPC params shape. `ValidationError` for domain validation. `NotFound` for missing entities. Don't conflate them.
+- **Error codes** — `InvalidParams` for input the schema rejects (the framework raises it before the handler runs) and for an upstream 400 mapped by `httpErrorFromResponse`. `ValidationError` for a business rule the schema cannot express. `NotFound` for missing entities. Don't conflate them.
 - **Ctx usage** — Use `ctx.log`, `ctx.state`, `ctx.enrich` — don't reach for global loggers or request-scoped storage directly. The `ctx` pattern carries tenant scope and OTel context.
 - **Zod schemas** — Every tool input/output field needs `.describe()`. Zod 4 requires `z.record(z.string(), z.string())` not `z.record(z.string())`. Use `.optional()` rather than `.nullish()` unless null is semantically distinct from absent.
 - **Tool annotations** — `readOnlyHint`, `idempotentHint`, `openWorldHint` should reflect reality. A read-only tool with `readOnlyHint: false` gives clients the wrong picture.
@@ -90,24 +92,31 @@ Evaluate the changes across these dimensions. Not every dimension applies to eve
 3. **Correctness bugs are not this pass's job.** A real defect doesn't get folded into a cleanup diff — name it in the summary with file and line so it can be handled as its own change.
 4. **Transform incrementally** — one category of change at a time (modernize syntax, then reduce nesting, then consolidate).
 5. **Verify equivalence** — all functionality, types, and public interfaces must remain unchanged. Re-run the gate from Phase 2 after transforming; a simplification that breaks the build is worse than the verbosity it removed.
-6. **Keep the diff minimal.** Only touch lines that have a real reason to change. Don't reformat untouched code, add comments to code you didn't modify, or "improve" things that are already fine. Formatting belongs to the formatter (Biome, ruff): never hand-adjust whitespace, quotes, or import order, and never let a formatting-only hunk into the diff.
-7. **Never stage, commit, tag, or push.** This pass ends with a dirty working tree and a summary; landing the changes is the caller's call.
+6. **Keep the diff minimal.** Only touch lines that have a real reason to change. Don't reformat untouched code, add comments to code you didn't modify, or "improve" things that are already fine. Formatting belongs to the formatter (Biome, ruff): never hand-adjust whitespace, quotes, or import order. Hunks the project's formatter writes during a gate run stay, even outside the scope — reverting them only fights the next run; mention them in the summary.
+7. **Never stage, commit, tag, push, or stash.** This pass ends with a dirty working tree and a summary; landing the changes is the caller's call. A stash hides the very changes under review — compare against the baseline with `git diff`, never by setting work aside.
 
-When done, briefly summarize what was fixed, what was deliberately skipped, and any defects or out-of-scope recommendations — or confirm the code was already clean.
+When done, report:
+
+- **Gate** — the result before and after the pass, so a failure that predates the cleanup isn't pinned on it.
+- **Fixed** — what changed, grouped by category.
+- **Skipped** — findings deliberately left, each with its reason.
+- **Defects and recommendations** — correctness bugs and out-of-scope changes, each with `file:line`.
+
+When nothing earned a change, say the code was already clean.
 
 ## Common transformations
 
 The tables below cover TypeScript and Python. For other languages, apply analogous principles: prefer modern idioms, reduce nesting, eliminate dead code, follow project conventions. Check the project's language floor (`tsconfig` target/lib, `pyproject` `requires-python`) before applying a version-gated row.
 
-### TypeScript (modern ESM, TS 5.x+)
+### TypeScript (modern ESM)
 
 | Before | After | Why |
 | --- | --- | --- |
 | `const x: Foo = { ... } as Foo` | `const x = { ... } satisfies Foo` | Type-checked without assertion |
-| `let resource = acquire(); try { ... } finally { release(resource) }` | `using resource = acquire()` | Explicit resource disposal (TS 5.2+) |
+| `let resource = acquire(); try { ... } finally { release(resource) }` | `using resource = acquire()` | Explicit resource management (TS 5.2+) — only when the resource implements `Symbol.dispose` (`await using` for `Symbol.asyncDispose`); otherwise the `try`/`finally` stays |
 | `if (x !== null && x !== undefined)` | `if (x != null)` | Idiomatic null/undefined check |
 | `arr.filter(x => x !== null) as T[]` | `arr.filter(x => x != null)` | TS 5.5+ infers the type predicate — no cast; on older TS use an explicit `(x): x is T` predicate |
-| `export { foo } from './foo/index.js'` | Direct imports at call sites | Avoid barrel re-exports inside the package; barrel exports are for public APIs only |
+| `import { foo } from './index.js'` (a module importing through its own barrel) | `import { foo } from './foo.js'` | Inside a module, import siblings directly — routing through the module's own barrel invites import cycles. Across modules, the public barrel is the right entry point; leave those imports alone |
 | `import { readFile } from 'fs/promises'` | `import { readFile } from 'node:fs/promises'` | `node:` protocol — unambiguous, lint-enforced in Biome |
 | `async function f() { const a = await x(); const b = await y(); }` | `const [a, b] = await Promise.all([x(), y()])` | Parallel when independent |
 | `value \|\| fallback` | `value ?? fallback` | `\|\|` also swallows `0`, `''`, and `false` — use `??` unless every falsy value really should take the fallback |
@@ -116,10 +125,14 @@ The tables below cover TypeScript and Python. For other languages, apply analogo
 | `try { risky() } catch (e: any) { ... }` | `try { risky() } catch (e) { ... }` | Under `strict` the catch binding is already `unknown`; narrow with a type guard before use |
 | `catch (err) { throw new Error('load failed') }` | `throw new Error('load failed', { cause: err })` | Preserve the cause chain |
 | `[...arr].sort(cmp)` / `arr.slice().sort(cmp)` | `arr.toSorted(cmp)` | Non-mutating array methods (ES2023) — also `toReversed`, `toSpliced`, `with` |
+| `arr[arr.length - 1]` | `arr.at(-1)` | ES2022 — typed `T \| undefined`: equivalent under `noUncheckedIndexedAccess`, a new `undefined` to handle otherwise |
+| `arr.reduce((acc, x) => { (acc[key(x)] ??= []).push(x); return acc }, {})` | `Object.groupBy(arr, key)` | ES2024 — returns a null-prototype object whose values are typed `T[] \| undefined`; `Map.groupBy` for non-string keys |
+| `let resolve!: (v: T) => void; const p = new Promise<T>((r) => { resolve = r })` | `const { promise, resolve, reject } = Promise.withResolvers<T>()` | ES2024 — the deferred without the captured-variable dance |
+| `new Set([...a].filter((x) => b.has(x)))` | `a.intersection(b)` | ES2025 `Set` methods — also `union`, `difference`, `symmetricDifference`, `isSubsetOf`; the receiver must be a `Set` |
 | `const c = new AbortController(); setTimeout(() => c.abort(), ms)` | `AbortSignal.timeout(ms)` | Built-in timeout signal; combine with a caller's signal via `AbortSignal.any([...])` |
-| `JSON.parse(JSON.stringify(x))` | `structuredClone(x)` | Deep clone that preserves Date, Map, Set, and cycles |
+| `JSON.parse(JSON.stringify(x))` | `structuredClone(x)` | Deep clone that keeps Date, Map, Set, and cycles. Not a drop-in: it throws on functions and strips class prototypes, and Dates stay Dates instead of becoming strings |
 | `enum Status { A, B, C }` | `const Status = { A: 'A', B: 'B', C: 'C' } as const` | `enum`, `namespace`, and constructor parameter properties are non-erasable syntax rejected by TS 5.8 `erasableSyntaxOnly` and Node type-stripping — but switching numeric values to strings changes serialized output; keep values stable if they're persisted |
-| `function f(a: string, b: string, c: string, d?: string)` | `function f(opts: FnOptions)` | Options object when >3 params |
+| `function f(a: string, b: string, c: string, d?: string)` | `function f(opts: FnOptions)` | Internal functions whose same-typed positional params can be swapped and still type-check. An exported signature is API — leave it |
 | `throw new Error('Bad input')` (in a tool handler) | `throw validationError('Bad input', { field: 'x' })` | Use framework error factories so the framework can classify and instrument |
 | `const ATTR_KEY = 'mcp.tool.name'` | `import { ATTR_MCP_TOOL_NAME } from '@cyanheads/mcp-ts-core/utils'` | Use framework attribute constants |
 
@@ -134,13 +147,14 @@ The tables below cover TypeScript and Python. For other languages, apply analogo
 | `if isinstance(x, Foo): a = x.a; b = x.b` | `match x: case Foo(a=a, b=b): ...` | Structural pattern matching (3.10+) where it destructures — not as a replacement for a flat equality `if/elif` chain |
 | `class Config: def __init__(self, a, b, c): self.a = a ...` | `@dataclass(slots=True) class Config: a: str; b: int; c: float` | Less boilerplate, built-in eq/repr; `frozen=True` when instances shouldn't mutate |
 | `results = []; for item in items: results.append(transform(item))` | `results = [transform(item) for item in items]` | Idiomatic comprehension |
+| `[items[i:i + n] for i in range(0, len(items), n)]` | `itertools.batched(items, n)` | 3.12+ — works on any iterable, not just sequences; yields tuples, not lists |
 | `f = open('x'); try: ... finally: f.close()` | `with open('x') as f: ...` | Context manager for resources |
 | `os.path.join(d, n)`, `os.path.exists(p)`, `open(p).read()` | `Path(d) / n`, `p.exists()`, `p.read_text()` | `pathlib` over `os.path` string juggling |
 | `datetime.utcnow()` / `datetime.utcfromtimestamp(t)` | `datetime.now(UTC)` / `datetime.fromtimestamp(t, UTC)` | Deprecated in 3.12 — the old calls return naive datetimes that compare wrong against aware ones |
-| `zip(a, b)` | `zip(a, b, strict=True)` | 3.10+ — silently truncating to the shorter input hides bugs |
+| `zip(a, b)` where the inputs must match in length | `zip(a, b, strict=True)` | 3.10+ — a mismatch raises instead of silently truncating; plain `zip` stays where truncation is intended |
 | `m = pattern.match(s)` then `if m: use(m)` | `if (m := pattern.match(s)): use(m)` | Walrus operator where it removes a throwaway assignment |
 | `"Hello " + name + "!"` | `f"Hello {name}!"` | f-string over concatenation |
-| `except Exception as e: pass` | `except SpecificError as e: log(e)` | Catch specific, never bare except/pass |
+| `except Exception: pass` / `except Exception as e: log(e)` | `except SpecificError:` with real handling, or no `try` at all | Catch only what you can handle; everything else propagates (see Swallowed errors) |
 | `from module import *` | `from module import specific_name` | Explicit imports only |
 | Sequential `await` for independent I/O | `async with asyncio.TaskGroup() as tg: tg.create_task(a()); tg.create_task(b())` | Structured concurrency (3.11+) — cancels siblings on failure and raises an `ExceptionGroup`; `asyncio.gather(..., return_exceptions=True)` stays correct when every result is wanted regardless of failures |
 
@@ -154,7 +168,6 @@ Leave code alone when:
 - **Performance-critical paths.** A less readable version may exist for measured performance reasons — check before simplifying.
 - **API compatibility.** Don't change public function signatures, export shapes, or return types that callers depend on.
 - **Tests.** Don't DRY up test code aggressively — test readability and isolation matter more than deduplication.
-- **Type workarounds.** Sometimes an `as` cast or `# type: ignore` exists because of a genuine type system limitation — verify before removing.
 - **The abstraction isn't proven.** Don't create a shared utility for two similar blocks of code. Wait until there are three, and even then only if the abstraction is genuinely simpler than the duplication.
 - **`return await` inside `try` / `finally`.** Collapsing it to `return` is not equivalent — the promise settles outside the block, so `catch` never fires and `finally` runs early. Only strip `await` from a `return` in plain function-body position.
 - **Lazy logging arguments.** `logger.info("loaded %s in %sms", name, ms)` defers formatting until the record is emitted — don't turn it into an f-string.

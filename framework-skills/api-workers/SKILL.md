@@ -4,7 +4,7 @@ description: >
   Cloudflare Workers deployment using `createWorkerHandler` from `@cyanheads/mcp-ts-core/worker`. Covers the full handler signature, binding types, CloudflareBindings extensibility, runtime compatibility guards, and wrangler.toml requirements.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: reference
 ---
@@ -203,6 +203,8 @@ export function getServerConfig() {
 ```
 
 **`in-memory` storage is volatile.** Data stored with the `in-memory` provider is lost between cold starts and is not shared across Worker instances. Use `cloudflare-kv`, `cloudflare-r2`, or `cloudflare-d1` for any state that must persist or be shared.
+
+**Multi-round-trip retries land on any isolate.** Each 2026-07-28 request builds its own `McpServer`, and the retry after an `input_required` result can be routed to a different isolate. Set `MCP_REQUEST_STATE_KEY` (≥ 32 bytes) as a Worker secret — it is a core binding, injected like the rest — so every isolate seals and verifies `requestState` with the same key, and keep a consent gate's record (`api-context` § *Consent gates*) in `cloudflare-d1`. `in-memory` loses it to the next isolate, so the retry asks again. Never `cloudflare-kv`: it is eventually consistent, so a retry served elsewhere may not see the record yet, and a deletion may not yet stop an immediate replay — it widens the window concurrent retries already have, since redeeming is not atomic on any provider until `ctx.state` gains a `take` ([#593](https://github.com/cyanheads/mcp-ts-core/issues/593)).
 
 **Node-only utilities throw in Workers.** `scheduler` (`node-cron`), `sanitizePath` (fs-based), and `filesystem` storage provider all throw `ConfigurationError` when called from a Worker. Guard with `runtimeCaps.isNode` or avoid entirely.
 

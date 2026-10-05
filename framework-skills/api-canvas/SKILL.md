@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.3"
+  version: "2.7"
   audience: external
   type: reference
 ---
@@ -88,7 +88,7 @@ That collapse is also why the capacity hint reads the way it does: under `defaul
 
 ### Advertising the id shape
 
-`CanvasIdSchema` is exported from `@cyanheads/mcp-ts-core/canvas` — `z.string().regex(/^[A-Za-z0-9_-]{10}$/)` with a `.describe()` naming where an id comes from. A tool that declares its `canvas_id` field with it advertises the constraint in `inputSchema`, so a model sees the shape before it calls and an impossible value is rejected at argument validation rather than inside the handler:
+`CanvasIdSchema` is exported from `@cyanheads/mcp-ts-core/canvas` — `z.string().regex(/^[A-Za-z0-9_-]{10}$/, message)` with a `.describe()` naming where an id comes from. A tool that declares its `canvas_id` field with it advertises the constraint in `inputSchema`, so a model sees the shape before it calls and an impossible value is rejected at argument validation rather than inside the handler:
 
 ```ts
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
@@ -100,7 +100,7 @@ input: z.object({
 }),
 ```
 
-The two halves are independent. On a tool that adopts the shape, `"x"` fails as `InvalidParams` (-32602) with the framework's own `reason: 'invalid_arguments'` and a schema-derived hint, and the handler never runs — so `canvas_id_malformed` never fires there. It covers tools that have not adopted it and ids the registry receives from somewhere other than a validated argument, `importFrom`'s source id in particular. Adopting the shape does not change any existing server's advertised schema until that server adopts it.
+The two halves are independent. On a tool that adopts the shape, `"x"` or a table name like `"df_abc123"` fails as `InvalidParams` (-32602) with the framework's own `reason: 'invalid_arguments'`, and the handler never runs — so `canvas_id_malformed` never fires there. The rejection's message, `data.issues[0].message`, and recovery hint carry the schema's own sentence rather than the bare pattern: *Expected a canvas ID exactly as an earlier response on this server returned it: 10 characters of letters, digits, hyphens, and underscores. A table name is not a canvas ID.* A check message is not part of the emitted JSON Schema, so the advertised `inputSchema` stays `pattern` plus `description`. It covers tools that have not adopted it and ids the registry receives from somewhere other than a validated argument, `importFrom`'s source id in particular. Adopting the shape does not change any existing server's advertised schema until that server adopts it.
 
 ---
 
@@ -115,6 +115,15 @@ The two halves are independent. On a tool that adopts the shape, `"x"` fails as 
 | Persistence | In-memory only | — (v1; restart drops all canvases) |
 
 The sweeper runs as an `unref`'d `setInterval` — does not keep the event loop alive on its own. Shutdown via `core.canvas.shutdown(ctx)` (called automatically from `ServerHandle.shutdown()`) stops the sweeper and tears down every active DuckDB instance.
+
+### Scratch directory
+
+On first use the DuckDB provider creates one private directory, `mcp-canvas-XXXXXX`, under `CANVAS_TEMP_PATH` (the OS temp directory when unset) with `mkdtemp` — mode `0700` on POSIX; on Windows it inherits the parent's ACL, so there the parent must not grant other users access. All scratch I/O stays inside it:
+
+- **Spills.** Each canvas gets its own DuckDB `temp_directory` there. DuckDB names spill files by block size alone, so canvases sharing one directory would overwrite each other's evicted blocks once two of them spill past `memory_limit` at the same time.
+- **Staging.** Stream exports and `importFrom` write their transient files directly in it, under `crypto.randomUUID()` names, and unlink them once consumed. The directory's mode is the boundary, not the name.
+
+Dropping or expiring a canvas removes its spill directory once the calls still running on it settle, without waiting for them, since those calls can still be reading back the blocks it spilled. `shutdown()` removes the whole private directory once the calls still running against it settle, and does not wait for them: until then the directory stays in place and private, so no other local user can re-create its name and receive what those calls still write. A canvas whose creation straddles the shutdown is refused with `ServiceUnavailable` (-32000). A provider used again afterwards makes a fresh directory. After a crash or `SIGKILL` the directory stays behind, still private, and the next start does not sweep it — remove stale `mcp-canvas-*` directories by hand. A configured `CANVAS_TEMP_PATH` is created if missing and gets no ownership or mode check, so it must not be a directory another local user controls. When the private directory cannot be created, canvas creation fails with `ConfigurationError` (-32008) and the next attempt retries.
 
 ---
 
@@ -168,11 +177,11 @@ await instance.registerTable('recent_fetch', rows, { ttlMs: 30 * 60 * 1000 });
 
 Run SQL across registered tables. Returns at most `rowLimit` rows (default 10 000). When the result exceeds `rowLimit`, the response carries `truncated: true` and `rowCount` reflects the number of materialized rows (not the full result set). For full result sets and exact counts, pass `registerAs` — the result is materialized as a new canvas table; the response carries a `preview` slice and the exact `rowCount`.
 
-Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`) with a recovery hint to re-run the tool that staged the table or list what is currently staged. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape. A well-formed but unknown or expired `canvas_id` fails the same way (`data.reason: 'canvas_not_found'`, with its own recovery hint) — thrown by `acquire()` and every canvas operation. An id that fails the format check is a different failure: `ValidationError` with `data.reason: 'canvas_id_malformed'`, raised before the lookup on each of the three entry points that take a caller-supplied id — `acquire`, `drop` (which previously reported it as a silent `false`), and `importFrom`'s source id.
+Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_table'`, `data.tableName` carrying the full name as DuckDB reports it, spaces included) with a recovery hint to re-run the tool that staged the table or list what is currently staged. This happens when a table has expired (per-table TTL), been dropped, or the name is mistyped. The error is `NotFound`, not `ValidationError` — agents should re-stage, not fix the SQL shape. Only a read-shaped statement qualifies (one starting `SELECT`, `WITH`, or DuckDB's FROM-first `FROM`): a `DROP`, `DELETE`, `INSERT`, `UPDATE`, or `ALTER` naming a missing table is `non_select_statement`, since re-staging would not make it pass. A well-formed but unknown or expired `canvas_id` fails the same way (`data.reason: 'canvas_not_found'`, with its own recovery hint) — thrown by `acquire()` and every canvas operation. An id that fails the format check is a different failure: `ValidationError` with `data.reason: 'canvas_id_malformed'`, raised before the lookup on each of the three entry points that take a caller-supplied id — `acquire`, `drop` (which previously reported it as a silent `false`), and `importFrom`'s source id.
 
-A `SELECT` that parses but fails to prepare for any other reason — a mistyped column, an unknown function, an invalid expression — throws `ValidationError` (`data.reason: 'invalid_sql'`) and preserves the DuckDB binder detail in `data.binderMessage` (e.g. `Referenced column "x" not found...`, often with a candidate suggestion). This is distinct from `non_select_statement`, reserved for statements that genuinely aren't `SELECT`s — here the shape is fine, so the agent should fix the named column or function.
+A `SELECT` that parses but fails to prepare for any other reason — a mistyped column, an unknown scalar or table function, type, or collation, a schema the canvas does not have, an invalid expression — throws `ValidationError` (`data.reason: 'invalid_sql'`) and preserves the DuckDB binder detail in `data.binderMessage` (e.g. `Referenced column "x" not found...`, often with a candidate suggestion). This is distinct from `non_select_statement`, reserved for statements that genuinely aren't `SELECT`s — here the shape is fine, so the agent should fix the named column or function. DuckDB's FROM-first form (`FROM t`, `FROM t SELECT a`) is a `SELECT`: it passes the gate, and one that fails to prepare is classified the same way.
 
-A `SELECT` that prepares and then fails on the staged data throws `ValidationError` (`data.reason: 'sql_execution_error'`) with the engine message preserved and a hint pointing at `TRY_CAST` or filtering the offending rows. The split follows DuckDB's own execution-error classes — `Conversion Error`, `Invalid Input Error`, `Out of Range Error` — matched on the message prefix. Engine faults (`IO Error`, `INTERNAL Error`, `Out of Memory Error`, and anything unmatched) stay `DatabaseError`, so an export or import failing on I/O is never reported to the caller as bad SQL. `DUCKDB_ERROR_REASONS` exports these alongside `SQL_GATE_REASONS`.
+A `SELECT` that prepares and then fails on the staged data throws `ValidationError` (`data.reason: 'sql_execution_error'`) with the engine message preserved and a hint pointing at `TRY_CAST` or filtering the offending rows. The split follows DuckDB's own execution-error classes — `Conversion Error`, `Invalid Input Error`, `Out of Range Error` — matched on the message prefix. `sql_read_only` and `sql_parse_error` are matched the same way: DuckDB's `Permission Error` or a write refused in `read-only mode`, and `Parser Error`. Engine faults (`IO Error`, `INTERNAL Error`, `Out of Memory Error`, and anything unmatched) stay `DatabaseError` whatever their text says, so an export, import, or spill failing on I/O — `Permission denied`, `Read-only file system` — is never reported to the caller as bad SQL. Every engine message the provider throws has the export root and the [scratch directory](#scratch-directory) replaced with `[path]`, leaving only the part below them (the caller's own export name); the raw engine error stays on `cause` for logs. `DUCKDB_ERROR_REASONS` exports these alongside `SQL_GATE_REASONS`.
 
 **Every gate and engine rejection carries `data.recovery.hint`**, which the framework mirrors into `content[]` as a `Recovery:` line — so the guidance reaches `structuredContent`-only and `content[]`-only clients alike. The hints name a capability, never a framework method: an MCP client sees only the consuming server's tool names, so `registerTable()` or `describe()` in a hint is guidance it cannot follow. Write your own hints the same way (see `api-errors`).
 
@@ -229,7 +238,7 @@ const result = await instance.query("SELECT total FROM sales_by_region WHERE reg
 
 ### `instance.importFrom(sourceCanvasId, sourceTableName, options?)`
 
-Copy a table from another canvas the caller controls into this one. The lifecycle wrapper validates tenancy on both ids before the provider sees either. Round-trips through a Parquet file under the scratch root (`CANVAS_TEMP_PATH`) so `TIMESTAMP`/`DATE`/`BLOB` columns survive losslessly.
+Copy a table from another canvas the caller controls into this one. The lifecycle wrapper validates tenancy on both ids before the provider sees either. Round-trips through a Parquet file in the provider's [scratch directory](#scratch-directory) so `TIMESTAMP`/`DATE`/`BLOB` columns survive losslessly.
 
 ```ts
 const imported = await target.importFrom(source.canvasId, 'orders', { asName: 'orders_copy' });
@@ -246,7 +255,7 @@ Export a canvas table. Path-based exports are sandboxed to `CANVAS_EXPORT_PATH` 
 // Path target — written inside the sandbox.
 await instance.export('g_with_obs', { format: 'parquet', path: 'observations.parquet' });
 
-// Stream target — copied to a file under the scratch root, piped to the stream, unlinked.
+// Stream target — copied to a file in the provider's scratch directory, piped to the stream, unlinked.
 await instance.export('g_with_obs', { format: 'csv', stream: writableStream });
 ```
 
@@ -298,7 +307,7 @@ If your tool surfaces row data via `structuredContent`, the JSON-safe shape flow
 | `CANVAS_PROVIDER_TYPE` | `canvas.providerType` | `none` (also: `duckdb`) |
 | `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` |
 | `CANVAS_EXPORT_PATH` | `canvas.exportRootPath` | `./.canvas-exports` |
-| `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `<os.tmpdir()>/mcp-canvas` |
+| `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `os.tmpdir()` — parent of the private [scratch directory](#scratch-directory) |
 | `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `100` |
 | `CANVAS_TTL_MS` | `canvas.ttlMs` | `86_400_000` (24 h) |
 | `CANVAS_ABSOLUTE_CAP_MS` | `canvas.absoluteCapMs` | `604_800_000` (7 d) |
@@ -320,7 +329,7 @@ Most canvas use cases are public-data analytics: fetch from an upstream API, sta
 | Table naming | `spillover()` auto-names the table `spilled_<id>`; pass `tableName` for a stable handle. A dataframe-query surface commonly adds its own `df_<id>` convention. |
 | Access control | Possession of the `canvas_id` is access — unguessable in practice (see [token-sharing model](#the-token-sharing-model)). TTL + the framework rate limiter backstop brute force. |
 | Enable flag | None of your own — canvas presence is the gate (`CANVAS_PROVIDER_TYPE=duckdb`; `getCanvas()` returns `undefined` otherwise). |
-| Tools | A fetcher that spills **plus the dataframe trio — all three ship whenever canvas is integrated**. `dataframe_query` is mandatory once anything emits a `canvas_id`: a token with no query tool in the same server is dead output (the agent can't reach the staged data). `dataframe_describe` is required alongside it — the agent discovers staged table and column names before writing SQL. `dataframe_drop` is implemented but **opt-in via a server env var**: when the flag is off, register it with `disabledTool()` (see `add-tool`) so it stays visible in the manifest with the enable hint while uncallable. None are framework-provided; you register them. |
+| Tools | A fetcher that spills **plus the dataframe trio — all three ship whenever canvas is integrated**. `dataframe_query` is mandatory once anything emits a `canvas_id`: a token with no query tool in the same server is dead output (the agent can't reach the staged data). `dataframe_describe` is required alongside it — the agent discovers staged table and column names before writing SQL. `dataframe_drop` is implemented but **opt-in via a server env var**: when the flag is off, register it with `disabledTool()` (see `add-tool`) so it stays visible in the manifest with the enable hint while uncallable. `acquire()`'s `canvas_not_found` already carries a re-stage hint, which a declared contract recovery never overrides — right for describe/query, wrong for drop (a missing canvas has nothing left to remove). The drop handler catches that reason and re-raises it through its own `ctx.fail('canvas_not_found', …, { cause })`, leaving the contract entry unmarked by `thrownBy: 'service'`. None are framework-provided; you register them. |
 | Fetcher output | Two things in one response: the inline preview (answer to the immediate question) and the table handle (escape hatch for follow-up SQL via `dataframe_query`). Neither replaces the other. |
 
 > The `MCP_HTTP_MAX_BODY_BYTES` request-body cap is **inbound-only** — it bounds the JSON-RPC request, not the upstream data a handler stages into the canvas or the rows it returns. Canvas servers send small requests (queries, SQL, canvas IDs) regardless of dataset size, so the cap never constrains canvas ingestion.
@@ -511,7 +520,7 @@ The merged iterable streams — the helper does not double-buffer the full sourc
 | Sync or async | Caller-supplied | Forwarded to `registerTable` as-is |
 | Sync or async | Omitted | Helper infers via `inferSchemaFromRows` over preview buffer + sentinel |
 
-When the preview budget is small (single-digit rows) and the sniff window matters, pass `schema` explicitly — the helper's window is only as large as the preview budget allows.
+Pass `schema` explicitly whenever a column's type can't be read off the first rows — a fractional column whose leading values are all `0` or `null` sniffs as `BIGINT` (or `VARCHAR`), and the appender then truncates or stringifies every later value without an error. The sniff window is only as large as the preview budget, so shrinking `previewChars` widens the exposure; the same applies to `registerTable` called without a schema. Derive the schema from the row type once and pass it to both calls.
 
 ### Cancellation and partial state
 
@@ -563,7 +572,7 @@ When the preview budget is small (single-digit rows) and the sniff window matter
 - [ ] Accessor wired in `setup()` callback via `setCanvas(core.canvas)`
 - [ ] Handler guards for canvas availability (`if (!canvas) throw ...`)
 - [ ] `canvas_id` accepted as optional input, returned in output
-- [ ] A `dataframe_query` tool is registered in this server whenever any tool emits a `canvas_id` — a token with no query tool is dead output. Register `dataframe_describe` too (lets the agent discover staged table/column names)
+- [ ] A `dataframe_query` tool is registered in this server whenever any tool emits a `canvas_id` — a token with no query tool is dead output. Register `dataframe_describe` too (lets the agent discover staged table/column names), and `dataframe_drop` behind its opt-in env flag — wrapped in `disabledTool()` while the flag is off
 - [ ] Canvas earns its keep: the staged data is analytical (an agent would SQL it), not a discovery/search surface of categorical metadata
 - [ ] SQL queries are read-only (enforced by the four-layer gate, but don't attempt writes)
 - [ ] Testing: mock the module-level `getCanvas()` accessor with `vi.spyOn` or a test setup that calls `setCanvas(mockCanvas)`

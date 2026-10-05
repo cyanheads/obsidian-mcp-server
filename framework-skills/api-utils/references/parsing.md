@@ -12,7 +12,7 @@ All parsers are **Tier 3** — lazy-load their peer dependency on first call. Al
 - `<think>...</think>` blocks at the start of input are automatically stripped and logged at `debug` level (except `dateParser` and `pdfParser`)
 - Every `context?` parameter is optional (synthetic context created if omitted) and accepts the handler `Context` as well as a `RequestContext` bag
 - Input budgets are opt-in: a parser is unbounded unless the caller passes `maxBytes`, which then rejects an over-budget input with `ValidationError` (`reason: 'parser_input_too_large'`). `DEFAULT_TEXT_PARSER_MAX_BYTES` (1 MiB) and `DEFAULT_BINARY_PARSER_MAX_BYTES` (25 MiB) are exported as starting points, not applied defaults
-- Errors throw `McpError` — never return error values. The message is `<summary>: <library message>`, so it carries the underlying parser's diagnostic; `data` carries only `{ reason }`, and the input sample and stack stay on `cause`
+- Errors throw `McpError` — never return error values. The message is `<summary>: <library message>`, so it carries the underlying parser's diagnostic; `data` carries only `{ reason }` (`csvParser` adds Papa's `errors` list and a content sample), and the input sample and stack stay on `cause`. Input that is empty after `<think>` stripping and trimming rejects with `ValidationError` (`reason: 'parser_input_empty'`). The `context` you pass is for log correlation only — it never becomes error `data`, which reaches the client
 
 ---
 
@@ -56,7 +56,7 @@ const data = await xmlParser.parse<FeedResponse>(xmlString);
 |:-------|:----------|
 | `parse` | `<T = unknown>(csvString, options?, context?) -> Promise<Papa.ParseResult<T>>` |
 
-`options` is `Papa.ParseConfig` forwarded verbatim — key options: `header`, `delimiter`, `dynamicTyping`. Returns `{ data: T[], errors: ParseError[], meta: ParseMeta }`. Throws `ValidationError` if `result.errors` is non-empty.
+`options` is `Papa.ParseConfig` forwarded verbatim — key options: `header`, `delimiter`, `dynamicTyping`. Returns `{ data: T[], errors: ParseError[], meta: ParseMeta }`. Throws `ValidationError` if `result.errors` is non-empty, with `data: { reason: 'csv_parse_failed', errors, originalContentSample }`.
 
 ```ts
 const result = await csvParser.parse<Row>(csvString, { header: true, dynamicTyping: true });

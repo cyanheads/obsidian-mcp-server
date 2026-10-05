@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against this MCP server's own repo. Use for server-specific issues — tool logic, service integrations, config problems, or domain bugs that aren't caused by the framework.
 metadata:
   author: cyanheads
-  version: "1.10"
+  version: "1.12"
   audience: external
   type: workflow
 ---
@@ -38,7 +38,8 @@ gh repo view --json nameWithOwner -q '.nameWithOwner'
 gh issue list --search "your error message or keyword" --state all
 
 # Assess a close match before commenting — is it already linked to a fix or referenced elsewhere?
-gh issue view <number> --comments
+gh issue view <number>              # body
+gh issue view <number> --comments   # thread only — without a TTY it prints no body
 gh api 'repos/{owner}/{repo}/issues/<number>/timeline' --paginate \
   --jq '.[] | select(.event=="cross-referenced") | .source.issue | "\(.repository.full_name)#\(.number) — \(.title)"'
 ```
@@ -87,11 +88,11 @@ gh issue create \
   --body "$(cat <<'ISSUE'
 ### Server version
 
-0.1.0
+<package.json version>
 
 ### mcp-ts-core version
 
-0.1.29
+<installed version from node_modules/@cyanheads/mcp-ts-core/package.json — not the ^ range>
 
 ### Runtime
 
@@ -99,7 +100,7 @@ Bun
 
 ### Runtime version
 
-Bun 1.3.x
+<bun --version>
 
 ### Transport
 
@@ -158,7 +159,7 @@ Every issue needs exactly one primary label. Stack secondary labels on top when 
 | `regression` | Worked before, broken after a change |
 | `performance` | Memory, CPU, latency, or resource usage |
 | `security` | Vulnerability, CVE, or hardening work |
-| `breaking-change` | Change will break public API; requires a major bump |
+| `breaking-change` | Change will break public API or an existing tool contract |
 | `blocked-by-framework` | Fix requires a released change in `@cyanheads/mcp-ts-core`; pairs with a `Depends on: cyanheads/mcp-ts-core#N` line in the body |
 | `blocked-by-sdk` | Fix requires changes in `@modelcontextprotocol/sdk` |
 | `surplus-token-idea` | Worth exploring when token budget allows |
@@ -173,7 +174,7 @@ Secondary labels are not GitHub defaults — if `gh issue create --label "regres
 gh label create regression --color e99695 --description "Worked before, broken after a change"
 gh label create performance --color 5319e7 --description "Memory, CPU, latency, or resource usage"
 gh label create security --color b60205 --description "Vulnerability, CVE, or hardening work"
-gh label create breaking-change --color d93f0b --description "Change will break public API; requires a major bump"
+gh label create breaking-change --color d93f0b --description "Change will break public API or an existing tool contract"
 gh label create blocked-by-framework --color fbca04 --description "Fix requires a released change in @cyanheads/mcp-ts-core"
 gh label create blocked-by-sdk --color c5def5 --description "Fix requires changes in @modelcontextprotocol/sdk"
 gh label create surplus-token-idea --color FF10F0 --description "Worth exploring when token budget allows"
@@ -258,7 +259,8 @@ When genuinely ambiguous, file against this server's repo and note that it might
 ## Following Up
 
 ```bash
-# View issue details (with comment thread)
+# View the issue body, then its comment thread (--comments without a TTY prints no body)
+gh issue view <number>
 gh issue view <number> --comments
 
 # Add context

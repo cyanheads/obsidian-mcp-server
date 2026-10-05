@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against @cyanheads/mcp-ts-core when you hit a framework issue. Use when a builder, utility, context method, or config behaves contrary to the documented API — not for server-specific application bugs.
 metadata:
   author: cyanheads
-  version: "1.12"
+  version: "1.14"
   audience: external
   type: workflow
 ---
@@ -33,7 +33,8 @@ For general `gh` CLI workflows outside issue filing (PRs, workflows, API access)
 gh issue list -R cyanheads/mcp-ts-core --search "your error message or keyword" --state all
 
 # Assess a close match before commenting — is it already linked to a fix or referenced elsewhere?
-gh issue view <number> -R cyanheads/mcp-ts-core --comments
+gh issue view <number> -R cyanheads/mcp-ts-core              # body
+gh issue view <number> -R cyanheads/mcp-ts-core --comments   # thread only — without a TTY it prints no body
 gh api 'repos/cyanheads/mcp-ts-core/issues/<number>/timeline' --paginate \
   --jq '.[] | select(.event=="cross-referenced") | .source.issue | "\(.repository.full_name)#\(.number) — \(.title)"'
 ```
@@ -80,7 +81,7 @@ gh issue create -R cyanheads/mcp-ts-core \
   --body "$(cat <<'ISSUE'
 ### mcp-ts-core version
 
-0.1.29
+<installed version from node_modules/@cyanheads/mcp-ts-core/package.json — not the ^ range>
 
 ### Runtime
 
@@ -88,7 +89,7 @@ Bun
 
 ### Runtime version
 
-Bun 1.3.x
+<bun --version>
 
 ### Transport
 
@@ -174,7 +175,7 @@ Every issue needs exactly one primary label. Stack secondary labels on top when 
 | `regression` | Worked before, broken after an update |
 | `performance` | Memory, CPU, latency, or resource usage |
 | `security` | Vulnerability, CVE, or hardening work |
-| `breaking-change` | Fix/feature will break public API; requires a major bump |
+| `breaking-change` | Fix/feature will break public API |
 | `blocked-by-sdk` | Fix requires changes in `@modelcontextprotocol/sdk` |
 | `surplus-token-idea` | Worth exploring when token budget allows |
 
@@ -249,7 +250,8 @@ ISSUE
 ## Following Up
 
 ```bash
-# Check issue status (with comment thread)
+# Check issue status, then its comment thread (--comments without a TTY prints no body)
+gh issue view <number> -R cyanheads/mcp-ts-core
 gh issue view <number> -R cyanheads/mcp-ts-core --comments
 
 # Add context or respond to maintainer questions

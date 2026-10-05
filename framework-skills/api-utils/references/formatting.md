@@ -22,7 +22,7 @@ import { markdown, MarkdownBuilder, diffFormatter, tableFormatter, treeFormatter
 | `keyValuePlain` | `(key, value) -> this` | `key: value` (no bold) |
 | `list` | `(items, ordered?) -> this` | `ordered` defaults to `false`; empty arrays silently ignored |
 | `codeBlock` | `(content, language?) -> this` | Fenced block; `language` defaults to `''`. The fence outgrows the longest backtick run in `content`, so a payload the tool did not author (upstream text, a file excerpt) cannot break out of the block; content is emitted byte-for-byte |
-| `inlineCode` | `(code) -> this` | Backtick-wrapped; no trailing newline |
+| `inlineCode` | `(code) -> this` | Code span; no trailing newline. The backtick delimiter outgrows the longest backtick run in `code`, space-padded when a backtick touches either end or the value both begins and ends with a space, so a value the tool did not author reads back byte-identical as one span and cannot break out into live markdown. A value with no backtick that does not both begin and end with a space renders as `` `code` `` |
 | `paragraph` | `(text) -> this` | Text + `\n\n` |
 | `blockquote` | `(text) -> this` | Each line prefixed with `>` + space |
 | `hr` | `() -> this` | `---` |

@@ -4,7 +4,7 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.15"
+  version: "1.20"
   audience: external
   type: reference
 ---
@@ -64,16 +64,11 @@ export const fetchTool = tool('fetch_articles', {
 |:--------|:---------|
 | Compile time | `ctx.fail('typo')` is a TS error. Auto-completes declared reasons. |
 | Runtime | `ctx.fail(reason, msg?, data?, options?)` builds an `McpError(contract.code, msg, { ...data, reason }, options)` — `data.reason` is auto-populated from the contract and cannot be overridden by caller-supplied data (spread first, then `reason` written last), so observers see a stable identifier. `options` accepts `{ cause }` for ES2022 error chaining. |
+| Runtime (recovery) | A failure whose `data.reason` names a declared entry and carries no `data.recovery` gets `data.recovery.hint` set to the entry's `recovery` at the handler boundary — see below. |
 | Lint (devcheck) | Each `code` validated against `JsonRpcErrorCode`. Reasons validated as snake_case + unique within contract. `recovery` validated as non-empty and ≥ 5 words. Build-time only — not invoked at server startup. |
-| Lint (conformance) | If the handler `throw new McpError(JsonRpcErrorCode.X)` outside `ctx.fail`, conformance check warns when X isn't declared. The inverse is checked too: a declared reason no `ctx.fail` in the handler names warns as `error-contract-unthrown` (mark it `thrownBy: 'service'` when the service layer produces it), and a `ctx.fail` site that never forwards the declared `recovery` warns as `error-contract-recovery-unforwarded`. |
+| Lint (conformance) | If the handler `throw new McpError(JsonRpcErrorCode.X)` outside `ctx.fail`, conformance check warns when X isn't declared. The inverse is checked too: a declared reason no `ctx.fail` in the handler names warns as `error-contract-unthrown` (mark it `thrownBy: 'service'` when the service layer produces it). |
 
-> **`recovery` is opt-in resolution, not auto-population.** The contract `recovery` is required metadata documenting the agent's next move when this failure mode fires (a forcing function for thoughtful guidance — placeholders like "Try again." get flagged by the linter). It does **not** automatically appear in runtime `data.recovery.hint` — the framework never injects it without an explicit signal at the throw site. Authors opt in by spreading `ctx.recoveryFor('reason')` into the `data` argument, the same way `ctx.fail('reason')` opts into resolving the contract `code`. What the author types at the throw site is what flows to the wire, with no hidden transformation; the resolver is just a typed lookup keyed by the same `reason` the author already typed.
-
-#### `ctx.recoveryFor` — opt-in contract resolution
-
-`ctx.recoveryFor(reason)` returns `{ recovery: { hint: <contract.recovery> } }` for a declared reason, ready to spread into `data`. Always available on `Context` (returns `{}` when no contract is attached or the reason is unknown — spread-safe with no optional chaining). On `HandlerContext<R>` it tightens to a typed signature constrained to the declared reason union.
-
-Spreading it into the data object and passing it as the data argument are the same call — `ctx.fail` spreads whatever `data` it receives. Spread when the site carries other keys, pass it directly when it carries nothing else. **Forwarding is lint-enforced per throw site:** a `ctx.fail` site that carries neither the resolver nor its own `recovery` key warns as `error-contract-recovery-unforwarded`, because the declared hint then reaches neither client surface and an error-path test asserting `code` and `reason` still passes.
+> **`recovery` is the wire default for its reason.** The contract `recovery` is required metadata documenting the agent's next move when this failure mode fires (a forcing function for thoughtful guidance — placeholders like "Try again." get flagged by the linter), and it is what the caller receives. When a failure whose `data.reason` names a declared entry reaches the tool or resource handler factory with no `data.recovery`, the factory sets `data.recovery.hint` to that entry's `recovery` before it logs the failure and builds the envelope, so the `Error in tool:<name>` record, `structuredContent.error.data`, and the `Recovery:` line in `content[]` carry the same hint. It matches on the reason alone — a bare `ctx.fail('reason')`, a service throwing `notFound(msg, { reason })`, and a declared reason raised through a factory with a different code all get it. A throw-site `recovery` always wins, whatever its shape. An undeclared reason, a tool without `errors[]`, a non-`McpError` throw, and a cancelled call get nothing, and the framework-owned `invalid_arguments` / `client_capability_missing` refusals keep their own hints. The thrown `McpError` is never changed — a handler-level test of `ctx.fail` sees exactly what the throw site wrote — and `runToolContract` applies the same fill, so a contract test sees the production envelope. Prompts declare no contract.
 
 ```ts
 export const calculateTool = tool('calculate', {
@@ -85,32 +80,29 @@ export const calculateTool = tool('calculate', {
   ],
   handler(input, ctx) {
     if (!input.expression.trim()) {
-      // Static recovery — resolve from the contract.
-      throw ctx.fail('empty_expression', undefined, { ...ctx.recoveryFor('empty_expression') });
+      // Static recovery — the framework fills the contract's hint onto the wire.
+      throw ctx.fail('empty_expression');
     }
     // ...
   },
 });
 ```
 
-Same pattern works inside services that accept `ctx`:
+Same for a service, which needs no `ctx` to get the hint — the reason is enough:
 
 ```ts
 export class MathService {
-  parse(expr: string, ctx: Context) {
+  parse(expr: string) {
     try {
       return mathjs.parse(expr);
     } catch (err) {
-      throw validationError(`Parse failed: ${err.message}`, {
-        reason: 'parse_failed',
-        ...ctx.recoveryFor('parse_failed'),  // {} if calling tool has no matching reason
-      });
+      throw validationError(`Parse failed: ${err.message}`, { reason: 'parse_failed' });
     }
   }
 }
 ```
 
-The contract is the single source of truth — write the recovery once, lint validates ≥5 words, the resolver carries it to every throw site that opts in. For runtime-context recovery (interpolating input values, attempted IDs, queue state), override at the throw site:
+The contract is the single source of truth — write the recovery once, lint validates ≥5 words, and the framework carries it to every failure with that reason. For runtime-context recovery (interpolating input values, attempted IDs, queue state), override at the throw site:
 
 ```ts
 throw ctx.fail('no_match', `No item ${id}`, {
@@ -120,7 +112,11 @@ throw ctx.fail('no_match', `No item ${id}`, {
 
 > **A recovery hint names a capability, never an internal method.** The reader is a model whose only reachable surface is this server's tool names — it cannot call a TypeScript method, set a library option, or re-run an internal function. `Re-stage the table via registerTable()` is unfollowable and invites a hallucinated tool call; `Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool` is actionable from where the reader sits. Name a condition the caller cannot observe — an option flag they never set — and the hint is noise for the same reason. The framework holds its own throws to this rule: the canvas SQL gate's rejections point at the dataframe-query and dataframe-describe capabilities rather than the provider methods behind them.
 
-`ctx.recoveryFor` is the first member of a planned **family of opt-in resolution helpers**. Future contract-bound fields (`troubleshootingFor`, `userMessageFor`, …) follow the same shape: single-purpose, spreadable wire-shape, `{}` fallback when not applicable.
+#### `ctx.recoveryFor` — the entry's hint at the throw site
+
+`ctx.recoveryFor(reason)` returns `{ recovery: { hint: <contract.recovery> } }` for a declared reason, ready to spread into `data`. Always available on `Context` (returns `{}` when no contract is attached or the reason is unknown — spread-safe with no optional chaining). On `HandlerContext<R>` it tightens to a typed signature constrained to the declared reason union.
+
+It is not needed to put a declared hint on the wire — the fill above does that. Reach for it when the hint has to ride the thrown error itself: a test asserting `data.recovery` on the handler's own throw, or a site that deliberately sends another entry's guidance (`ctx.fail('a', msg, ctx.recoveryFor('b'))`), which the fill respects as authored.
 
 #### `severity` — log a modeled outcome below `error`
 
@@ -138,12 +134,14 @@ Values are the logger's own level names below `error` — `debug`, `info`, `noti
 
 | Surface | Under a declared severity |
 |:--------|:--------------------------|
-| The `Error in tool:<name>` log record | Emitted at the declared level. Same message, same structured fields. |
+| The `Error in tool:<name>` log record | Emitted at the declared level. Same message, same structured fields, the stack included — except an argument rejection's record, which is bounded and carries no stack (see below). |
 | `mcp.errors.classified` | Gains an `mcp.error.severity` attribute. The `reason` itself never becomes a metric attribute. |
 | `isError`, the JSON-RPC code, `structuredContent.error`, `content[]` | Byte-identical to the undeclared case. |
 | Span status, `mcp.tool.calls`, `mcp.tool.duration`, `mcp.tool.errors` | Unchanged — the call still failed, and splitting those series would redefine what an error rate means. |
 
-**Tools only.** Resolution happens in the tool handler factory, against the thrown error's `data.reason`. Resources declare `errors[]` but re-throw for the SDK to log, so the field is accepted there and inert. A reason thrown below the handler that the contract never declared, an entry with no `severity`, and a non-`McpError` throw all keep `error`. A cancelled request keeps its own `info`, stack-free path regardless.
+**Tools only.** Resolution happens in the tool handler factory, against the thrown error's `data.reason` — the same reason-to-entry lookup that fills `data.recovery`. Resources declare `errors[]` but write no failure record, so the field is accepted there and inert. A reason thrown below the handler that the contract never declared, an entry with no `severity`, and a non-`McpError` throw all keep `error`. A cancelled request keeps its own `info`, stack-free path regardless.
+
+**The framework's own refusals log at `notice`.** An argument rejection (`invalid_arguments`, raised only by the schema gate before the handler runs), a `ctx.requestInput` the connection cannot serve (`client_capability_missing`), and a missing-scope refusal (the `Forbidden` the inline `auth` check or `checkScopes` throws) are routine caller or connection traffic, not server faults, so their `Error in tool:<name>` record — and the failure-payload record when `LOG_TOOL_FAILURE_PAYLOADS=true` — is emitted at `notice`, and `mcp.errors.classified` counts them with `mcp.error.severity: "notice"`. Nothing to declare; an `errors[]` entry naming `invalid_arguments` or `client_capability_missing` with its own `severity` still wins, while a missing-scope refusal carries no `data.reason`, so its level is fixed. That refusal is recognized by where it was raised, never by its code: a handler's own `forbidden()`, an upstream 403 mapped by `httpErrorFromResponse`, and a missing auth context (`Unauthorized`) keep `error` and the stack. The missing-scope and argument-rejection records log no stack, and an argument rejection's record is bounded whatever the caller sends: the message, `recovery.hint`, each issue's `message`, each `data.input` key, and every other string keep at most their first 1,024 characters and every array its first 10 entries, with the uncut length or count beside each cut (`originalMessageLength`, `<field>Length`, `<field>Count`, `<field>Lengths`). The wire envelope and `mcp.tool.rejections` are unchanged — the `-32602` result still carries every key and issue whole — and a schema that wrongly rejects valid calls still shows per tool on `mcp.tool.rejections`.
 
 **Skip the contract** for one-off internal tools or quick prototypes — `ctx` is plain `Context` (no `fail`) and you throw via [factories](#error-factories-fallback) directly. Behavior is identical at the wire; the contract just adds compile-time safety.
 
@@ -173,7 +171,7 @@ errors: [
 ]
 ```
 
-The handler doesn't catch and re-throw — letting service errors bubble unchanged keeps "logic throws, framework catches" intact. The wire payload still carries `code` + `data.reason`, and clients can switch on reason without parsing message text. What's lost is lint-time enforcement that every reason is reachable; compensate with one wire-shape test per reason.
+The handler doesn't catch and re-throw — letting service errors bubble unchanged keeps "logic throws, framework catches" intact. The wire payload carries `code`, `data.reason`, and the declared entry's `recovery` as `data.recovery.hint` (filled at the handler boundary, whatever code the service picked), so clients can switch on reason without parsing message text. What's lost is lint-time enforcement that every reason is reachable; compensate with one wire-shape test per reason.
 
 **Mark the entries the service produces.** `error-contract-unthrown` reads the handler body alone, so in a handler that mixes one local precondition with service-thrown reasons it flags each service reason as dead. Add `thrownBy: 'service'` to those entries:
 
@@ -186,24 +184,15 @@ errors: [
 ]
 ```
 
-The field is lint-only metadata — nothing at runtime reads it, so the entry is typed, advertised, and thrown exactly as an unmarked one, and its reason stays in the `ctx.fail` / `ctx.recoveryFor` union. It suppresses the one rule that cannot see below the handler, and only for the entries it marks; the handler's own reasons keep being checked.
-
-To carry the contract `recovery` from a service throw, accept `ctx` and spread the resolver:
-
-```ts
-throw validationError(message, {
-  reason: 'parse_failed',
-  ...ctx.recoveryFor('parse_failed'),  // {} when calling tool has no matching reason
-});
-```
-
-`ctx.recoveryFor` is always present on `Context` (no-op when no contract), so services don't need to know which tool called them — the spread is safe either way.
+The field is lint-only metadata — nothing at runtime reads it, so the entry is typed, advertised, and thrown exactly as an unmarked one (its `recovery` filled like any other), and its reason stays in the `ctx.fail` / `ctx.recoveryFor` union. It suppresses the one rule that cannot see below the handler, and only for the entries it marks; the handler's own reasons keep being checked.
 
 ---
 
 ## When not to throw
 
 Throw when the server has authoritative classification — auth failure, rate limit, schema violation, upstream 5xx, missing required input. Don't throw when "this looks wrong" depends on intent the server can't see. For mutators, surface raw pre- and post-mutation observable state in the response and let the agent decide whether it matches intent — the server can detect that the file shrunk, but only the agent knows whether it was supposed to. Tell: defensive code justified as a free rider on other work — audit it standalone, and it usually doesn't earn its keep.
+
+A best-effort call that catches and degrades must still rethrow on `ctx.signal?.aborted`: `catch (err) { if (ctx.signal?.aborted) throw err; return degraded(); }`. One example is an enrichment lookup whose failure should return the primary result with a notice. The factory maps a cancelled handler to `RequestCancelled` only when the handler throws. A catch-all degrade turns the caller's cancellation into a "successful" response and logs a false failure warning.
 
 ---
 
@@ -254,7 +243,7 @@ throw new McpError(code, message?, data?, options?)
 
 - `code` — a `JsonRpcErrorCode` enum value
 - `message` — optional human-readable description of the failure
-- `data` — optional structured context (plain object)
+- `data` — optional structured data (plain object), returned to the client verbatim. Pass the explicit fields the caller acts on (the rejected key, a limit, a `reason`), never `ctx` or another request context: a handler `ctx` carries request metadata and, after an elicitation round, what the user typed. Framework helpers follow the same rule — a storage, parser, or formatter failure carries only its offending field or a `reason`, whatever context you pass them.
 - `options` — optional `{ cause?: unknown }` for error chaining
 
 **Example:**
@@ -312,23 +301,28 @@ Use factories or `McpError` directly when the code must be exact — auto-classi
 
 The framework applies these steps in order — first match wins:
 
-1. **Request signal aborted** — `ctx.signal.aborted` is `true` when the handler unwinds → `RequestCancelled`. Resolved by the tool and resource handler factories before the thrown value is classified at all, so it outranks every step below, `McpError` included: the caller withdrew the request, and what the handler threw on the way out does not change that. Covers every shape an abort leaves behind — a `notifications/cancelled` `reason` string, the `DOMException` named `AbortError` a reason-less cancellation produces, a service's own `McpError`, and the SDK's `SdkError(ConnectionClosed)` on transport close. The accepted cost is that an unrelated fault raised after the abort is recorded as a cancellation too; it is bounded, because the SDK writes no response for a request whose signal it aborted. A handler that throws while the signal is live is untouched by this step.
+1. **Request signal aborted** — `ctx.signal.aborted` is `true` when the handler unwinds → `RequestCancelled`. Resolved before the thrown value is classified at all — by the tool and resource handler factories, and by the HTTP transport's error handler against the inbound request's signal, which catches a caller that hangs up before any handler runs (mid-body, say) and answers it 499 — so it outranks every step below, `McpError` included: the caller withdrew the request, and what the handler threw on the way out does not change that. Covers every shape an abort leaves behind — a `notifications/cancelled` `reason` string, the `DOMException` named `AbortError` a reason-less cancellation produces, a service's own `McpError`, and the SDK's `SdkError(ConnectionClosed)` on transport close. The accepted cost is that an unrelated fault raised after the abort is recorded as a cancellation too; it is bounded, because the SDK writes no response for a request whose signal it aborted. A handler that throws while the signal is live is untouched by this step.
 2. **`McpError` instance** — `error.code` is preserved as-is; no classification needed.
-3. **SDK transport-closed rejection** — an `SdkError` carrying `SdkErrorCode.ConnectionClosed` → `RequestCancelled`. The SDK rejects every in-flight request when the transport closes, which is what a client disconnect looks like from inside a handler. Matched on the code, not the message: one of its wordings says "aborted" and would otherwise be caught by the generic abort pattern in step 6 and read as a `Timeout`. Still the rule for a throw raised where no request signal is in scope — a service, an outbound leg, a background task.
-4. **JS constructor name** — matched against a fixed table (e.g. `ZodError` → `ValidationError`, `SyntaxError` → `ValidationError`). Note: `TypeError` is intentionally excluded — runtime TypeErrors are programmer errors, not validation failures.
-5. **Provider-specific patterns** — HTTP status codes, AWS exception names, Supabase, OpenRouter. Checked before common patterns because they are more specific (e.g. `status code 429` beats the generic `rate limit` pattern).
-6. **Common message/name patterns** — broad keyword patterns covering auth, not-found, validation, etc. First match wins; order matters.
-7. **`AbortError` name** — `error.name === 'AbortError'` → `Timeout`.
-8. **Fallback** — `InternalError`.
+3. **SDK transport-closed rejection** — an `SdkError` carrying `SdkErrorCode.ConnectionClosed` → `RequestCancelled`. The SDK rejects every in-flight request when the transport closes, which is what a client disconnect looks like from inside a handler. Matched on the code, not the message: one of its wordings says "aborted" and would otherwise be caught by the generic abort pattern in step 7 and read as a `Timeout`. Still the rule for a throw raised where no request signal is in scope — a service, an outbound leg, a background task.
+4. **Engine resource limit** — a `RangeError` whose **whole** message is one the engine raises when it runs out of a resource → `InternalError`: `Maximum call stack size exceeded` (JavaScriptCore adds a trailing period) and the maximum string size (V8 `Invalid string length`, JavaScriptCore `Out of memory`). A handler that recurses without bound names nothing a caller can change, so it is a server fault. Every other `RangeError` — `new Array(-1)`, `(1).toFixed(101)`, an invalid date, `1n / 0n`, or one whose message merely contains a limit text — continues to step 5.
+5. **JS constructor name** — matched against a fixed table (e.g. `ZodError` → `ValidationError`, `SyntaxError` → `ValidationError`). Note: `TypeError` is intentionally excluded — runtime TypeErrors are programmer errors, not validation failures.
+6. **Provider-specific patterns** — HTTP status codes, AWS exception names, Supabase, OpenRouter. Checked before common patterns because they are more specific (e.g. `status code 429` beats the generic `rate limit` pattern).
+7. **Common message/name patterns** — broad keyword patterns covering auth, not-found, validation, etc. First match wins; order matters.
+8. **`AbortError` name** — `error.name === 'AbortError'` → `Timeout`.
+9. **Fallback** — `InternalError`.
 
 However it is reached, a `RequestCancelled` is logged at `info` with no stack — neither the thrown value's own nor one reached through its cause chain. Step 1 settles the completion log too, which carries `metrics.errorCode: "-32011"` alongside `isSuccess: false`; a raw `SdkError` that reaches the code through step 3 alone is not an `McpError`, so that log still reads `UNHANDLED_ERROR`.
+
+The code this ladder picks is the one the caller receives, and it is also the origin every error counter records: `mcp.tool.error_category`, `mcp.prompt.error_category`, and `mcp.error.category` on `mcp.errors.classified` all bucket that same code, so a plain `Error('Request timed out')` files as `upstream` everywhere, never `server` on one counter and `upstream` on another. See `api-telemetry`'s Error category.
+
+**The framework's own output-contract parses are not caller errors.** A result that breaks the definition's `output` schema (tools and resources) or its `enrichment` block fails as `InternalError` (`-32603`), with a message naming the definition and the contract — `Tool my_tool returned output that does not match its output schema: items.0.id: …` — and no `data`. It is the handler's bug, so it files as `server`, not the `ValidationError` a raw `ZodError` would get. A `ZodError` the handler throws from its own validation keeps `ValidationError`.
 
 ### JS Constructor Name Mappings
 
 | Constructor | Mapped Code |
 |:------------|:------------|
 | `SyntaxError` | `ValidationError` |
-| `RangeError` | `ValidationError` |
+| `RangeError` | `ValidationError` (an engine resource limit is settled first, as `InternalError` — step 4) |
 | `URIError` | `ValidationError` |
 | `ZodError` | `ValidationError` |
 | `ReferenceError` | `InternalError` |
@@ -388,31 +382,42 @@ Checked before common patterns. Cover: AWS exception names, HTTP status codes, D
 | Layer | Pattern |
 |:------|:--------|
 | Tool/resource handlers | Throw `McpError` — no try/catch |
-| Handler factory (tools) | Catches all errors, normalizes to `McpError`, sets `isError: true`, mirrors error across both client surfaces (see [Error-path parity](#error-path-parity)) |
-| Handler factory (resources) | Catches and re-throws to the SDK, which routes through the JSON-RPC error envelope |
+| Handler factory (tools) | Catches all errors, fills a declared `recovery`, normalizes to `McpError`, sets `isError: true`, adds `data.requestId`, mirrors error across both client surfaces (see [Error-path parity](#error-path-parity)) |
+| Handler factory (resources) | Catches, fills a declared `recovery`, adds `data.requestId`, and re-throws to the SDK, which routes through the JSON-RPC error envelope |
+| Prompt registration, HTTP transport | Log the failure, then answer the JSON-RPC error with the thrown `McpError`'s `data` plus `data.requestId` |
 | Services/setup code | `ErrorHandler.tryCatch` for structured logging and wrapping (always rethrows — never swallows) |
 
 ### Error-path parity
 
-MCP clients differ in which `CallToolResult` surface they forward to the agent. Tool errors mirror the success-path `format-parity` invariant — the text carries the message, the recovery hint, and the two fields a caller branches on, while the numeric `code` and `data.issues` stay JSON-only:
+MCP clients differ in which `CallToolResult` surface they forward to the agent. Tool errors mirror the success-path `format-parity` invariant — the text carries the message, the recovery hint, the two fields a caller branches on, and the request id, while the numeric `code` and `data.issues` stay JSON-only:
 
 | Surface | Content | Read by |
 |:--------|:--------|:--------|
-| `content[]` | Text rendering: `Error: <message>`, then `Recovery: <hint>` when `data.recovery.hint` adds something the message does not already say, then `(reason <reason> · not retryable)` for whichever of `data.reason` / `data.retryable` is present | Claude Desktop and other format()-only clients |
-| `structuredContent.error` | JSON `{ code, message, data? }` carrying the error code, message, and any structured data from the thrown `McpError` or `ZodError` | Claude Code and other structuredContent-only clients |
+| `content[]` | Text rendering: `Error: <message>`, then `Recovery: <hint>` when `data.recovery.hint` adds something the message does not already say, then `(reason <reason> · not retryable · request <id>)` for whichever of `data.reason` / `data.retryable` / `data.requestId` is present | Claude Desktop and other format()-only clients |
+| `structuredContent.error` | JSON `{ code, message, data? }` carrying the error code, message, any structured data from the thrown `McpError` or `ZodError`, and `data.requestId` | Claude Code and other structuredContent-only clients |
+
+```text
+Error: No data for 3 PMIDs
+
+Recovery: Use pubmed_search_articles to discover valid PMIDs.
+
+(reason no_match · not retryable · request UTFAC-QE0MB)
+```
 
 Important properties:
 - **`_meta.error` is NOT emitted.** Error code/data live on `structuredContent.error` instead. Don't read `_meta.error` in clients or tests — it doesn't exist.
-- **`data` propagation is restricted** to explicitly-thrown `McpError.data` and `ZodError.issues`. Auto-classified plain errors (`TypeError`, network errors, etc.) emit `code` + `message` only — no `data` — so internal classification context never leaks to clients.
-- **Recovery hint mirroring is automatic, unless the hint repeats the message.** When the thrown `McpError` carries `data.recovery.hint`, the handler factory appends it to the `content[]` text so the markdown surface matches the JSON surface. Authors don't need to format the hint manually. The one exception is a hint the trimmed message already contains verbatim (case-sensitively) — a constraint or refinement rejection, whose synthesized hint is the issue's own message, and an author hint that restates its own message. There the line adds no next step, so it is dropped from the text; `structuredContent.error.data.recovery.hint` stays populated either way.
-- **`reason` and `retryable` render as a trailing term line.** `(reason malformed_id · not retryable)` closes the text whenever `data.reason` is a non-empty string or `data.retryable` is a boolean — `retryable` for `true`, `not retryable` for `false`, and both terms when both are present. Neither field present (a classified plain `Error`, an `McpError` with no `data`) appends nothing at all. The numeric `code` and `data.issues` stay JSON-only on purpose: the code is the one envelope field a model cannot act on, and the message already renders each issue as a sentence. A consumer test pinning `content[0].text` exactly, rather than asserting it contains the diagnostic, therefore moves for any error carrying a reason.
+- **`data` propagation is restricted** to explicitly-thrown `McpError.data`, `ZodError.issues`, and the request id. Auto-classified plain errors (`TypeError`, network errors, etc.) emit `code`, `message`, and `data: { requestId }` only, so internal classification context never leaks to clients.
+- **`data.requestId` names the request.** The framework sets it on every error envelope it builds — a tool result (handler throws, argument rejections, auth refusals, output-contract failures), a failed resource read, a failed prompt, and the JSON-RPC errors `httpErrorHandler` returns — to the `requestId` that call's log records carry. It is always a generated `XXXXX-XXXXX` token, one per call — never the client's JSON-RPC id, which the call's records carry as `jsonRpcId` and the response keeps as its `id`. `httpErrorHandler`'s is the token on its `Client error:` record. A failure reported from the client resolves to its `Error in tool:<name>` record by that value. A resource read refused before it is measured (an auth refusal, or URI variables that fail `params`) carries an id no log record shares, since resources write no failure record of their own. It is added where the envelope is built, never to the thrown `McpError.data`, so `ErrorHandler.handleError` / `tryCatch` results and the log record's `errorData` stay context-free; it replaces a thrown `data.requestId`, the way canonical fields win in log records. Two envelopes go without it: a resource `-32602` whose `data` is exactly `{ uri }` (the resource-not-found shape clients match exactly), and `runToolContract` results, which have no real request. It closes the `content[]` terms line, alone as `(request <id>)` when there is no `reason` or `retryable` — so a test pinning `content[0].text` exactly sees it.
+- **Recovery hint mirroring is automatic, unless the hint repeats the message.** When the thrown `McpError` carries `data.recovery.hint`, the handler factory appends it to the `content[]` text so the markdown surface matches the JSON surface. Authors don't need to format the hint manually. The one exception is a hint the trimmed message already contains verbatim (case-sensitively) — an argument rejection whose every hint sentence restates an issue, where the hint is the message's issue text verbatim, and an author hint that restates its own message. There the line adds no next step, so it is dropped from the text; `structuredContent.error.data.recovery.hint` stays populated either way.
+- **`reason`, `retryable`, and `requestId` render as a trailing term line.** `(reason malformed_id · not retryable · request UTFAC-QE0MB)` closes the text whenever `data.reason` is a non-empty string, `data.retryable` is a boolean, or `data.requestId` is a non-empty string — `retryable` for `true`, `not retryable` for `false`, in that order. None present (an `McpError` with no `data` built outside a request, as `runToolContract` does) appends nothing at all. The numeric `code` and `data.issues` stay JSON-only on purpose: the code is the one envelope field a model cannot act on, and the message already renders each issue as a sentence. A consumer test pinning `content[0].text` exactly, rather than asserting it contains the diagnostic, therefore moves for any error carrying a reason.
 - **Argument-schema rejection is a tool error with the same envelope.** An unknown root key, a wrong type, a missing required field, or a failed constraint returns `isError: true` with `structuredContent.error.code = -32602` (`InvalidParams`) and the readable `Invalid arguments for tool <name>: …` diagnostic in `content[]`. The handler never runs. Two neighbouring failures keep the protocol error path instead, arriving as a JSON-RPC error rather than a tool result: an unknown or disabled tool name, and a malformed request envelope.
-- **`invalid_arguments` is the framework-owned reason on every argument rejection.** The rejection carries `data.reason: "invalid_arguments"` and a `data.recovery.hint` the framework synthesizes from the Zod issues, the arguments as sent, and the root schema — an unknown key names the root properties the tool does accept, a wrong type names the type to send instead, missing fields collapse into one `Provide …` sentence, and anything else carries its own diagnostic. The hint rides `content[]` as `Recovery: …` like any other — dropped only when the message already contains it, which is what the fallback for a constraint or refinement issue produces. The reason renders as the closing `(reason invalid_arguments)`; this path sets no `retryable`. Authors declare nothing for this: the rejection happens before the handler and the hint is derived from the schema.
-- **`client_capability_missing` is the other framework-owned reason.** When a handler returns `ctx.requestInput({ inputRequests: … })` on a 2025-era connection whose client declared no matching capability, `ctx.requestInput` throws this failure in place of the input-required signal, before anything reaches the wire. It is an ordinary handler throw from there on: measured as the failed call it is, and shaped by the family's usual error path — a tool gets `structuredContent.error.code = -32600` (`InvalidRequest`), `data.reason: "client_capability_missing"`, and a `data.recovery.hint` naming the capability; a resource read gets the same code, reason, and hint through the JSON-RPC error envelope. Like `invalid_arguments`, a definition cannot declare it in `errors[]`: it names a property of the connection, not a domain outcome. See `api-context`'s `ctx.requestInput`.
-- **A schema constraint cannot carry a *declared* reason.** Because the handler never runs, a rejection by `.max()`, `.regex()`, `.min()`, or any other Zod refinement bypasses `errors[]` entirely: it arrives as `InvalidParams` with `data.issues` under the framework's `invalid_arguments`, never the `reason` and authored `recovery` of a contract entry — so a caller has nothing tool-specific to branch on and gets only the schema-derived hint. Decide per constraint which surface it belongs on. A bound that is purely structural — the input is the wrong shape and no guidance beyond the diagnostic would help — belongs on the schema, where it also advertises itself in `inputSchema`. A bound a caller is expected to recover from belongs in the handler as `ctx.fail('reason', message, ctx.recoveryFor('reason'))` against a declared `errors[]` entry, with the limit restated in the field's `.describe()` so it is still visible before the call. Enforcing the same bound in both places is the trap: the schema wins, and the contract entry becomes unreachable while still reading as covered.
+- **`invalid_arguments` is the framework-owned reason on every argument rejection.** The rejection carries `data.reason: "invalid_arguments"` and a `data.recovery.hint` the framework synthesizes from the Zod issues, the arguments as sent, and the root schema — an unknown root key names the root properties the tool does accept, an unknown key inside a nested strict object names its full path and that object's own keys (`Unknown key opts.b. opts accepts: a.`, `Unknown key items.1.b. items.1 accepts: name.`), a wrong type names the type to send instead (a fractional number on an integer field reads `Send rows as an integer, not a fractional number.`), missing fields collapse into one `Provide …` sentence, and anything else restates its diagnostic line, field path included (`start: Must be a parseable ISO 8601 date`), so identical constraints on different fields stay distinguishable. When every sentence restates an issue, the hint is the message's issue text verbatim, and its `Recovery:` line is dropped from `content[]`. Beside a framework sentence each restatement is terminated and a repeated sentence appears once: `start: Must be a parseable ISO 8601 date. Send n as a number, not a string.` When pre-validation rewrote or dropped a key the caller wrote, the rejection says so, since its issues name only the keys that were validated: `data.input` carries `{ aliased: [{ alias, target }], ignored: [...] }` — keys only, in argument order, `ignored` holding the undeclared underscore-prefixed keys the drop discarded — and the hint closes with `Validated query as targetQuery.` / `Dropped undeclared key _max.`, framework sentences that keep the `Recovery:` line. An ignore-list drop (`_meta`, `toolCallId`, a server's `input.ignoreKeys`) is a client artifact and is never reported, and a rejection the step changed nothing on carries no `data.input`. The reason renders on the closing `(reason invalid_arguments · request <id>)`; this path sets no `retryable`. Its `Error in tool:<name>` record logs at `notice`, not `error`, with no stack and its caller-sized strings and arrays capped (see `severity` above). Authors declare nothing for this: the rejection happens before the handler and the hint is derived from the schema.
+- **`client_capability_missing` is the other framework-owned reason.** When a handler returns `ctx.requestInput({ inputRequests: … })` on a 2025-era connection whose client declared no matching capability, `ctx.requestInput` throws this failure in place of the input-required signal, before anything reaches the wire. It is an ordinary handler throw from there on, logged at `notice`: measured as the failed call it is, and shaped by the family's usual error path — a tool gets `structuredContent.error.code = -32600` (`InvalidRequest`), `data.reason: "client_capability_missing"`, and a `data.recovery.hint` naming the capability; a resource read gets the same code, reason, and hint through the JSON-RPC error envelope. The hint ends at reconnecting with a client that declares the capability, since a consent gate has no argument that could stand in for its answer; a handler whose arguments can appends its own sentence per call with `ctx.requestInput(spec, { fallbackHint })`. Like `invalid_arguments`, a definition cannot declare it in `errors[]`: it names a property of the connection, not a domain outcome. See `api-context`'s `ctx.requestInput`.
+- **A schema constraint cannot carry a *declared* reason.** Because the handler never runs, a rejection by `.max()`, `.regex()`, `.min()`, or any other Zod refinement bypasses `errors[]` entirely: it arrives as `InvalidParams` with `data.issues` under the framework's `invalid_arguments`, never the `reason` and authored `recovery` of a contract entry — so a caller has nothing tool-specific to branch on and gets only the schema-derived hint. Decide per constraint which surface it belongs on. A bound that is purely structural — the input is the wrong shape and no guidance beyond the diagnostic would help — belongs on the schema, where it also advertises itself in `inputSchema`. A bound a caller is expected to recover from belongs in the handler as `ctx.fail('reason', message)` against a declared `errors[]` entry, whose `recovery` the framework puts on the wire, with the limit restated in the field's `.describe()` so it is still visible before the call. Enforcing the same bound in both places is the trap: the schema wins, and the contract entry becomes unreachable while still reading as covered.
 - **A rejected value never reaches the client.** The rendered sentence distinguishes an omitted field from a wrong one (`what: Missing required field. Expected one of "os"|"cpu"` rather than the invalid-option text), and a union renders the branch that says what would have been accepted instead of Zod's `Invalid input` placeholder. Both read the arguments in-process for the absent/present bit and the arriving type only — `data.issues` ships the Zod issues as-is, and no value the caller sent is copied onto them.
-- **A union branch names its own field.** Each branch issue is prefixed with the path it names relative to that branch, so two alternatives differing only in which field they require stay distinguishable: `spec: kind: Invalid option: expected one of "x"|"y"; n: Invalid input: expected number, received undefined or other: Invalid input: expected string, received undefined`. Issues *within* one branch join on `; `, across branches on ` or `, and top-level issues on `, ` — three nestings, three separators. A scalar branch carries no path and renders as before. `data.issues` still ships the raw nested Zod issues, and `data.recovery.hint` carries the same prefixed text.
-- **Some rejections never happen at all.** An ordered pre-validation step wraps the parse: a client-added root key is dropped, a declared or case-style key alias is rewritten to its canonical name, and — only after a failed parse — a JSON-stringified array is repaired and the arguments parsed once more. A call the step rescues succeeds outright and produces no error envelope; a call it cannot rescue throws the rejection above verbatim, same code, message, `data.issues`, and `data.recovery.hint`. See the `add-tool` skill for the boundaries and the per-server switches.
+- **A union branch names its own field.** Each branch issue is prefixed with the path it names relative to that branch, so two alternatives differing only in which field they require stay distinguishable: `spec: kind: Invalid option: expected one of "x"|"y"; n: Invalid input: expected number, received undefined or other: Invalid input: expected string, received undefined`. Issues *within* one branch join on `; `, across branches on ` or `, and top-level issues on `, ` — three nestings, three separators. A scalar branch carries no path and renders as before. `data.issues` still ships the raw nested Zod issues, and `data.recovery.hint` restates the same line, field path included.
+- **A one-or-many union renders like the field it wraps.** Once a union branch fails below its root, every branch whose only issue is a root type mismatch is dropped — for `z.union([z.array(Item), Item])` given a list, that is the object branch saying only that the value is an array. If one branch remains, its issues render and hint under the field's path exactly as they would on a non-union field: `items.1.name: Invalid input: expected string, received boolean`, hinted `Send items.1.name as a string, not a boolean.` A missing element field is hinted `Provide items.1.name.`, and the rule applies again at every nested level. When every branch fails at its root (`items: "x"`), all of them render, joined by ` or `. `data.issues` keeps Zod's single `invalid_union` issue.
+- **Some rejections never happen at all.** An ordered pre-validation step wraps the parse: a client-added root key is dropped, a declared or case-style key alias is rewritten to its canonical name, and — only after a failed parse — a JSON-stringified array or object, or a safe integer sent for a string, is repaired and the arguments parsed once more. When that still fails and the drop discarded a key, the step retries alias-first. A call the step rescues succeeds outright and produces no error envelope; a call it cannot rescue throws the rejection above exactly as it would under `input: { coerce: false }` — same code, message, `data.issues`, `data.input`, and `data.recovery.hint` — so a discarded repair leaves no trace. An integer sent to a string field, or a stringified object to an object field, is therefore a success, not a wrong-type case — a test that needs a wrong-type rejection sends a boolean. See the `add-tool` skill for the boundaries and the per-server switches.
 
 **Handler — throw freely, no try/catch:**
 
@@ -462,16 +467,18 @@ const parsed = await ErrorHandler.tryCatch(
 
 `tryCatch` always logs and rethrows — it never swallows errors. The `fn` argument may be synchronous or return a `Promise`; both are handled via `Promise.resolve(fn())`.
 
+**The thrown error's `data` is wire-visible.** A handler that lets it propagate forwards it as `structuredContent.error.data` (tools) or JSON-RPC `error.data` (resources, prompts). It carries the caught `McpError`'s own `data`, `originalErrorName`, `originalMessage`, and `rootCause` (`{ name, message }`) — never a stack and never `context`: `originalStack`, the full `causeChain`, and every `context` field (`requestId`, `sessionId`, `traceId`, `tenantId`, `extra`, …) go to the log record only. A field the caller should act on belongs in the thrown `McpError`'s `data`, not in `context`. (The handler factory adds the call's own `data.requestId` when it builds the envelope; that value never comes from `context` here.)
+
 **Options** (`Omit<ErrorHandlerOptions, 'rethrow'>`):
 
 | Option | Type | Required | Purpose |
 |:-------|:-----|:--------:|:--------|
 | `operation` | `string` | Yes | Name logged with the error |
-| `context` | `ErrorContext` | No | Extra structured fields merged into the log record; `requestId` and `timestamp` receive special treatment |
+| `context` | `ErrorContext` | No | Structured fields merged into the log record only — never the thrown error's client-visible `data`; `requestId` and `timestamp` receive special treatment |
 | `errorCode` | `JsonRpcErrorCode` | No | Code used if the caught error is not already an `McpError` |
 | `input` | `unknown` | No | Input value sanitized and logged alongside the error |
 | `critical` | `boolean` | No | Marks the error as critical in logs (default `false`) |
-| `includeStack` | `boolean` | No | Include stack trace in log output (default `true`) |
+| `includeStack` | `boolean` | No | Stack traces in the log record (default `true`). `false` drops every one — `stack`, `errorData.originalStack` (also one carried in a caught `McpError`'s `data`), and each `causeChain` node's `stack` — and keeps the chain itself; the thrown error and the span exception are unaffected |
 | `errorMapper` | `(error: unknown) => Error` | No | Custom transform applied instead of default `McpError` wrapping |
 
 ---
@@ -487,7 +494,7 @@ const response = await fetch(url, { signal: ctx.signal });
 if (!response.ok) {
   throw await httpErrorFromResponse(response, {
     service: 'NCBI',                  // included in message
-    data: { endpoint, requestId: ctx.requestId },
+    data: { endpoint },               // the framework adds data.requestId
   });
 }
 ```
@@ -518,7 +525,7 @@ Also exports `httpStatusToErrorCode(status)` for sync mapping when you don't hav
 
 ## Handler-Body Lint Rules
 
-The startup linter (`bun run lint:mcp` and `createApp()` startup) checks handler bodies for common anti-patterns. All emit warnings (not errors) — they don't block startup but show up in `devcheck` output.
+The definition linter (`bun run lint:mcp`, and devcheck's MCP Definitions step) checks handler bodies for common anti-patterns. It runs at build time, never at server startup. All emit warnings (not errors): they show up in `devcheck` output but don't fail it.
 
 | Rule | Catches |
 |:-----|:--------|
@@ -560,7 +567,6 @@ The linter validates the structure of `errors[]` and (when present) cross-checks
 | `error-contract-conformance` | warning | Handler throws a non-baseline code that isn't in the contract. Suggests adding it to `errors[]` so the contract is the canonical source of truth for declared failure modes. |
 | `error-contract-prefer-fail` | warning | Handler throws a code that **is** in the contract directly (via factory or `new McpError`) instead of through `ctx.fail(reason, …)`. Encourages routing through the typed helper so observers see consistent `data.reason` values. |
 | `error-contract-unthrown` | warning | A declared `reason` that no literal `ctx.fail('<reason>'` or `ctx.recoveryFor('<reason>'` in the handler names. Fires only when the handler already holds at least one literal `ctx.fail(`, and skips the definition entirely when either callee takes a non-literal first argument. Wire the throw, drop the entry, or mark it `thrownBy: 'service'`. |
-| `error-contract-recovery-unforwarded` | warning | A literal `ctx.fail('<reason>', …)` site carrying neither `ctx.recoveryFor('<reason>')` nor its own `recovery` key, so the declared hint reaches neither client surface. One diagnostic per site; skips a site whose data argument the scan cannot read. |
 
 ### Baseline codes (auto-allowed)
 

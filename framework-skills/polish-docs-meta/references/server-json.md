@@ -31,12 +31,8 @@ The manifest uses the official MCP schema. A typical server has two package entr
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@org-name/my-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "1.0.0",
-      "packageArguments": [
-        { "type": "positional", "value": "run" },
-        { "type": "positional", "value": "start:stdio" }
-      ],
       "environmentVariables": [
         {
           "name": "ACME_API_KEY",
@@ -60,18 +56,20 @@ The manifest uses the official MCP schema. A typical server has two package entr
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@org-name/my-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "1.0.0",
-      "packageArguments": [
-        { "type": "positional", "value": "run" },
-        { "type": "positional", "value": "start:http" }
-      ],
       "environmentVariables": [
         {
           "name": "ACME_API_KEY",
           "description": "API key for the Acme service.",
           "format": "string",
           "isRequired": true
+        },
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
         },
         {
           "name": "MCP_HTTP_HOST",
@@ -140,9 +138,9 @@ Each entry in `packages[]` describes one way to install and run the server:
 | `registryType` | Yes | `"npm"` for npm packages. |
 | `registryBaseUrl` | Yes | `"https://registry.npmjs.org"` for npm. |
 | `identifier` | Yes | The npm package name (e.g., `@org/my-server`). |
-| `runtimeHint` | No | `"bun"` or `"node"`. Tells clients which runtime to use. |
+| `runtimeHint` | No | `"npx"` for npm packages, the registry's runner for npm. A client that runs the hint as the command launches `<runtimeHint> <identifier>@<version>`, so `"node"` or `"bun"` there names a file path that does not exist. |
 | `version` | Yes | Package version. Must match top-level `version`. |
-| `packageArguments` | No | Array of `{ "type": "positional", "value": "..." }` args passed after the package command. |
+| `packageArguments` | No | Arguments appended to the launch command. Omit it: a framework server's bin reads none (see Package Arguments). |
 | `environmentVariables` | No | Array of env var descriptors (see below). |
 | `transport` | Yes | `{ "type": "stdio" }` or `{ "type": "streamable-http", "url": "..." }` |
 
@@ -154,28 +152,28 @@ Each entry in `packages[]` describes one way to install and run the server:
 | `description` | Yes | Human-readable purpose. |
 | `format` | No | `"string"` (default). |
 | `isRequired` | No | `true` if the server won't start without it. |
-| `default` | No | Default value if not set. |
+| `default` | No | Value used when the user sets none. The user can change it. |
+| `value` | No | Fixed value the client always sets; the user cannot change it. Use it for a setting the entry depends on, such as `MCP_TRANSPORT_TYPE` on the HTTP entry. |
 
 ### Package Arguments
 
-The `packageArguments` array tells clients what args to pass when running the package. For `bun run start:stdio`:
-
-```json
-"packageArguments": [
-  { "type": "positional", "value": "run" },
-  { "type": "positional", "value": "start:stdio" }
-]
-```
+A registry client launches an npm entry as `npx <identifier>@<version> <packageArguments>`, with the entry's `environmentVariables` set. That runs the package's bin (`dist/index.js`), not an npm script, and the bin reads no arguments: it takes its transport from `MCP_TRANSPORT_TYPE`. Leave `packageArguments` out. A `run` + `start:stdio` / `start:http` pair is npm-script syntax that reaches the bin as argv it ignores, and `lint:packaging` rejects it on any npm entry.
 
 ### Transport Patterns
 
-**stdio only** (one package entry):
+**stdio only** (one package entry). stdio is the framework's default transport, so the entry needs no transport variable:
 
 ```json
 "transport": { "type": "stdio" }
 ```
 
-**stdio + HTTP** (two package entries): One entry with `start:stdio` and `{ "type": "stdio" }`, another with `start:http` and `{ "type": "streamable-http", "url": "http://localhost:{port}/mcp" }`. The HTTP entry includes additional env vars for host, port, endpoint path, and auth mode.
+**stdio + HTTP** (two package entries): the stdio entry above, plus an entry with `{ "type": "streamable-http", "url": "http://localhost:{port}/mcp" }` that fixes the transport in its `environmentVariables`:
+
+```json
+{ "name": "MCP_TRANSPORT_TYPE", "description": "Selects the HTTP transport.", "format": "string", "value": "http" }
+```
+
+Use `value`, not `default`: a default is user-editable, and without the variable the server starts on stdio. `lint:packaging` fails a `streamable-http` npm entry that does not set it to `"http"`. The HTTP entry also carries env vars for host, port, endpoint path, and auth mode.
 
 ## Generating / Updating
 
@@ -187,9 +185,9 @@ If `server.json` doesn't exist, create it from the surface area audit. If it exi
 4. Set `repository` from `package.json` repository URL, with `"source": "github"`
 5. Create package entries — one for stdio, one for HTTP (if the server supports both transports)
 6. Set `identifier` to the npm package name from `package.json`
-7. Set `runtimeHint` to `"bun"`
-8. Set `packageArguments` for each transport (`start:stdio`, `start:http`)
-9. Populate `environmentVariables` — server-specific required vars in both entries, transport-specific vars (host, port, endpoint, auth) only in the HTTP entry, `MCP_LOG_LEVEL` in both
+7. Set `runtimeHint` to `"npx"`
+8. Leave out `packageArguments` — the bin takes its transport from `MCP_TRANSPORT_TYPE`, not from arguments
+9. Populate `environmentVariables` — server-specific required vars in both entries, `MCP_TRANSPORT_TYPE` with `"value": "http"` and the transport-specific vars (host, port, endpoint, auth) only in the HTTP entry, `MCP_LOG_LEVEL` in both
 10. All three `version` fields (top-level, and each package entry) must be identical and match `package.json`
 
 ## Keeping in Sync

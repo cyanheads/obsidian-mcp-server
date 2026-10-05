@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.19"
+  version: "1.24"
   audience: external
   type: reference
 ---
@@ -92,8 +92,10 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | Env Var | `AppConfig` field | Default | Notes |
 |:--------|:-----------------|:--------|:------|
 | `NODE_ENV` | `environment` | `development` | Aliases: `dev`→`development`, `prod`→`production`, `test`→`testing` |
-| `MCP_LOG_LEVEL` | `logLevel` | `debug` | Aliases: `warn`→`warning`, `err`→`error`, `fatal`/`silent`→`emerg`, `trace`→`debug`, `information`→`info` |
-| `LOGS_DIR` | `logsPath` | `<app-root>/logs` | Node.js only; absolute paths are used verbatim, relative ones resolve against the application root (see Core config) — never the framework's install directory |
+| `MCP_LOG_LEVEL` | `logLevel` | `debug` | The floor for every log sink — stderr, the files, OTLP export, and the `ctx.log` mirror to the client (`notifications/message`), which a client's own level can only narrow. Compared on the RFC 5424 order, so `notice` drops `info` and `crit` drops `error`. Aliases: `warn`→`warning`, `err`→`error`, `fatal`/`silent`→`emerg`, `trace`→`debug`, `information`→`info` |
+| `LOGS_DIR` | `logsPath` | `<app-root>/logs` | Node.js only; absolute paths are used verbatim, relative ones resolve against the application root (see Core config) — never the framework's install directory. A file under it that cannot be opened (read-only mount, another user's directory) is dropped at startup with one `warning` naming it and the error code; stderr and the other files keep logging |
+| `LOG_TOOL_FAILURE_PAYLOADS` | `logToolFailurePayloads` | `false` | Opt-in. Each failed tool call also writes a `Tool failure payload: <tool>` record carrying `toolInput` (the arguments as sent) and `toolResult` (the `CallToolResult` returned) as redacted JSON strings, at the call's error-record level. Reaches every log destination — stderr, `combined.log`, and OTLP when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. Redaction is by key name only, so a secret inside a free-form value (a query, a message) is logged. Record shape: `api-telemetry` Logs |
+| `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` | `logToolFailurePayloadMaxBytes` | `16384` | Cap per payload, in UTF-8 bytes. A longer one is cut on a character boundary and flagged with `toolInputTruncated` / `toolResultTruncated` |
 
 ### Transport
 
@@ -103,7 +105,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `MCP_HTTP_PORT` | `mcpHttpPort` | `3010` | Port for HTTP transport |
 | `MCP_HTTP_HOST` | `mcpHttpHost` | `127.0.0.1` | Bind address |
 | `MCP_HTTP_ENDPOINT_PATH` | `mcpHttpEndpointPath` | `/mcp` | HTTP endpoint path |
-| `MCP_HTTP_MAX_BODY_BYTES` | `mcpHttpMaxBodyBytes` | `1048576` (1 MiB) | Max **inbound** JSON-RPC request body; oversized requests get `413` before per-request allocation. Does **not** cap upstream data staged into a canvas or response sizes. `0` disables (defer to runtime/proxy). |
+| `MCP_HTTP_MAX_BODY_BYTES` | `mcpHttpMaxBodyBytes` | `1048576` (1 MiB) | Max **inbound** JSON-RPC request body; oversized requests get `413` before per-request allocation. Does **not** cap upstream data staged into a canvas or response sizes. `0` disables (defer to runtime/proxy). The only body limit in force — the SDK's own 4 MiB read cap never engages, so a value above 4 MiB holds as set. |
 | `MCP_HTTP_MAX_PORT_RETRIES` | `mcpHttpMaxPortRetries` | `15` | Rungs of the port ladder walked when a bind collides; each rung tries `port + 1`. See [Port binding](#port-binding) |
 | `MCP_HTTP_PORT_RETRY_DELAY_MS` | `mcpHttpPortRetryDelayMs` | `50` | Delay between port retries (ms) |
 | `MCP_SESSION_MODE` | `mcpSessionMode` | `auto` | `stateless` \| `stateful` \| `auto`; `auto` resolves to `stateful`. Under `stateless`, the 2025-era multi-round-trip shim still runs but its capability gate refuses: each request is served by an instance that never processed `initialize`, so the client-capability view is empty and a `ctx.requestInput` round can never be answered — fail-closed, but unconditional, so the tool is unusable for those clients rather than merely guarded. 2026-07-28 clients and stdio are unaffected. Seed it from code with `createApp({ sessionMode })` — see below |
@@ -111,7 +113,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `MCP_HTTP_RESUMABILITY` | `mcpHttpResumability` | `true` | SSE stream replay under stateful HTTP. On by default — selecting a session mode is the opt-in. Kill switch only; no effect on stateless serving or the session-less 2026-07-28 era |
 | `MCP_HTTP_RESUMABILITY_MAX_EVENTS` | `mcpHttpResumabilityMaxEvents` | `512` | Events retained per session for replay; oldest evicted first. Lower it on a server whose tools return large results |
 | `MCP_HTTP_RESUMABILITY_TTL_MS` | `mcpHttpResumabilityTtlMs` | `300000` | 5 min; how long a retained event stays replayable |
-| `MCP_ALLOWED_ORIGINS` | `mcpAllowedOrigins` | — | Comma-separated list; omit to allow all |
+| `MCP_ALLOWED_ORIGINS` | `mcpAllowedOrigins` | — | Comma-separated list of browser origins the MCP endpoint accepts; others get `403`. Omitted, CORS is wildcard but only loopback origins pass; `*` accepts any origin (disables DNS-rebinding protection). An accepted origin's preflight also allows `Mcp-Method`, `Mcp-Name`, `Last-Event-ID`, and each tool's `Mcp-Param-<Name>` — see `api-auth` |
 | `MCP_SERVER_RESOURCE_IDENTIFIER` | `mcpServerResourceIdentifier` | — | RFC 8707 resource indicator URL |
 | `MCP_PUBLIC_URL` | `mcpPublicUrl` | — | Public-facing origin for reverse proxies (Cloudflare Tunnel, nginx, ALB) so emitted URLs carry the correct scheme |
 | `MCP_HEARTBEAT_INTERVAL_MS` | `mcpHeartbeatIntervalMs` | `0` (disabled) | Heartbeat ping interval; 0 disables |
@@ -135,6 +137,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `MCP_AUTH_MODE` | `mcpAuthMode` | `none` | `none` \| `jwt` \| `oauth` |
 | `MCP_AUTH_SECRET_KEY` | `mcpAuthSecretKey` | — | Required for `jwt` mode; min 32 chars |
 | `MCP_AUTH_DISABLE_SCOPE_CHECKS` | `mcpAuthDisableScopeChecks` | `false` | When `true`, bypasses both `withRequiredScopes` (declared `auth: [...]`) and `checkScopes` (runtime/tenant scopes). Token validation (sig/aud/iss/exp) intact. Logs a `WARNING` at startup. See `api-auth` skill. |
+| `MCP_REQUEST_STATE_KEY` | `mcpRequestStateKey` | — | Opt-in, any auth mode. When set, the framework seals the `requestState` a handler returns with `ctx.requestInput` (bound to the request's `clientId` / `subject` / `tenantId`, valid 900 s) and every server instance rejects any other state as `-32602` `invalid_request_state` before the handler runs; `ctx.inputs.state()` still returns the handler's string. Must be ≥ 32 UTF-8 bytes — shorter fails startup with a `ConfigurationError` naming the variable — and identical on every instance a retry can reach (stateless replicas, Worker isolates, restarts). Unset or empty: no verifier, state round-trips raw. See `api-context` § `requestState` |
 | `OAUTH_ISSUER_URL` | `oauthIssuerUrl` | — | Required for `oauth` mode |
 | `OAUTH_AUDIENCE` | `oauthAudience` | — | Required for `oauth` mode |
 | `OAUTH_JWKS_URI` | `oauthJwksUri` | — | Override JWKS endpoint (otherwise derived from issuer) |
@@ -164,7 +167,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `CANVAS_PROVIDER_TYPE` | `canvas.providerType` | `none` | `none` \| `duckdb`. Set to `duckdb` to enable `core.canvas`. Fails closed on Cloudflare Workers (DuckDB has no V8-isolate build). |
 | `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` | Per-canvas DuckDB `memory_limit` PRAGMA value, in MB. |
 | `CANVAS_EXPORT_PATH` | `canvas.exportRootPath` | `./.canvas-exports` | Sandbox root for path-targeted exports. Absolute paths and `..` traversal are rejected. |
-| `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `<os.tmpdir()>/mcp-canvas` | Scratch root: DuckDB's `temp_directory` for queries that spill past `memory_limit`, plus the transient files behind stream exports and the spillover round-trip. Never resolves to the process cwd — DuckDB's own cwd-relative `.tmp` default fails on a non-root or read-only container rootfs. |
+| `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `os.tmpdir()` | Parent of the provider's private scratch directory: on first use the DuckDB provider creates `mcp-canvas-XXXXXX` inside it (`mkdtemp`, `0700` on POSIX) for each canvas's own DuckDB `temp_directory` and the transient files behind stream exports and `importFrom`; shutdown removes it once the calls still running against it settle. Created if missing, with no ownership or mode check — must not be a directory another local user controls, and on Windows, where the private directory inherits the parent's ACL, must not grant other users access. Never resolves to the process cwd — DuckDB's own cwd-relative `.tmp` default fails on a non-root or read-only container rootfs. |
 | `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `100` | Active canvas cap per tenant; throws `RateLimited` when exceeded. |
 | `CANVAS_TTL_MS` | `canvas.ttlMs` | `86400000` | Sliding TTL (24 h). Every operation extends the expiry. |
 | `CANVAS_ABSOLUTE_CAP_MS` | `canvas.absoluteCapMs` | `604800000` | Absolute cap from creation (7 d). Sliding window clamps to this. |
@@ -209,10 +212,12 @@ Activated when `SUPABASE_URL` is set.
 | `OTEL_ENABLED` | `openTelemetry.enabled` | `false` | Enable OpenTelemetry export |
 | `OTEL_SERVICE_NAME` | `openTelemetry.serviceName` | `createApp` `name` → `package.json` `name` | Seeded from `createApp({ name })` when unset; an env value wins |
 | `OTEL_SERVICE_VERSION` | `openTelemetry.serviceVersion` | `package.json` `version` | |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `openTelemetry.tracesEndpoint` | — | OTLP traces endpoint URL |
-| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `openTelemetry.metricsEndpoint` | — | OTLP metrics endpoint URL |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | — | OTLP/HTTP base URL; resolves `tracesEndpoint` to `<base>/v1/traces` and `metricsEndpoint` to `<base>/v1/metrics` (path prefix kept) when the signal-specific variable is unset |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `openTelemetry.tracesEndpoint` | — | OTLP traces endpoint URL; overrides the base, used as-is |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `openTelemetry.metricsEndpoint` | — | OTLP metrics endpoint URL; overrides the base, used as-is |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | `openTelemetry.logsEndpoint` | — | OTLP logs endpoint URL; the only switch for log record export, never derived from the base. Needs the optional peers `@opentelemetry/sdk-logs`, `@opentelemetry/exporter-logs-otlp-http`, `@opentelemetry/api-logs` |
 | `OTEL_TRACES_SAMPLER_ARG` | `openTelemetry.samplingRatio` | `1.0` | 0–1; fraction of traces to export |
-| `OTEL_LOG_LEVEL` | `openTelemetry.logLevel` | `INFO` | OTel SDK internal log level: `NONE` \| `ERROR` \| `WARN` \| `INFO` \| `DEBUG` \| `VERBOSE` \| `ALL` |
+| `OTEL_LOG_LEVEL` | `openTelemetry.logLevel` | `INFO` | OTel SDK internal log level: `NONE` \| `ERROR` \| `WARN` \| `INFO` \| `DEBUG` \| `VERBOSE` \| `ALL`; aliases `warning`→`WARN`, `err`→`ERROR`, `information`→`INFO`. Diag output goes to stderr at every level |
 
 ---
 
@@ -274,6 +279,15 @@ export function getServerConfig(): ServerConfig {
   });
   return _config;
 }
+```
+
+**Call `getServerConfig()` in `createApp`'s `setup()`.** The accessor alone parses on first read, which is usually the first tool call: an invalid value then lets the server report ready and fails every call instead, including tools that never read the bad variable. Calling it in `setup()` turns that into a startup failure — the `ConfigurationError` banner naming the variable, exit code 1, before any transport binds. On Workers `setup()` runs inside the first request, after `injectEnvVars()`, so the call is safe there too.
+
+```ts
+setup(core) {
+  getServerConfig();
+  initMyService(core.config, core.storage);
+},
 ```
 
 **Env booleans — use `z.stringbool()`, never `z.coerce.boolean()`.** `z.coerce.boolean()` runs `Boolean(value)`, so `"false"`, `"0"`, and `"no"` all coerce to `true` — the flag becomes impossible to disable through the environment except by omitting it entirely. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` (case-insensitive) and rejects anything else, so `MY_VERBOSE_LOGGING=false` actually disables and a typo fails loudly at startup instead of silently coercing. An empty string is not in that accepted set — `z.stringbool()` rejects `''` with `Invalid option`. What makes a blank `.env` line take the default is the normalization layer described under **Unset means unset** below, not the schema type.

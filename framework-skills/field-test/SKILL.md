@@ -1,10 +1,10 @@
 ---
 name: field-test
 description: >
-  Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
+  Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, renders app tools' views in a headless MCP Apps host, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.16"
+  version: "2.20"
   audience: external
   type: debug
 ---
@@ -19,7 +19,7 @@ Unit tests (`add-test` skill) verify handler logic with mocked context. Field te
 
 This skill drives an HTTP server because curl + JSON-RPC is the most reliable harness for shell-based agents. The same handlers run on both transports — only the framing differs — so HTTP exercises the full functional surface. Both HTTP session modes are covered: a durable `Mcp-Session-Id` session, and the sessionless initialization a `MCP_SESSION_MODE=stateless` server performs.
 
-**Stdio coverage is a boot check only — run this before Step 1.** Run `bun run rebuild && bun run start:stdio < /dev/null`, and confirm the startup logs look clean (banner, expected tool/resource counts, no errors/warnings, no missing-config gripes). Redirecting stdin is what ends the run: the server treats EOF as a shutdown signal, boots fully, then exits on its own, so the log also shows the graceful-shutdown path. Do not background it and reach for `pkill` — a pattern like `pkill -f dist/index.js` matches every other stdio MCP server on the machine, including the ones the calling agent's own session is connected to. Pino logs go to stderr in stdio mode (stdout is reserved for JSON-RPC), so they print straight to the terminal when you run interactively. No need to call tools over stdio — the HTTP pass already covered handler behavior.
+**Stdio coverage is a boot check only — run this before Step 1.** Run `bun run rebuild && bun run start:stdio < /dev/null`, and confirm the startup logs look clean: the `Core services constructed — N tool(s) …` record lists every registered tool, resource, and prompt in its `tools` / `resources` / `prompts` fields — the message text shows only counts — and a definition missing from them was never passed to `createApp()`. No errors/warnings, no missing-config gripes. The emoji startup banner prints only to a terminal, so its absence from an agent's shell is not a finding. Redirecting stdin is what ends the run: the server treats EOF as a shutdown signal, boots fully, then exits on its own, so the log also shows the graceful-shutdown path. Do not background it and reach for `pkill` — a pattern like `pkill -f dist/index.js` matches every other stdio MCP server on the machine, including the ones the calling agent's own session is connected to. Pino logs go to stderr in stdio mode (stdout is reserved for JSON-RPC), so they print straight to the terminal when you run interactively. No need to call tools over stdio — the HTTP pass already covered handler behavior.
 
 ---
 
@@ -371,7 +371,7 @@ mcp_call <url> <sid> prompts/list   | jq '.result.prompts[]   | {name, descripti
 mcp_catalog_size <url> <sid> <protocol>
 ```
 
-**Weigh the catalog.** `mcp_catalog_size` prints the `tools/list` bytes — the context every client loads per session before a single call — and each tool's entry, largest first, split into description / `inputSchema` / `outputSchema`. Record the total alongside the `instructions=` bytes from Step 2; together they are the per-session tax. The split says where a heavy tool's weight lives: an `outputSchema` narrating every field of a 60-field record is the common surprise, an over-long description the obvious one. Hand the outliers to `tool-defs-analysis` (its length-outliers pass) rather than trimming blind.
+**Weigh the catalog.** `mcp_catalog_size` prints the `tools/list` bytes — the context every client loads per session before a single call — and each tool's entry, largest first, split into description / `inputSchema` / `outputSchema`. Record the total alongside the `instructions=` bytes from Step 2; together they are the per-session tax. The split says where a heavy tool's weight lives: an `outputSchema` narrating every field of a 60-field record is the common surprise, an over-long description the obvious one. Hand the outliers to `tool-defs-analysis` rather than trimming blind. Its length-outliers pass weighs the output and enrichment field prose as well as the tool description.
 
 Present a compact catalog to the user: each definition's name + 1-line description. Flag vague or missing descriptions as you go — those feed into the report. Use this to build the test plan.
 
@@ -402,7 +402,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 |:------------------------------------------------|:-------------|
 | `include` / `fields` / `expand` / `view` / `projection` parameter | Field selection: non-default value renders requested fields |
 | Array return with `query` / `filter` inputs | Empty result: does response explain *why* (echo criteria, suggest broadening)? |
-| Identifier, code, or enum-ish input (an ID format, a classification code, a unit, a place name, a list the docs say may be comma-joined) | Value-variant tolerance: re-send the happy-path call with each obvious variant of that value — lowercase, the bare leaf of a hierarchical code, a common domain alias, a delimiter-joined list where an array is accepted, the spelled-out form of an abbreviated name. Pass is either outcome: the call succeeds, or it fails with an error naming the expected shape. A miss or a bare validation failure on a variant that maps one-to-one onto a valid value is a `ux` finding. Probe **values** — variants of the argument *key* name, and a JSON-stringified array as a value, are handled by the framework, not the server. |
+| Identifier, code, or enum-ish input (an ID format, a classification code, a unit, a place name, a list the docs say may be comma-joined) | Value-variant tolerance: re-send the happy-path call with each obvious variant of that value — lowercase, the bare leaf of a hierarchical code, a common domain alias, a delimiter-joined list where an array is accepted, the spelled-out form of an abbreviated name. Pass is either outcome: the call succeeds, or it fails with an error naming the expected shape. A miss or a bare validation failure on a variant that maps one-to-one onto a valid value is a `ux` finding. Probe **values** — variants of the argument *key* name, and a JSON-stringified array or object or an integer sent for a string as a value, are handled by the framework, not the server. |
 | Batch / bulk input (arrays of IDs, multi-item ops) | Partial success: mix valid + invalid items |
 | `annotations.readOnlyHint: true` | Confirm no mutation happened |
 | `annotations.idempotentHint: true` | Call twice with same input — safe? |
@@ -413,6 +413,7 @@ Treat any hit as a `ux` finding in the report. The authoring rule lives under *T
 | Tool declared an `errors: [...]` contract | Error contract (tool): trigger ≥1 declared failure mode. Verify `result.structuredContent.error.code` matches the contract entry, `result.structuredContent.error.data.reason` is the declared reason (only present when the handler threw an `McpError` — `ctx.fail` always does, plain `throw new Error(...)` does not), and `content[0].text` is actionable. Reasons declared but unreachable from any input are dead contract entries. |
 | Resource declared an `errors: [...]` contract | Error contract (resource): trigger ≥1 declared failure mode by reading a URI that exercises it. Resources re-throw errors at the JSON-RPC level — verify `error.code` matches the contract entry and `error.data.reason` is the declared reason. (Resources don't use the `result.isError` envelope — they fail the request itself.) |
 | Mutator (write/update/delete/append/patch verbs, or `destructiveHint: true`) | Mutator response observability: run an intentionally-ambiguous input (typo path, wrong ID, already-deleted target). Confirm the response carries enough state (pre/post values, state-change discriminator) for the agent to detect intent-effect divergence without re-fetching. |
+| `_meta.ui.resourceUri` on the tool (an app tool) | View rendering: Step 6. The curl calls see only the `format()` text and the view's raw HTML; whether the view runs is visible only when it is rendered. |
 
 **Resources.** Happy path, not-found URI (use a syntactically valid but non-existent ID — e.g., substitute a fake ID into the URI template), `list` if defined, pagination if used.
 **Prompts.** Happy path, defaults omitted, skim message quality.
@@ -430,28 +431,71 @@ Use `TaskCreate` — one task per definition. Mark complete as you go. Don't bat
 
 For each call, capture: input sent, the `⏱` line (bytes, split, ms), response (trim huge payloads to files), whether `isError: true` appeared, anything surprising (slow response, parity drift, unhelpful text, crash).
 
-When a call surprises you — slow, hangs, returns terse output, surfaces an unhelpful error — run `. /tmp/<project-name>-field-test-<ID>.sh && mcp_log <log>` to tail the server log. The pino startup banner, request handler errors, upstream API call traces, and rate-limit warnings all land in the per-server log (read via `mcp_log`) rather than coming back through `mcp_call`. Don't guess at runtime behavior from response text alone.
+When a call surprises you — slow, hangs, returns terse output, surfaces an unhelpful error — run `. /tmp/<project-name>-field-test-<ID>.sh && mcp_log <log>` to tail the server log. The pino startup banner, request handler errors, upstream API call traces, and rate-limit warnings all land in the per-server log (read via `mcp_log`) rather than coming back through `mcp_call`. Don't guess at runtime behavior from response text alone. To count upstream requests from the log, start the server with `MCP_LOG_RATE_LIMIT_THRESHOLD=0`: by default the logger drops a message repeated past its per-window threshold and reports it later as a `Suppressed N` line, so a count read mid-run comes up short.
 
 **Interpreting responses**
 
 - **`content[]` is an array of blocks — read all of them, never just `content[0]`.** A success result is assembled as `[...ctx.content media blocks, ...the format()/JSON domain render, ...the enrichment trailer]`. Everything the handler put on `ctx.enrich` — empty-result notices, totals, query echoes, truncation disclosure — renders in that trailer, a **separate trailing block**, not inside the `format()` block. Quoting `content[0].text` and reporting those fields as absent from `content[]` is a false parity gap; the suggested fix (render them in `format()` too) would double-render them. Dump `.result.content` in full before claiming drift.
 - Tool domain errors return `{result: {content: [...], isError: true}}` — they live in `result`, not `error`. Check `isError`, not the JSON-RPC error field.
-- **Tool error code/reason** rides on `result.structuredContent.error.{code, message, data?.reason}` — inspect that, not just the text. `data` is only spread when the handler threw an `McpError` (or `ZodError`); plain `throw new Error(...)` won't populate `data.reason`. Use `ctx.fail`-thrown errors when the contract reason matters. The text in `result.content[0].text` mirrors the message, adds `Recovery: <hint>` when `data.recovery.hint` says something the message does not already say, and closes with `(reason <reason> · not retryable)` for whichever of `data.reason` / `data.retryable` is present — the numeric code stays JSON-only.
+- **Tool error code/reason** rides on `result.structuredContent.error.{code, message, data?.reason}` — inspect that, not just the text. `data` carries what the handler threw as an `McpError` (or a `ZodError`'s issues) plus the framework's `data.requestId`; plain `throw new Error(...)` won't populate `data.reason`. Use `ctx.fail`-thrown errors when the contract reason matters — a declared reason arrives with its contract `recovery` as `data.recovery.hint` even when the throw site passed none. The text in `result.content[0].text` mirrors the message, adds `Recovery: <hint>` when `data.recovery.hint` says something the message does not already say, and closes with `(reason <reason> · not retryable · request <id>)` for whichever of `data.reason` / `data.retryable` / `data.requestId` is present — the numeric code stays JSON-only. The request id matches the `requestId` on that call's server log records.
 - **Resource errors** are JSON-RPC-level — they appear in the top-level `error.{code, data.reason}` field, not inside `result`. Resource handlers re-throw rather than producing an `isError` envelope.
 - JSON-RPC `error` only appears for protocol issues (bad session, malformed envelope, unknown method).
 - `mcp_call` already strips SSE framing. Pipe to `jq` for readability.
 
-### 6. Tear down
+### 6. Render app views
+
+Skip this step when no tool carries `_meta.ui.resourceUri`. List the app tools:
+
+```bash
+. /tmp/<project-name>-field-test-<ID>.sh
+mcp_call <url> <sid> tools/list '' <protocol> | jq -r '.result.tools[] | select(._meta.ui.resourceUri) | .name'
+```
+
+Render each one with `mcp-ts-core app-render` against the Step 1 server. It connects as an MCP Apps client, calls the tool, loads the `ui://` view into headless `chrome-headless-shell` inside the double-iframe sandbox and CSP the MCP Apps spec prescribes, plays the host half of the protocol, and writes `report.json` plus screenshots under `--out`. No window opens.
+
+```bash
+bunx @cyanheads/mcp-ts-core app-render --url <url> --tool <app_tool> --args '<happy-path JSON>' \
+  --click '<selector>' --out /tmp/<project-name>-field-test-<ID>-apps/<app_tool> > /dev/null; echo "exit=$?"
+jq '{initialized, failure, toolError, errors, cspViolations, size, steps, text}' \
+  /tmp/<project-name>-field-test-<ID>-apps/<app_tool>/report.json
+```
+
+The report also goes to stdout; read the file instead, since `messages` grows with every exchange. Pass one `--click` per control whose handler matters (a screenshot follows each), run a second pass with `--theme dark` when the view applies host theming, and add `--stream-input` when it renders partial input. Fill, wait-for, and evaluate steps need `renderAppTool` from `@cyanheads/mcp-ts-core/testing/apps` in a script; it returns the same report.
+
+**A setup failure exits 1** with `app-render: <reason>` on stderr and writes no report:
+
+| Reason names | Meaning |
+|:-------------|:--------|
+| A missing optional peer | `@modelcontextprotocol/client` or `@modelcontextprotocol/ext-apps` is not installed. With the user's go-ahead, `bun add -d` it; otherwise record app views as `skipped — requires <package>`. |
+| No browser, or a browser path | No usable `chrome-headless-shell`. With the user's go-ahead, `npx @puppeteer/browsers install chrome-headless-shell@stable --path ~/.cache/puppeteer` (without `--path` it installs into the working directory, where the host never looks), or pass an existing build with `--browser`; otherwise record `skipped — requires chrome-headless-shell`. Never point `--browser` at a desktop browser. |
+| The server is unreachable | Wrong URL, or the Step 1 server died — `mcp_log <log>`. |
+| No such tool, no UI resource, an unreadable UI resource, or a `_meta.ui.csp` entry | A server finding (`bug`): the tool is unregistered, its `resourceUri` is missing, `resources/read` on the `ui://` URI fails, or a CSP domain entry is not a plain origin. |
+
+**A view failure exits 0**: the run reached the browser, and the report says what the view did. Read every field:
+
+- **`initialized`** — the view completed `ui/initialize`. `false`, with `failure` naming the timeout, means the view never connected: a script threw before `app.connect()` (see `errors`), the CSP blocked its SDK import (see `cspViolations`), or the HTML does not use the ext-apps `App` class. `bug`.
+- **`toolError`** — the tool call failed at the protocol level, so the view received `tool-cancelled` instead of a result.
+- **`errors`** — uncaught exceptions and console errors, each tagged with its `frame`. A `view` entry is the server's own UI code: `bug`. `sandbox`, `host`, and `unknown` entries come from the host pages, not the server; report them apart from the server's findings.
+- **`cspViolations`** — loads the view's CSP blocked, as `directive` + `blockedURI`. An origin the view needs but its resource's `_meta.ui.csp` omits (`resourceDomains` for scripts, styles, images, fonts, and media; `connectDomains` for fetch and WebSocket; `frameDomains` for iframes) is a `bug`, because a spec-conformant host blocks the same load. `blockedURI: "eval"` means the view calls `eval` or `new Function`, which the policy never allows. An `eval` entry whose `sourceURL` points into the ext-apps bundle (`app-with-deps.js`) is Zod's guarded capability probe, which catches the refusal, not the view's own code, so it is no finding.
+- **`messages`** — every message between view and host, in order, with its `direction`. A healthy run opens `view-to-host` `ui/initialize` → `ui/notifications/initialized`, then `host-to-view` `ui/notifications/tool-input` → `ui/notifications/tool-result`. A click that should reach the server shows a `view-to-host` `tools/call` and its `host-to-view` response; an `error` there is the server's rejection, or the host refusing a tool whose `_meta.ui.visibility` excludes `app`. Requests that need a user or a model (`ui/message`, `ui/open-link`, `ui/update-model-context`, `ui/request-display-mode`) are recorded and acknowledged — check their params carry what the control meant to send.
+- **`steps`** — one entry per click and screenshot; `ok: false` with `No element matches <selector>` means the control is missing from the rendered view.
+- **`text` and the screenshots** — the rendered text after the steps, and the PNGs (`final.png`, one per click). Open them: a blank, unstyled, clipped, or unreadable-in-dark view is a `ux` finding even when every field above is clean, and so is data in the tool result's `structuredContent` that the view never shows.
+- **`size`** — the view's last `ui/notifications/size-changed`. Absent means the view never reports its size, so a host cannot fit its frame to it: `ux`.
+
+The harness stops the browser and deletes its profile itself; the `--out` directories are removed in Step 7.
+
+### 7. Tear down
 
 ```bash
 . /tmp/<project-name>-field-test-<ID>.sh
 mcp_stop <pid> <log> <port>
+rm -rf /tmp/<project-name>-field-test-<ID>-apps
 rm -f /tmp/<project-name>-field-test-<ID>.sh
 ```
 
-Kills the background server and its port-holding child, removes the server log, then removes the helper script itself. Do this *before* writing the report so nothing leaks into the next session. Pass the `port` — it's what turns "the wrapper PID is gone" into "the socket is actually free." If `mcp_stop` warns the port is still held or the PID survived SIGKILL, note it in the report and proceed — don't block on a zombie process, but do say which PID to kill.
+Kills the background server and its port-holding child, removes the server log and any app-render output, then removes the helper script itself. Do this *before* writing the report so nothing leaks into the next session. Pass the `port` — it's what turns "the wrapper PID is gone" into "the socket is actually free." If `mcp_stop` warns the port is still held or the PID survived SIGKILL, note it in the report and proceed — don't block on a zombie process, but do say which PID to kill.
 
-### 7. Report
+### 8. Report
 
 Four sections. Tight. The user should be able to skim the summary, scan the numbers, read details only for what matters, and act on numbered options.
 
@@ -500,7 +544,7 @@ End with:
 
 ## Checklist
 
-- [ ] Stdio boot check completed — `bun run rebuild && bun run start:stdio < /dev/null` shows clean startup (banner, expected counts, no errors) and a graceful shutdown on EOF
+- [ ] Stdio boot check completed — `bun run rebuild && bun run start:stdio < /dev/null` shows clean startup (every expected definition listed in the `Core services constructed` record's `tools` / `resources` / `prompts` fields, no errors) and a graceful shutdown on EOF
 - [ ] HTTP server built and started; real port parsed from log
 - [ ] Session initialized (a stateless server returns an empty `sid` — still a pass); `notifications/initialized` sent; negotiated protocol version matches the requested one (a downgrade is a finding)
 - [ ] Catalog surfaced and presented; descriptions audited for leaks (implementation details, meta-coaching, consumer-aware phrasing)
@@ -514,5 +558,6 @@ End with:
 - [ ] **If a resource declared an `errors: [...]` contract:** ≥1 declared failure mode triggered; top-level JSON-RPC `error.code` and `error.data.reason` verified against the contract entry
 - [ ] **If any tool truncates, caps, or spills its output:** truncation forced; disclosure + a retrieval path (cursor, offset, selector, canvas handle) verified
 - [ ] External-state / auth-gated tools handled explicitly (run, skip, or confirm)
-- [ ] Server stopped (port confirmed free); server log and helper script removed
+- [ ] **If any tool carries `_meta.ui.resourceUri`:** each view rendered with `app-render` (Step 6); `initialized`, `errors`, `cspViolations`, the message log, and the screenshots checked; a missing peer or browser recorded as skipped, not as a server finding
+- [ ] Server stopped (port confirmed free); server log, app-render output, and helper script removed
 - [ ] Report: summary paragraph → size & latency table → grouped findings → numbered options

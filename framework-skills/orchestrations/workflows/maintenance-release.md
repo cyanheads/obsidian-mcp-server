@@ -4,7 +4,7 @@ description: >
   Workflow: run the `maintenance` skill against one or more existing MCP server projects (dependency updates, framework adoption, skill sync), verify adoption gaps in a double-check pass, then wrap up and release via `git-wrapup` and `release-and-publish`. Read `../SKILL.md` first for the universal rules and sub-agent strategy.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.3"
   audience: external
   type: workflow
 ---
@@ -51,7 +51,7 @@ Each phase's Objective column is the goal state per target — the verifiable en
 | 1 | Maintenance | Per target: deps updated, framework adoption applied, project skills synced, `rebuild` + `devcheck` + `test` green, Step 8 numbered summary returned | parallel fanout | gate-free |
 | 2 | Double-check | Adoption gaps from Phase 1 fixed; `manifest.json`/`server.json` content validated; audience compliance verified; `rebuild` + `devcheck` + `test` green | parallel fanout | **barrier** — cross-target synthesis: orchestrator roll-up + human decision on version-bump intent |
 | 3 | Roll-up | Per-target headlines + cross-target patterns surfaced to user; version-bump intent confirmed (patch/minor/major) | orchestrator (serial) | **barrier** — release authorization required before wrap-up and publish |
-| 4 | Wrap-up + release | Per target: version-bumped commit + annotated tag + push + publish per scope; tag annotation renders as structured markdown on GitHub Release | parallel fanout (Bash git only) | — |
+| 4 | Wrap-up + release | Per target: version-bumped commit + annotated tag + push + publish per scope; tag annotation passes `bun run release:github -- --check`, so the GitHub Release renders a flat headline digest | parallel fanout (Bash git only) | — |
 
 Phase 4 combines wrap-up and release in one sub-agent because the work is sequential and shares context (version, changelog, tag annotation). The sub-agent reads both Tier 1 skills.
 
@@ -139,7 +139,7 @@ Each sub-agent reads BOTH `framework-skills/git-wrapup/SKILL.md` AND `framework-
 
 **Tag annotations are for end users.** Every changelog-worthy change stays visible in the tag, with minor/internal items (build config, repo hygiene, metadata) grouped into ONE compact bullet; only non-changelog churn (lockfile refreshes, lint fixes) stays in commit bodies alone.
 
-**Tag-moving protocol.** If post-version doc changes land after the version commit, move the tag to HEAD: delete remote release, delete remote + local tag, recreate tag at new HEAD with same annotation, re-push, recreate release with `.mcpb`. Authorized within the workflow — same-day forward move.
+**Late doc changes.** The tag is created at release time on the final commit (`release-and-publish` step 4), so a change that lands before the release rides in the stack. A change made after the tag is pushed is an ordinary commit that ships with the next release — a pushed tag is never moved.
 
 ### Watchtower-style container refresh (if applicable)
 For targets with hosted instances behind an auto-pull tool, trigger the refresh after GHCR images are verified reachable. This is operational, not part of the release-and-publish skill — handle in the orchestrator's post-Phase-4 step if the deployment infrastructure has it.
@@ -154,12 +154,12 @@ For targets with hosted instances behind an auto-pull tool, trigger the refresh 
 | 4 | The `changelog` skill may not exist in a target's skill directory yet | Sub-agent falls back to direct `node_modules/<pkg>/CHANGELOG.md` reading |
 | 5 | Sub-agent runs write git commands despite instruction | Restate the no-write-git list + no-`stash` rule in prompt body; verify via `git log --oneline -1` per target after Phase 1 — should show no new commits |
 | 6 | Sub-agent syncs `internal`-audience skills into project `framework-skills/` | Restate "Only sync skills with `metadata.audience: external`" — sub-agents miss this under context pressure |
-| 7 | `manifest.json` scaffolded with scoped name from `package.json` (e.g. `@scope/server-name`) — renders in mcpb install dialog | Phase 2 verifies `manifest.json` `name` doesn't contain `/` |
-| 8 | `manifest.json` `user_config` entries missing required `title`/`type` — `mcpb pack` fails at release time | Phase 2 verifies required fields |
+| 7 | `manifest.json` scaffolded with scoped name from `package.json` (e.g. `@scope/server-name`) — renders in mcpb install dialog | `lint:packaging` (run by devcheck) fails a scoped `name` |
+| 8 | `manifest.json` `user_config` entries missing required `title`/`type` — `mcpb pack` fails at release time | `lint:packaging` (run by devcheck) fails missing fields |
 | 9 | `server.json` `isRequired` doesn't match upstream API reality | Phase 2 verifies against actual API behavior |
 | 10 | Framework version arrow in tag/changelog says nothing useful ("picks up upstream fixes") | Phase 4 prompt requires reading mcp-ts-core changelog files and distilling relevant changes |
-| 11 | Tag annotations render as flat comma-separated strings or balloon into full CHANGELOG copies | Phase 4 prompt: structured markdown with sections (Fixed, Dependencies, etc.), dep arrows (`pkg ^old → ^new`), test footer; length is earned |
-| 12 | Post-version doc changes land after the tag — release points at stale content | Tag-moving protocol; authorized within the workflow as a same-day forward move |
+| 11 | Tag annotations render as flat comma-separated strings or balloon into full CHANGELOG copies | Phase 4 follows `release-and-publish` step 4 — headline digest, flat bullets, one deps line, changelog link last; `bun run release:github -- --check` enforces the shape before the push |
+| 12 | Post-version doc changes land after the tag — release points at stale content | The tag is created at release time on the final commit; a later change ships with the next release — never move a pushed tag |
 | 13 | Background sub-agent bails early on context | Orchestrator checks for Step 8 summary; respawns continuation sub-agent if missing |
 | 14 | Big monorepo or many adoptions cause context exhaustion in a sub-agent | Narrow the prompt: if a target has many breaking framework changes, split the work into "update deps + verify" and "adopt features" against that target |
 
@@ -172,4 +172,4 @@ For targets with hosted instances behind an auto-pull tool, trigger the refresh 
 - [ ] Phase 3: roll-up surfaced to user; version bump intent confirmed (patch default; minor/major surfaces if applicable)
 - [ ] Phase 4: wrap-up + release sub-agents complete — commit + annotated tag + push + publish per target, scope matches private/public status
 - [ ] Post-Phase-4 verification: `git ls-remote --tags origin` shows new tag; `npm view <pkg>@<version>` resolves (public); GH release artifacts attached; Docker image exists (if Dockerfile)
-- [ ] Tag/release quality review: tag subject omits version number, structured markdown, no marketing adjectives, dep arrows present, issue backlinks where applicable
+- [ ] Tag/release quality review: `bun run release:github -- --check` passed before the push; no marketing adjectives, issue backlinks where applicable

@@ -4,7 +4,7 @@ description: >
   Authentication, authorization, and multi-tenancy patterns for `@cyanheads/mcp-ts-core`. Use when implementing auth scopes on tools/resources, configuring auth modes (none/jwt/oauth), working with JWT/OAuth env vars, or understanding how tenantId flows through ctx.state.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.6"
   audience: external
   type: reference
 ---
@@ -33,6 +33,10 @@ const myTool = tool('my_tool', {
 ```
 
 When `MCP_AUTH_MODE=none`, auth checks are skipped and defaults are allowed.
+
+A failed check returns `Forbidden` (-32005, `Insufficient permissions.`) or, when auth is enabled but the request carries no auth context, `Unauthorized` (-32006). Neither carries `data`: the required, granted, and missing scope names stay in the server log, so a caller cannot enumerate scopes from the error.
+
+The scope check logs a missing scope at `warning`, naming the missing scopes. On a tool, the call's `Error in tool:<name>` record follows at `notice` with no stack — the refusal is the caller's standing, not a fault in this server — and `mcp.errors.classified` counts it with `mcp.error.severity: "notice"`. That holds for the inline check and for `checkScopes` in a handler alike, and the level is fixed: the refusal carries no `data.reason`, so no `errors[]` entry can set it. A missing auth context keeps its `Error in tool:` record at `error`, and so does a `forbidden()` the handler throws itself. A resource read the inline check refuses writes only the scope check's own records.
 
 ---
 
@@ -144,7 +148,7 @@ A `WARNING`-level log is emitted at startup whenever the flag is active so opera
 | `DELETE /mcp` | Yes (when auth enabled) — session termination |
 | `OPTIONS /mcp` | No (handled by CORS middleware before auth) |
 
-**CORS:** Set `MCP_ALLOWED_ORIGINS` to a comma-separated list of allowed origins, or `*` for open access.
+**CORS:** Set `MCP_ALLOWED_ORIGINS` to a comma-separated list of allowed origins, or `*` for open access. Left unset, only loopback browser origins reach the endpoint. The preflight for an accepted origin allows every request header the server reads: `Content-Type`, `Authorization`, `Mcp-Session-Id`, `MCP-Protocol-Version`, the 2026-07-28 `Mcp-Method` and `Mcp-Name`, `Last-Event-ID` (SSE resume), and one `Mcp-Param-<Name>` per `headerParam` designation on a registered tool — derived from the tool definitions, nothing to configure. Any other origin gets the first four only, so it learns no designation names.
 
 **Stdio mode:** No HTTP auth layer. Authorization is handled entirely by the host process.
 

@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.12"
   audience: external
   type: audit
 ---
@@ -110,13 +110,13 @@ grep -rn "auth: \[" src/mcp-server/tools/definitions/
 
 #### Axis 3 — Destructive ops without a consent round
 
-`ctx.requestInput` moves consent off the LLM and onto the user: the handler returns an `input_required` result and only runs the side effect once it is re-entered with an accepted response. Destructive tools without that round trust the LLM not to be tricked.
+`ctx.requestInput` moves consent off the LLM and onto the user: the handler returns an `input_required` result and only runs the side effect once it is re-entered and redeems the record it stored when it asked. An accepted response on `ctx.inputs` alone proves nothing — a client can send one on a call nothing prompted for. Destructive tools without that round trust the LLM not to be tricked.
 
 **Look in:** handlers with `destructiveHint: true` or side-effecting verbs in names (`delete_*`, `send_*`, `pay_*`, `publish_*`, `drop_*`).
 
 ```bash
 grep -rn "destructiveHint" src/mcp-server/tools/definitions/
-grep -rn "ctx.requestInput\|ctx.inputs" src/mcp-server/tools/definitions/
+grep -rnE "ctx\.requestInput|ctx\.inputs" src/mcp-server/tools/definitions/
 ```
 
 **Check:**
@@ -125,10 +125,12 @@ grep -rn "ctx.requestInput\|ctx.inputs" src/mcp-server/tools/definitions/
 - The confirmation **response** is validated — `ctx.inputs.accepted(key, Schema)` with a schema, not the bare overload. The SDK never re-validates a response against the schema its request advertised, and the payload is LLM-mediated: "user confirmed" does not mean "user authored these exact fields."
 - A **declined or cancelled** response is terminal — checked via `ctx.inputs.view(key)` and thrown on, never re-asked (a re-ask loops until the round budget runs out) and never treated as consent.
 - Consent is scoped to the specific target (e.g., record ID rendered in the message), not a generic "proceed?"
-- Any `requestState` carried across rounds is integrity-protected if it influences authorization, resource access, or which target gets mutated. It round-trips through the client and comes back attacker-controlled; the SDK does not sign or verify it.
-- **The weak point is answerability, not availability.** `ctx.requestInput` is present on every transport and both protocol eras — the 2025-era shim issues the real `elicitation/create` round trip, the 2026-07-28 client fulfils the embedded request directly. A client that never retries simply leaves the destructive step un-run, which fails safe. Keep `destructiveHint: true` so client-side approval flows still surface the risk, and do not accept "proceed anyway when the round is unavailable" as a fallback — there is no such state to detect.
+- Where `requestState` influences authorization, resource access, or which target gets mutated, `MCP_REQUEST_STATE_KEY` is set (≥ 32 bytes, the same on every instance a retry can reach). The framework then seals the string a handler returns and the SDK rejects any other state before the handler runs; unset, the state round-trips through the client and comes back attacker-controlled.
+- **A consent gate's state is server-issued and single-use.** The framework drops answers the client's declared capabilities do not cover, kind and mode, on both eras, so a client without `elicitation.form` — a URL-only client included — cannot pre-answer a form gate. A client that declared it still can: it may send `inputResponses` — and a `requestState` of its own, or one it was issued earlier — on the very first call, so a handler that only *compares* client-carried state against a fresh resolution deletes on an answer nobody was shown. A sealed state closes forgery but not replay within its 900 s lifetime. Keep what the prompt confirmed in a `ctx.state` record keyed by a random id — the operation (tool name, or the resource URI read), the caller (`ctx.auth` `clientId` and `sub`), the target, and a content hash so a same-path swap is caught — send only the id, redeem it before anything else in the handler, and ask again on an unknown, used, or expired id or on any field that differs from this call. Without the operation, an id minted by another gated tool or resource confirms this one; without the caller, another user in the same tenant redeems an id they were handed while `MCP_REQUEST_STATE_KEY` is unset. The record's storage is shared by every instance a 2026-07-28 retry can reach — `filesystem`, `supabase`, or `cloudflare-d1`, never `cloudflare-kv`, whose eventual consistency widens the race below.
+- **Redeeming is not atomic.** Read-then-delete stops a sequential replay, but concurrent retries carrying one id can each read the record before any delete lands and each run the action. Until `ctx.state` gains an atomic `take` ([#593](https://github.com/cyanheads/mcp-ts-core/issues/593)), an action that must not repeat — a payment, a send, a publish — is idempotent per record (the record id as the upstream idempotency key), or the risk is accepted knowingly and recorded in the findings.
+- **The weak point is answerability, not availability.** `ctx.requestInput` is present on every transport and both protocol eras — the 2025-era shim issues the real `elicitation/create` round trip, the 2026-07-28 client fulfils the embedded request directly. A client that never retries simply leaves the destructive step un-run, which fails safe. Keep `destructiveHint: true` so client-side approval flows still surface the risk, and do not accept "proceed anyway when the round is unavailable" as a fallback. On a 2025-era connection whose client lacks the capability, `ctx.requestInput` throws `client_capability_missing` inside the handler; catching that to run the side effect is exactly this bypass — let it propagate. So is skipping the prompt because `ctx.clientCapabilities` lacks `elicitation`: that property decides whether to ask for optional context, never whether consent is needed.
 
-**Smell:** `destructiveHint: true` file with no `ctx.requestInput` in it. Or `ctx.inputs.accepted('confirm')` with no schema argument — the content could be anything. Or a handler that re-issues the same request after a `decline`.
+**Smell:** `destructiveHint: true` file with no `ctx.requestInput` in it. Or `ctx.inputs.accepted('confirm')` with no schema argument — the content could be anything. Or a gate that proceeds on `ctx.inputs` without redeeming a `ctx.state` record, whose record omits the operation or the caller, or that compares a target carried in `requestState`. Or a non-repeatable action behind a gate with no idempotency key. Or a handler that re-issues the same request after a `decline`.
 
 #### Axis 4 — Upstream auth shape
 
@@ -156,31 +158,38 @@ LLM-supplied inputs feel internal but aren't. Classic sinks apply, amplified. Sa
 grep -rn "z.string().url()" src/
 
 # Path sinks — traversal
-grep -rn "readFile\|writeFile\|readdirSync\|createReadStream\|statSync" src/
+grep -rnE "readFile|writeFile|readdirSync|createReadStream|statSync" src/
 
 # Shell sinks — command injection
 grep -rnE "\b(exec|spawn|execSync|spawnSync)\b" src/
 
 # Merges — prototype pollution
-grep -rn "Object.assign\b\|structuredClone" src/
+grep -rnE "Object\.assign\b|structuredClone" src/
+
+# Lookups — prototype chain read through an object literal
+grep -rnE "\[[a-zA-Z_$][a-zA-Z0-9_$.]*\] *\?\? |\[[a-zA-Z_$][a-zA-Z0-9_$.]*\] *\|\| " src/
 
 # Roots — client-shared filesystem
-grep -rn "roots/list\|ctx.roots" src/
+grep -rnE "roots/list|ctx\.roots" src/
 
 # Schema laxity — fields sneaking past validation
-grep -rn "\.passthrough()\|\.catchall(" src/mcp-server/
+grep -rnE "\.passthrough\(\)|\.loose\(\)|looseObject\(|\.catchall\(" src/mcp-server/
 ```
 
 **Check:**
 
 - URL-taking tools block private IPs, `file://`, `ftp://`, `localhost`, DNS rebind?
 - Path-taking tools canonicalize (`path.resolve` + assert `startsWith(root + sep)`)?
+- **Upstream URL paths built from caller segments refuse `.` and `..`?** `encodeURIComponent` leaves dots untouched, and the URL parser resolves dot segments, so a file key or archive-member input of `../../me` retargets the request (credentials attached) at another endpoint on the same host. Redirects on authenticated requests should follow only within the upstream origin.
+- **Caller text spliced into an upstream query language next to server-built filter clauses stays well-formed?** Some search backends fall back to plain-text matching when they can't parse a query. An unclosed quote or a trailing `\` from the caller then silently drops every filter clause while the tool still reports them as applied.
 - Roots-derived paths: resolved result stays within *one* declared root (iterate and assert), not assumed-safe because "the client said so"?
 - Shell-using tools use an allowlist (never string-concat)?
 - Regex / glob / filter inputs bounded (length cap, complexity limits, execution timeout) — ReDoS-safe?
+- **The server's own patterns are linear-time on hostile input?** Every `.regex()` in an input schema, and every regex a handler or normalizer runs over caller text, sees attacker-length strings before any length cap applies. Loose "raw" patterns that admit un-normalized input (`\s*` runs, optional quotes and separators around a repeated group) are the usual source of polynomial backtracking. Time each one against a long adversarial string (thousands of spaces, then a character that forces failure). Milliseconds is fine; seconds is a finding.
 - User-JSON merges reject `__proto__`, `constructor`, `prototype` keys?
+- **Lookup tables keyed by input-derived text are a `Map`, not an object literal?** The read direction of the same defect: `TABLE[key] ?? fallback` walks the prototype chain, so a key of `constructor` (or `toString`, `valueOf`) returns a function the `??` does not catch — it is not nullish — and string coercion then emits `function Object() { [native code] }` into the output. Lowercasing the key masks the camelCase members and leaves `constructor` reachable, so it is not a fix. A `Map` has no prototype chain; `Object.create(null)` works too.
 - **Input schemas `.strict()`** — unknown fields rejected, not silently passed to downstream code that destructures with `...rest`?
-- **Output schemas without `.passthrough()` / `.catchall()`** — no accidental exfiltration of fields your schema didn't declare?
+- **Output schemas without `.passthrough()` / `.loose()` / `.catchall()`** — no accidental exfiltration of fields your schema didn't declare?
 **Smell:** `z.string().url()` with no allowlist; `readFile(input.path)` with no canonicalization.
 
 #### Axis 6 — Tenant isolation
@@ -237,7 +246,7 @@ Unbounded = DoS of self, upstream, or the LLM's context window (billing-DoS is r
 
 ```bash
 grep -rnE "while\s*\(|for\s*\(.*of" src/mcp-server/tools/definitions/
-grep -rn "cursor\|nextPage\|paginate" src/
+grep -rnE "cursor|nextPage|paginate" src/
 grep -rn "JSON.parse\b" src/
 ```
 
@@ -335,7 +344,7 @@ End with:
 - [ ] `fuzzTool` started in parallel
 - [ ] Axis 1 — LLM-facing surfaces (tool / resource / prompt output + descriptions) framed and static
 - [ ] Axis 2 — scope granularity audited
-- [ ] Axis 3 — destructive ops verified to gate on a `ctx.requestInput` round, the response schema-validated, decline/cancel terminal
+- [ ] Axis 3 — destructive ops verified to gate on a `ctx.requestInput` round that redeems a `ctx.state` record bound to the operation, caller, and target, the response schema-validated, decline/cancel terminal, non-repeatable actions idempotent per record, `MCP_REQUEST_STATE_KEY` set where state drives a mutation
 - [ ] Axis 4 — upstream auth + token passthrough reviewed
 - [ ] Axis 5 — input sinks (URL / path / roots / shell / proto / schema strictness / ReDoS) checked
 - [ ] Axis 6 — tenant isolation: module-scope state swept

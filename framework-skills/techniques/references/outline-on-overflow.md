@@ -45,9 +45,12 @@ export const getLabel = tool('get_label', {
       .describe('Sections to return. Omit for the full label (or an outline if it overflows).'),
   }),
   output: z.object({
-    kind: z.enum(['full', 'outline']),
+    kind: z.enum(['full', 'outline']).describe('Whether the full label or a section outline was returned'),
     ...FullLabel.partial().shape,                         // full arm — every field optional
-    sections: OUTLINE_VARIANT.shape.sections.optional(),  // outline arm
+    sections: z                                           // outline arm
+      .array(OUTLINE_VARIANT.shape.sections.element.describe('One section of the label'))
+      .optional()
+      .describe('Available sections, largest first'),
     notice: OUTLINE_VARIANT.shape.notice.optional(),
   }),
   // Render each arm on field presence, independently — never branch on `kind` (see below).
@@ -66,6 +69,8 @@ export const getLabel = tool('get_label', {
 });
 ```
 
+The shape lints clean as written. The section item is described in place (`.element.describe(…)`, then the array re-described) because `describe-on-fields` asks every array-of-object element for a description and `OUTLINE_VARIANT`'s item carries none; folding `OUTLINE_VARIANT.shape.sections` in directly warns on `output.sections[]`. The `notice` beside a `sections` array is exempt from `enrichment-prefer-block` — it is the re-call instruction, main-body payload by design.
+
 `format()`-parity holds because every terminal field in `output` must appear in the rendered text. With a flat object the linter builds **one** synthetic sample with every optional field populated at once, so render each arm on field presence, independently — a mutually-exclusive `if (kind === 'outline') … else …` renders only one arm against that all-fields sample and fails parity for the other. `formatOutline` is the shipped renderer for the `outline` arm; you supply the `full` renderer. That keeps the two client surfaces in lockstep.
 
 ## The helper
@@ -75,9 +80,9 @@ export const getLabel = tool('get_label', {
 | Export | Purpose |
 |:--|:--|
 | `outlineOnOverflow(doc, options?)` | Returns `{ kind: 'full', ...doc }` under budget (or with `< 2` sections), else `{ kind: 'outline', sections, notice }`. |
-| `OUTLINE_VARIANT` | The reusable `outline`-arm Zod schema; fold `.shape.sections` / `.shape.notice` into your flat `output` object as optional arms. |
-| `selectSections(doc, want, { alwaysKeep })` | Projects the document to requested keys plus always-kept metadata. The selection-path counterpart. |
-| `formatOutline(outline)` | Renders the outline to `content[]` for `format()`. |
+| `OUTLINE_VARIANT` | The reusable `outline`-arm Zod schema; fold `.shape.sections` (item described in place, as above) / `.shape.notice` into your flat `output` object as optional arms. |
+| `selectSections(doc, want, { alwaysKeep })` | Projects the document to requested keys plus always-kept metadata. The selection-path counterpart. A requested name that is not a key of `doc` throws `InvalidParams`; the message names the unmatched names and the available keys, and `data` carries both (`unmatched`, `available`). An `alwaysKeep` key absent from `doc` is ignored. |
+| `formatOutline(outline)` | Renders the outline to `content[]` for `format()`. Each section name is a code span sized past any backtick in it, so the name reads back exactly as the caller must pass it in `sections`. |
 | `DEFAULT_OUTLINE_BUDGET_BYTES` | The default budget (`24_000`) when `options.budget` is omitted. |
 
 `outlineOnOverflow` options:
@@ -93,14 +98,14 @@ The flow:
 3. **Over budget, ≥ 2 sections** → the outline (sections sorted largest-first). The agent re-calls with `sections: [...]`.
 4. **Over budget, < 2 sections** → `full` anyway (nothing to pick between). A single section that *alone* exceeds budget is a known limitation — sub-section outlining is out of scope.
 
-The budget bounds the **disclosure**, not the selection. `selectSections` returns whatever the agent named, so a selection over several sections — or one section larger than the budget — comes back whole. That is deliberate: the agent asked for those sections by name, and truncating the answer is the thing this technique exists to avoid. The default notice reports each example's size so the selection can be sized before it is made.
+The budget bounds the **disclosure**, not the selection. `selectSections` returns whatever the agent named, so a selection over several sections — or one section larger than the budget — comes back whole. That is deliberate: the agent asked for those sections by name, and truncating the answer is the thing this technique exists to avoid. The default notice reports each example's size so the selection can be sized before it is made. The selection is not lenient about names, though: a name the document does not carry is rejected with the valid names, not dropped, so a stale or mistyped section never comes back as a quietly smaller answer.
 
 ## Re-retrieval — why the selection call is stateless
 
 The re-call is **self-contained**, so nothing is stored between the outline call and the selection call:
 
 - The selection call sends the **same input** as the outline call, plus `sections: [...]`.
-- The handler **re-fetches** the document — input-minus-`sections` is identical and the upstream query is deterministic, so it reproduces the exact same record — then applies `selectSections` (a pure projection: requested keys + `alwaysKeep` metadata).
+- The handler **re-fetches** the document — input-minus-`sections` is identical and the upstream query is deterministic, so it reproduces the exact same record — then applies `selectSections` (a pure projection: requested keys + `alwaysKeep` metadata; an unknown requested name throws `InvalidParams` naming the available keys).
 - You **reconstruct rather than remember**. The agent holds the continuity (it passes `sections`); the upstream holds the document.
 
 The only cost is the redundant fetch. For a **rate-limited or expensive upstream**, trade it for an optional cache:

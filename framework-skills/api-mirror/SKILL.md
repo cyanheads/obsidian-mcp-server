@@ -4,7 +4,7 @@ description: >
   Stand up a persistent, self-refreshing local mirror of a bulk upstream dataset with the MirrorService (@cyanheads/mcp-ts-core/mirror). Use when a server wraps a large or slow API and should query a synced local index (embedded SQLite + FTS5) instead of paginating the live API per request.
 metadata:
   author: cyanheads
-  version: "1.2"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -24,6 +24,7 @@ const papers = defineMirror({
   name: 'arxiv-papers',
   store: sqliteMirrorStore({
     path: config.mirrorPath,
+    table: 'papers',                                 // primary table; FTS index is `papers_fts`
     primaryKey: 'id',
     columns: { id: 'TEXT', title: 'TEXT', authors: 'TEXT', abstract: 'TEXT', updated: 'TEXT' },
     fts: ['title', 'authors', 'abstract'],          // opt-in FTS5 external-content index
@@ -64,12 +65,14 @@ Why they can't merge: during a from-scratch init the records aren't ordered by t
 
 | Framework | Server |
 |---|---|
-| Cross-runtime SQLite handle, WAL + `busy_timeout` | The `sync` generator (the ingester) |
+| Cross-runtime SQLite handle, WAL + `busy_timeout`; an open waits out another connection's lock for `busyTimeoutMs` | The `sync` generator (the ingester) |
 | `mirror_sync_state` + cursor/checkpoint state machine | Translating your query syntax → FTS5 `match` |
 | `runSync({ init \| refresh })`, per-page persist, resume | Mapping upstream records → row objects |
 | Schema gen (columns + FTS + tokenizer + triggers) | Migration *content* (the `up` functions) |
 | `schema_version` + migration *runner* | Scheduling + init/refresh bootstrap (see below) |
 | Generic `query()` + the raw-handle escape hatch | Server-specific access paths via the raw handle |
+
+A store that cannot be opened or initialized (a lock held past `busyTimeoutMs`, an unreadable or corrupted file, a parent directory that cannot be created, a migration that throws) rejects with `DatabaseError` (`-32010`). The caller sees the store's file name and a `data.recovery.hint`, never its directory; the driver or filesystem error stays on `cause` for the log.
 
 ## Querying
 
@@ -92,6 +95,7 @@ A migration runs identically on first creation and on upgrade: a fresh database 
 The service owns `runSync` + state; it does not schedule. Wire "self-refreshing" yourself:
 
 - **Refresh** — register `runSync({ mode: 'refresh' })` on a cron via `schedulerService` from `@cyanheads/mcp-ts-core/utils`, inside `setup()`. Gate on transport (HTTP) when stdio operators run it out-of-band.
+- **Off the serving thread** — SQLite calls are synchronous, so each write transaction a sync runs blocks the event loop until it commits. A refresh whose pages or post-sync recomputes take seconds stalls every request, `/healthz` included, for that long. Run such a scheduled sync in a child process instead: spawn `process.execPath` with `process.execArgv` and a compiled job entry in `dist/`, relay its log lines, and in `teardown` stop it with SIGTERM, then SIGKILL after a grace period. In-process scheduling suits mirrors whose transactions stay short.
 - **Init** — run out-of-band (a CLI script / one-shot), never on startup: a full init can take hours and must not block the server. It is idempotent and resumable — re-running after an interrupt continues from the persisted cursor.
 
 ### Shipping the mirror CLI in a production Docker image
@@ -121,7 +125,7 @@ RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > ts
 
 **Caveat:** this relies on Bun's runtime `paths` resolution. A Node runtime image (no native `.ts` execution) needs the scripts compiled into `dist/` instead — a separate tsconfig pass with a different `rootDir` is required in that case.
 
-**`package.json` `files[]`:** add `scripts/_mirror-context.ts` and the three named lifecycle scripts so the npm tarball and `.mcpb` bundle carry them. Consumers installing from npm need them for `docker exec` access.
+**`package.json` `files[]`:** add `scripts/_mirror-context.ts` and the three named lifecycle scripts so the npm tarball and `.mcpb` bundle carry them. They resolve `@/` only where a `tsconfig.json` maps it (a dev checkout, or the image above). An npm install ships no such mapping, so an npm-installed server cannot run them: document building the mirror from a checkout or the image.
 
 ## Checklist
 

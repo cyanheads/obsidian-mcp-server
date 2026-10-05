@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.17"
+  version: "1.21"
   audience: external
   type: reference
 ---
@@ -15,10 +15,10 @@ The linter validates tool, resource, and prompt definitions against the MCP spec
 
 | Entry point | When | On failure |
 |:------------|:-----|:-----------|
-| `bun run lint:mcp` | Manual or CI | Prints errors + warnings, exits non-zero on errors. |
+| `bun run lint:mcp` | Manual or CI | Imports every definition file, prints errors + warnings, exits non-zero on errors. A file that fails to import is an error ([`definition-import-failed`](#definition-import-failed)), never a skip. |
 | `bun run devcheck` | Pre-commit workflow | Wraps `lint:mcp` alongside typecheck, format, `bun audit`, `bun outdated`. |
 
-Both surface the same `LintReport` from `validateDefinitions()` (exported from `@cyanheads/mcp-ts-core/linter`). Each diagnostic has a stable `rule` ID — that's the anchor you land on via the `See: framework-skills/api-linter/SKILL.md#<rule>` breadcrumb appended to every message.
+Both surface the same `LintReport` from `validateDefinitions()` (exported from `@cyanheads/mcp-ts-core/linter`), plus two load errors the CLI raises itself, because `validateDefinitions()` only receives what already loaded: `definition-import-failed` and `server-json-parse`. Each diagnostic has a stable `rule` ID — that's the anchor you land on via the `See: framework-skills/api-linter/SKILL.md#<rule>` breadcrumb appended to every message.
 
 **Severity:**
 - **error** — MUST-level spec violation; blocks `devcheck`.
@@ -42,7 +42,7 @@ Grouped by family. Jump to any rule ID via its anchor.
 
 | Family | Rules | Section |
 |:-------|:------|:--------|
-| Definition | `definition-invalid` | [Definition rules](#definition-rules) |
+| Definition | `definition-invalid`, `definition-import-failed` | [Definition rules](#definition-rules) |
 | Format parity | `format-parity`, `format-parity-threw`, `format-parity-walk-failed`, `format-parity-depth-limit` | [Format parity](#format-parity) |
 | Schema | `schema-is-object`, `describe-on-fields`, `schema-serializable`, `schema-unsatisfiable`, `header-param-designation`, `schema-root-meta-discarded` | [Schema rules](#schema-rules) |
 | Portability | `schema-format-portability`, `schema-anyof-needs-type`, `schema-no-discriminator-keyword`, `schema-no-defs`, `schema-root-oneof-portability`, `schema-dialect-tag` | [Portability rules](#portability-rules) |
@@ -53,7 +53,7 @@ Grouped by family. Jump to any rule ID via its anchor.
 | Prompts | `generate-required` | [Prompt rules](#prompt-rules) |
 | Handler body | `prefer-mcp-error-in-handler`, `prefer-error-factory`, `preserve-cause-on-rethrow`, `no-stringify-upstream-error` | [Handler body rules](#handler-body-rules) |
 | Error contract (structural) | `error-contract-type`, `error-contract-empty`, `error-contract-entry-type`, `error-contract-code-type`, `error-contract-code-unknown`, `error-contract-code-unknown-error`, `error-contract-reason-required`, `error-contract-reason-format`, `error-contract-reason-unique`, `error-contract-when-required`, `error-contract-retryable-type`, `error-contract-severity-unknown`, `error-contract-recovery-required`, `error-contract-recovery-empty`, `error-contract-recovery-min-words` | [Error contract rules](#error-contract-rules) |
-| Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail`, `error-contract-unthrown`, `error-contract-recovery-unforwarded` | [Error contract rules](#error-contract-rules) |
+| Error contract (conformance) | `error-contract-conformance`, `error-contract-prefer-fail`, `error-contract-unthrown` | [Error contract rules](#error-contract-rules) |
 | Enrichment | `enrichment-type`, `enrichment-empty`, `enrichment-field-type`, `enrichment-output-collision`, `enrichment-prefer-block`, `enrichment-trailer-render`, `enrichment-trailer-orphan`, `enrichment-trailer-unknown-field`, `capped-list-no-truncation` | [Enrichment rules](#enrichment-rules) |
 | server.json | ~40 rules prefixed `server-json-*` | [server.json rules](#server-json-rules) |
 
@@ -68,6 +68,23 @@ Grouped by family. Jump to any rule ID via its anchor.
 Fires when a `tools`, `resources`, or `prompts` array passed to `validateDefinitions()` contains a `null`/`undefined` entry (or any non-object value) instead of a definition object — e.g. a stray import or a conditional that yields `undefined`/`false`. The bad entry is reported as this diagnostic and skipped, rather than crashing the whole lint run.
 
 **Fix:** remove the empty slot, or ensure every element of the array is a real definition object (e.g. `[makeFooTool(), enabled ? makeBarTool() : null].filter(Boolean)`).
+
+### definition-import-failed
+
+**Severity:** error
+
+Fires when a discovered definition file (`*.tool.ts`, `*.resource.ts`, `*.prompt.ts`, `*.app-tool.ts`, `*.app-resource.ts` under `src/mcp-server/` or `examples/mcp-server/`) rejects on `import()`: a package that the file, or anything it imports, needs cannot be resolved, the file has a syntax error, or code throws at module load. None of that file's definitions can be checked, so the run fails rather than passing without them. The other files are still imported and linted, so one run reports every import failure alongside the rule diagnostics. The `lint:mcp` CLI (`scripts/lint-mcp.ts`) raises it; `validateDefinitions()` never does, since a programmatic caller does its own imports.
+
+```text
+  ✗ [definition-import-failed] src/mcp-server/tools/definitions/query.tool.ts: Cannot find package '@duckdb/node-api' imported from …
+```
+
+**Fix**, by cause:
+
+- **An optional peer dependency** imported at the top of the definition or of a service it imports: install the peer wherever `lint:mcp` and `devcheck` run (a `devDependency` is enough), or make the import lazy — `await import('<pkg>')` inside the handler or service method that uses it, so loading the definition never touches the package. The framework's own Tier 3 subpaths already lazy-load their peers; importing them from a definition needs nothing installed.
+- **A throw at module load** — reading config, constructing a client, or awaiting a network call at top level: move the work into `setup()`, a service's init, or the handler. Definitions must import without side effects.
+- **A syntax error**: fix it. `devcheck`'s typecheck reports the same file with a location.
+- **Running the script under plain `node`**: Node's type stripping does not rewrite a relative `./x.js` specifier to `x.ts`, so a definition that imports a sibling module fails to load. Run it under Bun — `bun run lint:mcp`, as `devcheck` does.
 
 ---
 
@@ -85,7 +102,7 @@ Why this family exists: different MCP clients forward different surfaces of a to
 
 Two consequences worth knowing when writing a `format()`:
 
-- **The string sentinel is alphanumeric so escaping does not break it.** `content[]` is markdown carrying upstream text you do not control, so escaping `_`, `*`, `` ` ``, `[`, `<` at the render boundary is correct — and it leaves an alphanumeric probe byte-identical. Markdown escaping, HTML escaping, and URL encoding all pass. You never need to carve an exception into your escape set to keep `lint:mcp` green.
+- **The string sentinel is alphanumeric so escaping does not break it.** `content[]` is markdown carrying upstream text you do not control, so escaping at the render boundary is correct — and it leaves an alphanumeric probe byte-identical. Escape a character only where it would change rendering, per CommonMark/GFM rules: intraword `_` (`snake_case`), a `<` that cannot open a tag (`p<0.05`), and a `[` that cannot form a link all stay raw. Agents read `content[]` as text and copy spans out of it, so a blanket escape set turns into backslash noise in their output. Markdown escaping, HTML escaping, and URL encoding all pass. You never need to carve an exception into your escape set to keep `lint:mcp` green.
 - **Schema-dictated values must render as their own token.** A required `kind: z.enum(['full', 'outline'])` that `format()` never renders is not satisfied by the letters `full` appearing inside a longer word elsewhere in the output — `case_name_full`, `inactive`, `listing`. Render the field, or render its key name as a label.
 
 ### format-parity
@@ -200,6 +217,8 @@ Every field in `input`, `output`, `params`, or `args` needs a `.describe('...')`
 | `z.union([a, b, ...])` non-literal option | Yes | Yes, on each option |
 | `z.union([..., z.literal(X), ...])` literal option | **No** | No — outer union describe is sufficient |
 | A tool `input` root that is a `z.discriminatedUnion(...)` — its variant objects | Yes, their **fields** | No, not on the variant itself — it is a root, and roots carry no describe |
+
+A self-referential schema — a Zod 4 getter that returns the schema itself (`get children() { return z.array(Node) }`) — is walked once. The walk tracks the schemas on its current path and stops when one re-enters, so a missing `.describe()` inside the recursive schema is reported at its first occurrence, not once per level. The guard is per path: a non-recursive schema reused at two sibling paths is reported at both.
 
 The asymmetry that catches agents: inside `z.union([z.string(), z.array(z.string())])`, the outer `z.string()` option **does** need a describe (unions walk non-literal options), but the `z.string()` inside the inner array does **not** (arrays don't walk primitive elements). If the linter didn't flag a path, don't add a describe there — the redundant describe ships to the JSON Schema as clutter.
 
@@ -373,9 +392,9 @@ Fires when emitted output contains `$defs` or `$ref`. Gemini rejects these (`400
 
 **Severity:** warning (only when `portability: 'strict'`)
 
-Fires when a tool's advertised `inputSchema` has a root-level `oneOf` — that is, when `input` is a `z.discriminatedUnion(...)`. The emitted shape is valid 2020-12, every branch is a typed object, and the bytes are identical on both MCP protocol revisions. What is unmeasured is vendor handling of a `oneOf` at the *parameter* root: a client that reads only `type` and `properties` would see a parameterless tool and drop the constraint silently rather than erroring. Opt-in, because for Anthropic clients the union is the better shape.
+Fires when a tool's advertised `inputSchema` has a root-level `oneOf` — that is, when `input` is a `z.discriminatedUnion(...)`. The emitted shape is valid 2020-12, every branch is a typed object, and the bytes are identical on both MCP protocol revisions. Vendor handling of a `oneOf` at the *parameter* root varies: a client that reads only `type` and `properties` sees a parameterless tool and drops the constraint silently rather than erroring, and Claude clients — the Anthropic Messages API rejects a top-level `oneOf` — rewrite the root to its first branch's properties, hiding every other mode from the model. Opt-in for now; whether it warns by default is tracked in [#510](https://github.com/cyanheads/mcp-ts-core/issues/510).
 
-**Fix (only if you need the widest vendor reach):** flatten to a single `z.object()` with a discriminator field and optional per-mode fields, and validate the combination in the handler.
+**Fix (for any tool that must work in Claude clients):** flatten to a single `z.object()` with a discriminator field and optional per-mode fields, and validate the combination in the handler.
 
 ### schema-dialect-tag
 
@@ -470,19 +489,20 @@ Catches `readOnlyHint: true` with **any** explicit `destructiveHint` value (even
 
 Fires when a tool's `inputAliases` cannot resolve to exactly one declared input key. An alias is a one-to-one mapping fixed ahead of time — the reason it is accepted where nearest-key matching is not — so an alias resolving to none or to more than one is a definition error, not a runtime one. The runtime declines an ambiguous rewrite silently and the caller sees the ordinary strict rejection, which reads as the alias simply not working.
 
-Five conditions, all decidable from the definition:
+Six conditions, all decidable from the definition:
 
 | Condition | Example |
 |:--|:--|
 | An alias must not equal a declared key | `input: z.object({ q, query })` with `inputAliases: { q: 'query' }` — a declared key is never rewritten, so the alias can never fire |
 | An alias's target must be a declared key | `inputAliases: { q: 'searchQuery' }` when the schema declares `query` |
+| An alias's target must not be `headerParam`-designated | `inputAliases: { region: 'regionCode' }` with `regionCode: headerParam(z.string(), 'Region')` — the rewrite never targets a header-mirrored field, since the SDK checks the `Mcp-Param-Region` header against the body the caller sent, so the caller gets `Unknown key region` |
 | Two declared keys must not case-fold to one name | `z.object({ maxResults, max_results })` — no alias can resolve between them |
 | An alias must not case-fold to a declared key other than its target | `inputAliases: { max_results: 'query' }` alongside a declared `maxResults` |
 | Two aliases must not case-fold to one name with different targets | `inputAliases: { 'search-term': 'query', search_term: 'maxResults' }` |
 
-Case-folding strips `-` and `_` and lowercases — the same fold the runtime rewrite applies, so the rule and the runtime cannot disagree. On a discriminated-union root, every variant's keys count as declared: a rewrite resolves against the selected variant, so an alias naming a key no variant declares can never fire.
+Case-folding strips `-` and `_` and lowercases — the same fold the runtime rewrite applies, so the rule and the runtime cannot disagree. On a discriminated-union root, every variant's keys count as declared: a rewrite resolves against the selected variant, so an alias naming a key no variant declares can never fire. The header check reads each variant's own designations, so an alias onto a designated field inside one variant is reported beside that variant's `header-param-designation` error; a designation deeper than the root never blocks an alias, which only ever names a root key.
 
-**Fix:** point the alias at an existing key, rename the key it shadows, or drop the alias. Also fires when `inputAliases` is not an object of non-empty string targets.
+**Fix:** point the alias at an existing key, rename the key it shadows, or drop the alias. For a header target, drop the alias or the `headerParam` designation — the field cannot be both. Also fires when `inputAliases` is not an object of non-empty string targets.
 
 Silent when no `inputAliases` is declared — the case-style half needs no declaration and declines ambiguity on its own.
 
@@ -594,6 +614,7 @@ Validates the `server.json` manifest at project root against the [MCP server man
 
 | Rule ID | Severity | What it checks |
 |:--------|:---------|:---------------|
+| `server-json-parse` | error | `server.json` exists but does not parse as JSON, so none of the rules below can run. Raised by the `lint:mcp` CLI, which reads the file; a missing `server.json` is skipped |
 | `server-json-type` | error | `server.json` must be a JSON object, not an array or primitive |
 | `server-json-name-required` | error | `name` must be present and non-empty |
 | `server-json-name-length` | error | `name` length 3–200 characters |
@@ -681,7 +702,7 @@ Heuristic source-text checks that scan `handler.toString()` for common error-han
 
 **Severity:** warning
 
-Fires when a handler contains `throw new Error(...)`. Plain `Error` doesn't carry a JSON-RPC code — the framework's auto-classifier degrades to `InternalError`, hiding the actual failure mode.
+Fires when a handler contains `throw new Error(...)`, or `throw Error(...)` — the spelling Bun's transpiler prints for the same code, since it drops `new` from built-in error constructors. Plain `Error` doesn't carry a JSON-RPC code — the framework's auto-classifier degrades to `InternalError`, hiding the actual failure mode. Other built-ins (`TypeError`, `RangeError`) are not flagged in either spelling.
 
 Plain `Error` is acceptable for "don't care" cases where the specific code doesn't matter (per CLAUDE.md/AGENTS.md: "plain `Error` for don't-care cases"). This rule targets domain-specific failures that deserve a concrete code — upgrade those to factories or `ctx.fail`, and accept the warning for the rest.
 
@@ -713,7 +734,7 @@ throw notFound('Item missing');
 
 **Severity:** warning
 
-Fires when a `catch (e)` block throws a structured `McpError` (or factory) without passing `{ cause: e }`. Dropping the cause loses the original stack trace — observability platforms and `pino-pretty` rely on it to render error chains.
+Fires when a `catch (e)` block throws a structured `McpError` (or factory) without passing `{ cause: e }`. Dropping the cause loses the original stack trace — observability platforms and `pino-pretty` rely on it to render error chains. When the catch binding is itself named `cause`, the `{ cause }` shorthand satisfies the rule — it is also how Bun's transpiler prints `{ cause: cause }`.
 
 **Fix:** thread the cause through the 4th `McpError` argument or factory options:
 
@@ -845,7 +866,7 @@ Fires when an entry's optional `severity` field is present but isn't one of `deb
 
 **Severity:** error
 
-Fires when an entry's `recovery` field is missing or not a string. `recovery` is the agent's next-move guidance when this failure fires — it flows to the wire via `ctx.recoveryFor`.
+Fires when an entry's `recovery` field is missing or not a string. `recovery` is the agent's next-move guidance when this failure fires — the handler factory sends it as `data.recovery.hint` with any failure carrying the entry's reason and no hint of its own.
 
 ### error-contract-recovery-empty
 
@@ -927,37 +948,13 @@ async handler(input, ctx) {
 }
 ```
 
-The field is lint-only metadata: `ctx.fail`, `ctx.recoveryFor`, the `severity` lookup, and the advertised error envelope never read it, so a marked entry is typed, advertised, and thrown exactly as an unmarked one. Prefer it over the workarounds that also silence the rule — moving the literal `ctx.fail` into a module-level helper turns the whole tool off, handler-local reasons included.
+The field is lint-only metadata: `ctx.fail`, `ctx.recoveryFor`, the recovery fill, the `severity` lookup, and the advertised error envelope never read it, so a marked entry is typed, advertised, and thrown exactly as an unmarked one. Prefer it over the workarounds that also silence the rule — moving the literal `ctx.fail` into a module-level helper turns the whole tool off, handler-local reasons included.
 
 **Trigger.** Only when the handler holds at least one literal `ctx.fail(`. A handler with none produces its reasons somewhere the scan cannot reach, so firing there would warn on every service-layer definition. A `ctx.fail(` or `ctx.recoveryFor(` whose first argument is not a string literal — a variable, a template literal, a map lookup — makes the named set unknowable, and the whole definition is skipped rather than guessed at.
 
 **Heuristic limitations:** the scan reads `handler.toString()` and matches call sites in the comment- and string-stripped text, so a `ctx.fail('…')` written inside a comment or nested in another literal does not count as thrown. A reason produced outside the handler closure is invisible to any `toString()` scan, which is why the rule can never prove absence and stays a warning. Still silent without a marker: a `createFail(errors)` resolver built outside the handler, and an aliased `const fail = ctx.fail`.
 
-### error-contract-recovery-unforwarded
-
-**Severity:** warning
-
-Fires per literal `ctx.fail('<reason>', …)` site that does not put the contract's `recovery` on the wire.
-
-`recovery` is required on every `errors[]` entry, but reaching the client with it is opt-in — the throw site forwards `ctx.recoveryFor('<reason>')`, or passes its own `recovery` key. A site that does neither ships `reason` and `retryable` with no hint, and since the framework mirrors `data.recovery.hint` into the error `content[]`, both client surfaces lose it together. Nothing else catches this: the contract is declared, `lint:mcp` passes, and an error-path test asserting `code` and `reason` passes with the hint absent.
-
-**Fix:** forward the resolver at the site named in the diagnostic.
-
-```ts
-// warns
-throw ctx.fail('rate_limited', 'Upstream rate limit exceeded');
-
-// clean — any of
-throw ctx.fail('rate_limited', msg, { ...ctx.recoveryFor('rate_limited') });
-throw ctx.fail('rate_limited', msg, ctx.recoveryFor('rate_limited'));
-throw ctx.fail('rate_limited', msg, { recovery: { hint: `Retry in ${waitSeconds}s.` } });
-```
-
-**Per site, not per reason.** A handler wiring one of six throws is covered at one of them, so each site is judged on its own argument list. Two sites naming one reason, one forwarding and one bare, produce exactly one diagnostic. A site whose only resolver names a *different* reason warns too, naming both — the caller would otherwise get another failure mode's guidance.
-
-**Bails.** A non-literal first argument on either `ctx.fail(` or `ctx.recoveryFor(` skips the whole definition, as it does for `error-contract-unthrown`. A resolver sitting outside every fail span — a hoisted `const hint = ctx.recoveryFor('x')` — skips that reason, since the binding is assembled where the scan cannot follow it. A data argument the scan cannot read skips that one site: an identifier (`ctx.fail('r', msg, data)`), a call other than the resolver, or an object literal spreading another value (`{ ...details }`), any of which may carry `recovery` already. An object literal of plain keys carrying no `recovery` still warns.
-
-**Heuristic limitations:** same `handler.toString()` scan as `error-contract-unthrown`, so a call written inside a comment or nested in another literal is not a site, and a failure thrown below the handler is invisible. The rule speaks only for the sites it sees, which is why it stays a warning.
+No rule checks that a throw site forwards the declared `recovery`: the handler factory fills `data.recovery.hint` from the entry for any failure carrying its reason and no hint of its own, so a bare `ctx.fail('<reason>')` and a service throw both reach the client with it. See `api-errors`.
 
 ---
 
@@ -1002,6 +999,8 @@ Fires when an enrichment key matches an `output` key. The effective output schem
 **Severity:** warning
 
 Advisory. Fires when a tool has **no** `enrichment` block but an `output` field whose name strongly signals agent-facing context (`notice`, `effectiveQuery`, `queryEcho`) rather than domain payload.
+
+**Exempt:** a `notice` in an `output` that also declares a `sections` array — the outline-on-overflow arm (`OUTLINE_VARIANT`, see the `techniques` skill). There the notice is the re-call instruction that replaces the document, main-body payload by design, and enrichment can only add to a payload, never replace it.
 
 **Fix:** move the field into an `enrichment` block and populate it via `ctx.enrich(...)` — it reaches both client surfaces without a `format()` entry. Ignore if the field is genuinely domain data. Deliberately conservative — common domain fields like `totalCount` are not flagged.
 
@@ -1065,11 +1064,11 @@ Singularization covers only the bounded suffixes above (`ies` → `y`, `ses`/`xe
 A silently capped list leaves the agent unaware that results were cut off — it may treat a partial set as complete. Use `ctx.enrich.truncated({ shown, cap })` for the one-liner:
 
 ```ts
-// In the enrichment block:
+// In the enrichment block — optional, since truncated() fires only on a capped page:
 enrichment: {
-  truncated: z.boolean().describe('True when the list was capped at the limit.'),
-  shown: z.number().describe('Number of items returned.'),
-  cap: z.number().describe('The limit applied.'),
+  truncated: z.boolean().optional().describe('True when the list was capped at the limit.'),
+  shown: z.number().optional().describe('Number of items returned.'),
+  cap: z.number().optional().describe('The limit applied.'),
 },
 
 // In the handler:

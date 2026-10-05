@@ -4,7 +4,7 @@ description: >
   Read-only audit of MCP definition language across an existing surface — tools, resources, prompts, server instructions. Walks every definition file and checks 16 categories the LLM reads to decide whether and how to call: voice & tense, internal leaks, audience leaks, defaults, recovery hints, field descriptions, cross-references, sparsity, examples, structure, mutator observability, unit-bearing numeric names, validator-enforced constraints, annotations truthfulness, single-line strings, exclusive modes in the schema — then a cross-surface pass: naming taxonomy, parameter vocabulary, tool overlap, instructions drift, length outliers. Produces grouped findings with file:line citations and a numbered options list. Use during polish, after a refactor, or before a release. Complements `field-test` (behavior testing) and `security-pass` (security audit).
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.8"
   audience: external
   type: audit
 ---
@@ -177,9 +177,9 @@ Field-test catches this in its leak audit; this skill is the more thorough pass.
 
 **Look in:** input schemas — every field whose `.describe()` states a format, range, length, or pattern.
 
-**Check:** stated constraints are machine-enforced in the schema (`.regex()`, `.min()`/`.max()`, `.int()`, `.length()`, an enum) so they emit into the JSON Schema the client renders — a constraint living only in prose reaches a weaker model unreliably and burns retries on malformed input. Opaque-ID params also say how to *obtain* the value (which sibling tool returns it), not just its shape.
+**Check:** stated constraints are machine-enforced in the schema (`.regex()`, `.min()`/`.max()`, `.int()`, `.length()`, an enum) so they emit into the JSON Schema the client renders — a constraint living only in prose reaches a weaker model unreliably and burns retries on malformed input. Opaque-ID params also say how to *obtain* the value (which sibling tool returns it), not just its shape. When the prose promises a normalization ("case-insensitive", "whitespace trimmed", "a trailing `.json` is stripped"), the schema performs it before the pattern check (`z.string().trim().toUpperCase().regex(…)`, or a pattern that admits the raw form) — a normalization that lives only in the handler runs after validation has already rejected the input it was meant to accept.
 
-**Smell:** `.describe('Date in YYYY-MM-DD format')` on a bare `z.string()`; "max 100" in prose with no `.max(100)`; an ID param whose describe gives the format but never the tool that produces it.
+**Smell:** `.describe('Date in YYYY-MM-DD format')` on a bare `z.string()`; "max 100" in prose with no `.max(100)`; an ID param whose describe gives the format but never the tool that produces it; "case-insensitive" in the describe with a case-sensitive `.regex()` and a `.toUpperCase()` in the handler.
 
 #### 14. Annotations truthfulness
 
@@ -219,7 +219,7 @@ The per-file walk misses drift that only shows between files. After it, sweep th
 - **Parameter vocabulary** — one name per concept everywhere: `query` vs `q`, `limit` vs `maxResults`, `nctId` vs `nct_id` on sibling tools is a finding.
 - **Tool overlap** — for any pair with adjacent scope, the two descriptions alone must answer "when X vs Y." If an agent can't pick, that's material.
 - **Instructions drift** — if the server sets `instructions`: every tool it names exists, workflow guidance reflects the current surface (new tools that belong in it, renamed or removed ones purged), and nothing contradicts a per-tool description. Shape is a finding too: two to three cohesive sentences in one string literal (no `+`-joined fragments, no one-line-per-tool inventory — the catalog already carries that), written for the calling agent only. Operator configuration (`*_BASE_URL`, API keys, ports) belongs in the README and `.env.example`, not here — the agent cannot act on it.
-- **Length outliers** — a description several times longer than its siblings (attention drag), or a one-liner that underspecifies (selection risk).
+- **Length outliers** — a description several times longer than its siblings (attention drag), or a one-liner that underspecifies (selection risk). Weigh the `output` and `enrichment` field `.describe()` prose per tool as well. It often outweighs the tool description and is loaded on every session. The usual causes are a cross-field rule restated on every field it touches, per-field narration of upstream mechanics, and a subschema emitted at several paths repeating its prose. State a shared rule once on the parent, cut narration down to what a caller needs to read the value, and guard a byte budget with a test so later edits stay under it.
 
 Cross-surface findings use the same finding format, cited at the file:line you'd change (the `instructions` string is a citable location).
 

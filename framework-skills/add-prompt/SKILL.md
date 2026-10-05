@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP prompt template. Use when the user asks to add a prompt, create a reusable message template, or define a prompt for LLM interactions.
 metadata:
   author: cyanheads
-  version: "1.3"
+  version: "1.5"
   audience: external
   type: reference
 ---
@@ -21,6 +21,7 @@ Prompts are pure message templates — no `Context`, no auth, no side effects. `
 2. **Create the file** at `src/mcp-server/prompts/definitions/{{prompt-name}}.prompt.ts`
 3. **Register** the prompt in the project's existing `createApp()` prompt list (directly in `src/index.ts` for fresh scaffolds, or via a barrel if the repo already has one)
 4. **Run `bun run devcheck`** to verify
+5. **Smoke-test** with `bun run rebuild && bun run start:stdio < /dev/null` — the `Core services constructed` log record must list the new prompt in its `prompts` field (the message text shows only counts); if it doesn't, the prompt never reached `createApp()`
 
 ## Template
 
@@ -90,10 +91,12 @@ await createApp({
 });
 ```
 
-If the repo already uses `src/mcp-server/prompts/definitions/index.ts`, add the export to that barrel instead:
+If the repo already uses `src/mcp-server/prompts/definitions/index.ts`, add the prompt to that barrel the way it holds the existing ones — it must end up in the array passed to `createApp()`. A bare `export … from` line registers nothing on its own. The standard barrel shape:
 
 ```typescript
-export { {{PROMPT_EXPORT}} } from './{{prompt-name}}.prompt.js';
+import { {{PROMPT_EXPORT}} } from './{{prompt-name}}.prompt.js';
+
+export const allPromptDefinitions = [/* existing prompts */, {{PROMPT_EXPORT}}];
 ```
 
 ## Argument autocompletion
@@ -121,6 +124,8 @@ export const codeReview = prompt('code_review', {
 
 `completable()` is transparent to the linter — it does not affect `describe-on-fields` or `schema-serializable` rules. All completable-wrapped fields still require `.describe()` on the underlying schema.
 
+For an optional argument, wrap the inner schema and apply `.optional()` outside: `completable(z.string().describe('…'), cb).optional()`. The SDK unwraps `.optional()` before checking for a completer, so `completable(z.string().optional(), cb)` type-checks but never completes.
+
 ## Checklist
 
 - [ ] File created at `src/mcp-server/prompts/definitions/{{prompt-name}}.prompt.ts`
@@ -135,3 +140,4 @@ export const codeReview = prompt('code_review', {
 - [ ] No side effects — prompts are pure templates
 - [ ] Registered in the project's existing `createApp()` prompt list (directly or via barrel)
 - [ ] `bun run devcheck` passes
+- [ ] Smoke-tested with `bun run rebuild && bun run start:stdio < /dev/null`; the `Core services constructed` record lists the new prompt in its `prompts` field

@@ -4,7 +4,7 @@ description: >
   Scaffold an MCP App tool + UI resource pair. Use when the user asks to add a tool with interactive UI, create an MCP App, or build a visual/interactive tool.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.8"
   audience: external
   type: reference
 ---
@@ -40,7 +40,7 @@ For the full API, Context interface, and error codes, read the framework's `CLAU
 4. **Create the app resource** at `src/mcp-server/resources/definitions/{{tool-name}}-ui.app-resource.ts`
 5. **Register both** in the project's existing `createApp()` arrays (directly in `src/index.ts` for fresh scaffolds, or via barrels if the repo already has them)
 6. **Run `bun run devcheck`** — the linter validates `_meta.ui` and cross-checks tool/resource pairing
-7. **Smoke-test** with `bun run rebuild && bun run start:stdio` (or `start:http`)
+7. **Smoke-test** with `bun run rebuild && bun run start:stdio < /dev/null` (or `start:http`) — the `Core services constructed` log record must list the tool in its `tools` field and its UI resource in `resources` (the message text shows only counts)
 
 ## App Tool Template
 
@@ -175,18 +175,10 @@ export const {{RESOURCE_EXPORT}} = appResource('ui://{{tool-name}}/app.html', {
     ctx.log.debug('Serving app UI.', { resourceUri: ctx.uri?.href });
     return APP_HTML;
   },
-
-  list: () => ({
-    resources: [
-      {
-        uri: 'ui://{{tool-name}}/app.html',
-        name: '{{TOOL_TITLE}}',
-        description: 'Interactive UI for {{tool_name}}.',
-      },
-    ],
-  }),
 });
 ```
+
+No `list` callback: `ui://{{tool-name}}/app.html` has no template variables, so it registers as a fixed resource that `resources/list` already reports. Registration ignores `list` on a variable-free URI.
 
 ## UI Notes
 
@@ -194,19 +186,20 @@ export const {{RESOURCE_EXPORT}} = appResource('ui://{{tool-name}}/app.html', {
 - **CSP.** MCP Apps iframes run under deny-by-default CSP. With `appResource()`, put `_meta.ui.csp.resourceDomains` on the definition; the builder mirrors it into returned `resources/read` content items. With plain `resource()`, attach `_meta.ui` yourself in `format()`.
 - **Adopt the host's visual identity, don't impose your own.** App UIs render inside the host's iframe alongside its native UI. Three host hooks layer on top of your CSS:
   - `applyDocumentTheme(hostContext.theme)` — sets `color-scheme` and a `data-theme` attribute on `<html>`
-  - `applyHostStyleVariables(hostContext.styles.variables)` — installs host CSS custom properties on `:root` (host decides the names, e.g. `--mcp-color-bg-primary`)
+  - `applyHostStyleVariables(hostContext.styles.variables)` — installs host CSS custom properties on `:root`. The MCP Apps spec fixes the names (`McpUiStyleVariableKey`): `--color-background-primary`, `--color-text-primary`, `--color-border-primary`, `--font-sans`, `--border-radius-md`, and so on. A host may send any subset.
   - `applyHostFonts(hostContext.styles.css.fonts)` — installs `@font-face` rules for the host's font stack
 
-  Author CSS to *consume* these via `var(--mcp-color-bg-primary, /* fallback */ #fff)`. Don't hardcode brand colors that fight the host.
-- **Pre-connect baseline.** `app.connect()` is async — host context arrives a frame or two after first paint. Without a baseline, the UI flashes unstyled or wrong-themed on light hosts. Ship a `prefers-color-scheme`-aware default so the first frame is sensible:
+  Author CSS to *consume* these via `var(--color-background-primary, var(--bg))` — the host variable first, a local token as the fallback. Don't hardcode brand colors that fight the host.
+- **Pre-connect baseline.** `app.connect()` is async — host context arrives a frame or two after first paint. Without a baseline, the UI flashes unstyled or wrong-themed on light hosts. Ship local tokens with a light default, a `prefers-color-scheme` dark override, and a `data-theme` pin so the first frame is sensible:
 
   ```css
   :root { color-scheme: light dark; --bg: #fff; --fg: #111; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #0c0d12; --fg: #ededef; } }
-  body { background: var(--bg); color: var(--fg); }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #0c0d12; --fg: #ededef; } }
+  :root[data-theme="dark"] { --bg: #0c0d12; --fg: #ededef; }
+  body { background: var(--color-background-primary, var(--bg)); color: var(--color-text-primary, var(--fg)); }
   ```
 
-  Host vars override these once `onhostcontextchanged` fires.
+  Once host context is applied, the host's variables win; the local tokens cover the gap before it arrives and any variable the host omits.
 - **`format()` for app tools.** The first `text` content block is typically JSON that the UI parses via `ontoolresult`. Additional blocks are the human-readable fallback that non-app hosts and LLMs consume — they must render every field the LLM needs to reason about. JSON-only payloads leave model-visible context blind.
 - **App resource `format()`.** `appResource()` already preserves raw HTML for the default app MIME type and mirrors definition `_meta.ui` into content items. Add a custom `format()` only when you need extra per-read metadata or non-default content shaping.
 
@@ -237,8 +230,10 @@ If the repo already uses `definitions/index.ts` barrels, update those instead of
 - [ ] App resource `_meta.ui.csp.resourceDomains` lists every external domain loaded by the UI
 - [ ] UI bundles or inlines the client SDK for the shipped HTML, and handles `app.ontoolresult`
 - [ ] UI applies host context updates via `app.onhostcontextchanged`
-- [ ] App resource has a `list` callback returning at least one URI so resource-aware clients can discover it
+- [ ] UI CSS reads host variables with local fallbacks (`var(--color-background-primary, var(--bg))`) over a light/dark baseline
+- [ ] No `list` callback on the fixed `ui://…/app.html` resource — `resources/list` already reports it
 - [ ] Both registered in the project's existing `createApp()` arrays (directly or via barrels)
 - [ ] Handler tested directly via `createMockContext()`, or `add-test` skill run to scaffold the test file
 - [ ] `bun run devcheck` passes (linter validates `_meta.ui` and tool/resource pairing)
-- [ ] Smoke-tested with `bun run rebuild && bun run start:stdio` (or `start:http`)
+- [ ] Smoke-tested with `bun run rebuild && bun run start:stdio < /dev/null` (or `start:http`); the `Core services constructed` record lists the tool in `tools` and its UI resource in `resources`
+- [ ] View rendered in the headless MCP Apps host (`mcp-ts-core app-render`; `field-test` skill, Step 6): `initialized` is true, `errors` and `cspViolations` are empty, and the screenshot shows the tool result

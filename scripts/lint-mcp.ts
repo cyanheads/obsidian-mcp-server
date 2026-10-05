@@ -12,6 +12,11 @@
  *   3. Extracts exported definitions by duck-typing (has name/handler/input etc.)
  *   4. Feeds them into `validateDefinitions()`
  *
+ * A definition file whose `import()` rejects, and a `server.json` that exists
+ * but does not parse, are errors (`definition-import-failed`,
+ * `server-json-parse`): what they declare cannot be checked, so the run fails
+ * instead of passing without them. The remaining files are still linted.
+ *
  * Runtime-agnostic: works with bun, tsx, and Node.js (via ts-node/esm).
  *
  * Rule knobs come from the project's `devcheck.config.json` `lint` block, so one
@@ -20,7 +25,7 @@
  * @module scripts/lint-mcp
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------------------
@@ -101,18 +106,63 @@ function discoverFiles(): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Load failures
+// ---------------------------------------------------------------------------
+
+/** Where the rule reference lives — the breadcrumb `validateDefinitions()` appends too. */
+const SKILL_REFERENCE_PATH = 'framework-skills/api-linter/SKILL.md';
+
+/** A file the CLI could not load, shaped like the diagnostics it is printed beside. */
+interface LoadFailure {
+  message: string;
+  rule: 'definition-import-failed' | 'server-json-parse';
+}
+
+/**
+ * The text of a thrown value. An `AggregateError` keeps its causes in `errors`
+ * — Bun rejects a definition that fails to transpile with one whose own message
+ * only counts them ("2 errors building …") — so each cause is appended.
+ */
+function describeError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const message = err.message || err.name;
+  if (!(err instanceof AggregateError) || err.errors.length === 0) return message;
+  return `${message} (${err.errors.map(describeError).join('; ')})`;
+}
+
+function loadFailure(rule: LoadFailure['rule'], file: string, err: unknown): LoadFailure {
+  const anchor = rule === 'server-json-parse' ? 'server-json-rules' : rule;
+  return {
+    rule,
+    message: `${file}: ${describeError(err)}\nSee: ${SKILL_REFERENCE_PATH}#${anchor}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-/** Try to read and parse a JSON file. Returns undefined on failure. */
-function tryReadJson(path: string): unknown {
+/** A parsed JSON file, or the error an existing one failed to read or parse with. */
+type JsonRead = { ok: true; value: unknown } | { ok: false; error: unknown };
+
+/** Reads and parses a JSON file. `undefined` when the file does not exist. */
+function readJson(path: string): JsonRead | undefined {
+  if (!existsSync(path)) return;
   try {
-    if (!existsSync(path)) return;
-    return JSON.parse(readFileSync(path, 'utf-8'));
-  } catch (err) {
-    console.warn(`Warning: Failed to parse ${path}: ${err instanceof Error ? err.message : err}`);
+    return { ok: true, value: JSON.parse(readFileSync(path, 'utf-8')) };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+/** Try to read and parse a JSON file. Returns undefined when absent, and warns when unparseable. */
+function tryReadJson(path: string): unknown {
+  const read = readJson(path);
+  if (read?.ok === false) {
+    console.warn(`Warning: Failed to parse ${path}: ${describeError(read.error)}`);
     return;
   }
+  return read?.value;
 }
 
 /** The `lint` block of `devcheck.config.json`, as far as this script reads it. */
@@ -149,12 +199,17 @@ export function readLintOptions(configPath = resolve('devcheck.config.json')): L
 
 async function main(): Promise<void> {
   const files = discoverFiles();
+  const failures: LoadFailure[] = [];
 
   // Discover server.json and package.json at project root
-  const serverJson = tryReadJson(resolve('server.json'));
+  const serverJsonRead = readJson(resolve('server.json'));
+  if (serverJsonRead?.ok === false) {
+    failures.push(loadFailure('server-json-parse', 'server.json', serverJsonRead.error));
+  }
+  const serverJson = serverJsonRead?.ok ? serverJsonRead.value : undefined;
   const packageJson = tryReadJson(resolve('package.json')) as { version?: string } | undefined;
 
-  if (files.length === 0 && serverJson == null) {
+  if (files.length === 0 && serverJson == null && failures.length === 0) {
     console.log('No MCP definition files or server.json found. Skipping lint.');
     process.exit(0);
   }
@@ -162,36 +217,42 @@ async function main(): Promise<void> {
   const tools: unknown[] = [];
   const resources: unknown[] = [];
   const prompts: unknown[] = [];
+  let failedImports = 0;
 
   for (const file of files) {
+    let mod: Record<string, unknown>;
     try {
-      const mod = await import(file);
-      for (const exported of Object.values(mod)) {
-        if (isToolLike(exported)) tools.push(exported);
-        else if (isResourceLike(exported)) resources.push(exported);
-        else if (isPromptLike(exported)) prompts.push(exported);
-      }
+      mod = await import(file);
     } catch (err) {
-      console.warn(
-        `Warning: Failed to import ${file}: ${err instanceof Error ? err.message : err}`,
-      );
+      failures.push(loadFailure('definition-import-failed', relative(process.cwd(), file), err));
+      failedImports++;
+      continue;
+    }
+    for (const exported of Object.values(mod)) {
+      if (isToolLike(exported)) tools.push(exported);
+      else if (isResourceLike(exported)) resources.push(exported);
+      else if (isPromptLike(exported)) prompts.push(exported);
     }
   }
 
   const defTotal = tools.length + resources.length + prompts.length;
-  if (defTotal === 0 && serverJson == null) {
+  if (defTotal === 0 && serverJson == null && failures.length === 0) {
     console.log(`Scanned ${files.length} files but found no definitions. Skipping lint.`);
     process.exit(0);
   }
 
   const parts: string[] = [];
-  if (defTotal > 0) {
+  if (defTotal > 0 || failedImports > 0) {
+    const fileCount =
+      failedImports === 0
+        ? `${files.length}`
+        : `${files.length - failedImports} of ${files.length}`;
     parts.push(
-      `${tools.length} tool(s), ${resources.length} resource(s), ${prompts.length} prompt(s) from ${files.length} file(s)`,
+      `${tools.length} tool(s), ${resources.length} resource(s), ${prompts.length} prompt(s) from ${fileCount} file(s)`,
     );
   }
   if (serverJson != null) parts.push('server.json');
-  console.log(`Linting ${parts.join(' + ')}...`);
+  if (parts.length > 0) console.log(`Linting ${parts.join(' + ')}...`);
 
   const report = validateDefinitions({
     tools,
@@ -202,14 +263,15 @@ async function main(): Promise<void> {
     ...readLintOptions(),
   });
 
+  const errors = [...failures, ...report.errors];
   for (const w of report.warnings) {
     console.warn(`  ⚠ [${w.rule}] ${w.message}`);
   }
-  for (const e of report.errors) {
+  for (const e of errors) {
     console.error(`  ✗ [${e.rule}] ${e.message}`);
   }
 
-  if (report.passed) {
+  if (errors.length === 0) {
     if (report.warnings.length > 0) {
       console.log(`\nPassed with ${report.warnings.length} warning(s).`);
     } else {
@@ -217,9 +279,7 @@ async function main(): Promise<void> {
     }
     process.exit(0);
   } else {
-    console.error(
-      `\nFailed: ${report.errors.length} error(s), ${report.warnings.length} warning(s).`,
-    );
+    console.error(`\nFailed: ${errors.length} error(s), ${report.warnings.length} warning(s).`);
     process.exit(1);
   }
 }

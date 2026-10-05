@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.19"
+  version: "2.24"
   audience: external
   type: workflow
 ---
@@ -68,7 +68,7 @@ The user fixes locally and re-invokes. On re-invocation, already-published desti
 Read `package.json` → capture `version`. Then use your git tools to verify:
 
 - **Working tree is clean** — no uncommitted changes
-- **The release commit is in the stack** — `git log -1 --format=%s` starts with `chore(release): <version>`, or, in gated release PR mode, `git log main..HEAD --format=%s` contains it with only the review pass's own commits above it (`release-pr-review` lands fixes as ordinary commits on top; the tag still goes on the tip). Any other commit above the release commit — new work, a second version — is a halt.
+- **The release commit is in the stack** — `git log -1 --format=%s` starts with `chore(release): <version>`, or, in gated release PR mode, `git log main..HEAD --format=%s` contains it with only the review pass's own commits above it (`release-pr-review` lands its fixes, and any work the caller handed it to include, as ordinary commits on top; the tag still goes on the tip). Any other commit above the release commit — one the review pass did not land, a second version — is a halt.
 - **Current branch** — `main`, or `release/<version>` in release PR mode. Anything else, halt.
 - **Release PR mode:** `gh pr view --json number,state,headRefOid` shows the PR `OPEN` with `headRefOid` equal to local HEAD. A mismatch means the branch has commits the PR doesn't (or the reverse) — halt and report both SHAs. Keep `number` and `headRefOid`: the merge check (step 3) and the tag body (step 4) need them after the checkout has moved to `main`.
 
@@ -158,9 +158,10 @@ Verify before moving on:
 ```bash
 git show v<version> --stat | head -20   # tag points at HEAD (the release commit, or the last review commit above it)
 git tag -l v<version> --format='%(if)%(contents:signature)%(then)signed%(else)unsigned%(end)'   # with tag signing enabled, must print "signed"
+bun run release:github -- --check       # annotated; subject ≤72 chars, no version, no ";"; no section headers; no signature block in the body; changelog link last
 ```
 
-`unsigned` under enabled tag signing means the signature didn't parse (see the cleanup note above) — delete and recreate the tag now, before it leaks the signature block into the GitHub Release body. This is the one tag deletion that needs no authorization: the tag is local, seconds old, and yours.
+`unsigned` under enabled tag signing, or a `--check` failure, means the tag is not publishable — delete and recreate it now, before the push. This is the one tag deletion that needs no authorization: the tag is local, seconds old, and yours. The check reads only the local tag and makes no `gh` calls. If `scripts/release-github.ts` does not mention `--check` (a project not yet resynced by the maintenance skill), skip that line and check the rules above by hand — an older script ignores the flag and attempts the release.
 
 ### 5. Push to origin
 
@@ -175,7 +176,7 @@ Push `main` first, then the tag. If the remote rejects either push, halt.
 
 ### 6. Publish to npm
 
-Before publishing, inspect `bun publish --dry-run`. A resumed run may leave `dist/*.mcpb` in a package whose `files` allowlist includes `dist/`, adding the desktop bundle and its dependencies to npm. If listed, move the bundle outside the package directory, publish npm, then restore the bundle for the GitHub Release.
+A `dist/*.mcpb` already built for step 8 stays out of the tarball: the `files` allowlist carries `"!dist/*.mcpb"`, and `lint:packaging` fails a project with `manifest.json` that lacks it.
 
 ```bash
 bun publish --access public
@@ -196,11 +197,13 @@ Halt on publish error other than "version already exists" (which means this step
 
 Only if `server.json` exists at the repo root (otherwise skip). Note: `server.json` (MCP Registry metadata) and `manifest.json` (MCPB bundle manifest, step 8) are independent — a project may have either, both, or neither.
 
-The registry checks that the npm version exists before it registers, and npm's read endpoint can lag `bun publish` by several minutes. Wait for the version to be served before publishing; a publisher error saying the npm version was not found is this lag, not a terminal failure:
+The registry checks that the npm version exists before it registers, and npm's read endpoint can lag `bun publish` by several minutes. Wait for the version to be served before publishing; a publisher error saying the npm version was not found is this lag, not a terminal failure. Keep each wait inside one foreground shell call: every request carries its own timeout and the loop is bounded well under the agent's command timeout, so the harness never moves the wait to the background. If the loop ends unserved, run it again.
 
 ```bash
-curl -sf --retry 30 --retry-delay 30 --retry-all-errors -o /dev/null \
-  "https://registry.npmjs.org/<package-name>/<version>"
+for i in $(seq 1 15); do
+  curl -sf -m 15 -o /dev/null "https://registry.npmjs.org/<package-name>/<version>" && echo served && break
+  sleep 20
+done
 bun run publish-mcp
 ```
 
@@ -223,7 +226,7 @@ Halt on any publisher error other than "cannot publish duplicate version".
 
 ### 8. Create GitHub Release
 
-Pre-flight: `--notes-from-tag` publishes the tag message as-is. With tag signing enabled, confirm the tag's signature parses — `git tag -l v<version> --format='%(contents:signature)'` must be non-empty. Empty on a signing-enabled repo (e.g. a tag created with `--cleanup=verbatim`) means git is treating the signature as message text, and the `-----BEGIN SSH SIGNATURE-----` block will land in the public release body — the tag is already pushed by now, so halt and report rather than recreating it silently.
+`--notes-from-tag` publishes the tag message as-is, so the script re-runs the step 4 check before any `gh` call and halts on a violation. The tag is already pushed by now — on a failure, halt and report rather than recreating it silently.
 
 For all projects (including those without `manifest.json`):
 
@@ -235,6 +238,7 @@ The script (`scripts/release-github.ts`) handles everything in one command:
 
 - Reads `version` from `package.json`
 - Derives the tag subject via `git for-each-ref refs/tags/v<version>`
+- Validates the tag annotation (the step 4 `--check` rules)
 - Runs `gh release create v<version> --verify-tag --notes-from-tag --title "v<version>: <subject>"`
 - Attaches `dist/*.mcpb` when `manifest.json` exists (skip the `bun run bundle` step first if not already built — see below)
 - On "release already exists" (re-invocation after a prior partial run): uploads/clobbers the `.mcpb` asset (if applicable) and patches the title via `gh release edit`
@@ -276,7 +280,7 @@ docker buildx build --platform linux/amd64,linux/arm64 \
   --push .
 ```
 
-The build stage in `Dockerfile` must carry `FROM --platform=$BUILDPLATFORM` (the templates ship it). Without it the non-native leg of the multi-arch build runs under QEMU, where bun >= 1.4 aborts inside `bun run build` with a JavaScriptCore allocator assertion (`qemu: uncaught target signal 6`, exit 134) and no image publishes for either architecture. npm, the MCP Registry, and the GitHub Release have all published by this step, so the recovery is a follow-up patch release rather than a retry — check the flag before building, not after.
+No stage built for the target platform may run JavaScript: the non-native leg of the multi-arch build runs it under QEMU, where bun >= 1.4 aborts with a JavaScriptCore allocator assertion (`qemu: uncaught target signal 6`) and no image publishes for either architecture. That covers `bun run build`, and also a `bun install` that sees `bunfig.toml` — its security scanner runs as a Bun program and the install fails with `NoSecurityScanData`. The templates keep every such step in stages that start `FROM --platform=$BUILDPLATFORM` — the build stage, and a `deps` stage that cross-installs production dependencies with `--os`/`--cpu`, runs `scripts/install-otel.ts`, then runs `scripts/prune-musl-packages.ts` (Bun cannot filter optional dependencies by libc, so it deletes the musl variants the glibc runtime image never loads) — so the production stage's only Bun calls are `HEALTHCHECK` and `CMD`. `bun run lint:packaging` (check 15, part of `devcheck`) fails a Dockerfile that breaks this and names the line. npm, the MCP Registry, and the GitHub Release have all published by this step, so the recovery is a follow-up patch release rather than a retry — confirm the lint passes before building, not after.
 
 If the project uses a non-GHCR registry or a custom image name, respect the project's convention. If push fails with a 401/403, prompt the user to authenticate (`echo $GITHUB_TOKEN | docker login ghcr.io -u <OWNER> --password-stdin`) and retry. Halt on build failure or non-auth push failure.
 
@@ -313,7 +317,7 @@ If any check fails, halt and report which destination is unreachable. A successf
 - [ ] `bun run test:all` (or `test`) passes
 - [ ] `bun run test:package` passes, when the project defines it
 - [ ] Release PR mode: `git merge --ff-only` onto `main` locally — never the GitHub merge button; HEAD equals the PR's `headRefOid` afterwards
-- [ ] Annotated tag `v<version>` created on HEAD (`main`'s tip in release PR mode) with `--cleanup=whitespace`, a subject written fresh at ~60 characters without the version, headline-digest body, changelog link as final line, signature parses
+- [ ] Annotated tag `v<version>` created on HEAD (`main`'s tip in release PR mode) with `--cleanup=whitespace`, a subject written fresh at ~60 characters without the version, headline-digest body, changelog link as final line, signature parses; `bun run release:github -- --check` passes before the push
 - [ ] `main` pushed, then the tag pushed
 - [ ] Release PR mode: PR reports `MERGED`; remote and local `release/<version>` deleted
 - [ ] `bun publish --access public` succeeds

@@ -168,7 +168,7 @@ If resource data is also reachable through tools, say so in one line under the R
 
 One `###` entry per primitive — every tool, resource, and prompt, in the same order as the Overview tables — with the heading tagged by type in a `<sub>` so a reader scanning headings can tell them apart without a section break. Entries are separated by `---` rules. No intro sentence under the heading — the Overview row already said what it does — go straight to bullets.
 
-**Bullet density is contract shape, not changelog narration.** Three to six bullets covering: accepted inputs and per-call caps; the output's discriminating fields; the failure shape (typed reasons, per-item status); the knobs (filters, budgets, feature flags). Behavior a caller discovers from the schema at call time — field-by-field semantics, edge-case handling, the mechanism behind a guarantee — belongs in the definition's `.describe()` text, not here. An entry running past six bullets has started transcribing release notes.
+**Bullet density is contract shape, not changelog narration.** Two or three bullets per entry, never one: the first carries accepted inputs and per-call caps; the second the output's discriminating fields or the failure shape (typed reasons, per-item status); a third only for a distinct knob (a feature flag, a budget, a spill/staging behavior). Don't fuse them into one run-on bullet to hit a count. Keep canonical identifiers, caps, required inputs, and the fields a caller branches on; cut input aliases, rejection edge cases, and the mechanism behind a guarantee — a caller discovers those from the schema at call time, so they belong in the definition's `.describe()` text. A caveat shared by several tools goes once under Features, not in every entry. An entry running past three bullets has started transcribing release notes.
 
 ```markdown
 ## Capability reference
@@ -390,6 +390,7 @@ Table of environment variables. Include framework vars only if the server uses n
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
+| `LOG_TOOL_FAILURE_PAYLOADS` | Log each failed tool call's arguments and result, redacted by key name and capped at `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` (default `16384`). A secret inside a free-form value is not redacted. | `false` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend. | `in-memory` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry) (spans, metrics, completion logs). | `false` |
 
@@ -400,7 +401,7 @@ Source from the server config Zod schema and `.env.example`.
 
 ### Running the Server
 
-Separate from Getting Started. Show dev, build + run, and Workers/Docker deployment if applicable.
+Separate from Getting Started. Show dev and build + run, plus Workers deployment when the server has a Worker entry; a Docker subsection is optional (see below).
 
 ```markdown
 ## Running the server
@@ -451,7 +452,7 @@ bun run deploy:prod
 \`\`\`
 ```
 
-Include the Docker subsection only if the server ships a Dockerfile, and the Workers subsection only if it ships a `src/worker.ts` entry. The Docker trailing paragraph (log directory, OTEL build arg) is important — it documents Dockerfile behavior that isn't obvious from the build command.
+The Docker subsection is optional and usually skipped: when the server publishes an image and Getting started already shows the Docker client config, a local-build walkthrough adds little. Include it only when the server ships a Dockerfile with behavior a user needs to know before building (the log directory, the OTEL build arg), and then keep that trailing paragraph. Include the Workers subsection only if the server ships a `src/worker.ts` entry.
 
 ### Project Structure
 

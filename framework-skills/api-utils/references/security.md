@@ -8,20 +8,20 @@ import { sanitization, RateLimiter, IdGenerator, idGenerator, generateUUID, gene
 
 ## `sanitization`
 
-Pre-constructed singleton of `Sanitization`. Tier 3 peers: `sanitize-html`, `validator` (install as needed per method).
+Pre-constructed singleton of `Sanitization`. Tier 3 peer: `sanitize-html` (HTML handling only); URL and number validation are built in.
 
 ### Methods
 
 | Method | Async | Peer dep | Signature |
 |:-------|:------|:---------|:----------|
 | `sanitizeHtml` | yes | `sanitize-html` | `(input, config?) -> Promise<string>` |
-| `sanitizeString` | yes | `sanitize-html` / `validator` | `(input, options?) -> Promise<string>` |
-| `sanitizeUrl` | yes | `validator` | `(input, allowedProtocols?) -> Promise<string>` |
-| `sanitizeNumber` | yes | `validator` (string input) | `(input, min?, max?) -> Promise<number>` |
+| `sanitizeString` | yes | `sanitize-html` (`'text'`, `'html'`, `'attribute'` contexts) | `(input, options?) -> Promise<string>` |
+| `sanitizeUrl` | yes | none | `(input, allowedProtocols?) -> Promise<string>` |
+| `sanitizeNumber` | yes | none | `(input, min?, max?) -> Promise<number>` |
 | `sanitizePath` | **no** | Node.js only | `(input, options?) -> SanitizedPathInfo` |
 | `sanitizeJson` | **no** | none | `<T>(input, maxSize?) -> T` |
 | `sanitizeForLogging` | **no** | none | `(input) -> unknown` |
-| `redactSensitiveFields` | **no** | none | `(data, fields?, ctx?) -> unknown` |
+| `serializeForLogging` | **no** | none | `(value, maxBytes) -> { text: string; truncated: boolean }` |
 | `getSensitivePinoFields` | **no** | none | `() -> string[]` |
 
 ### Option types
@@ -59,11 +59,14 @@ interface SanitizedPathInfo {
 
 - `sanitizeHtml`: returns `''` for falsy input; `<a>` tags get `rel="noopener noreferrer"` by default
 - `sanitizeString`: `'javascript'` context always throws `McpError(ValidationError)` — no JavaScript allowed
-- `sanitizeUrl`: default protocols `['http', 'https']`; always blocks `javascript:`, `data:`, `vbscript:`
+- `sanitizeUrl`: default protocols `['http', 'https']`; requires a host (domain, single-label name such as `localhost`, IPv4 dotted quad, or bracketed IPv6), so host-less schemes like `mailto:` never pass; rejects whitespace, `<`, `>`, and URLs over 2084 characters; always blocks `javascript:`, `data:`, `vbscript:`
+- `sanitizeNumber`: string input must be a plain decimal — optional sign and fraction, no exponent (`1e5`) or separators (`1,000`)
 - `sanitizePath`: **Node-only** — throws `McpError(InternalError)` in Workers. Throws `McpError(ValidationError)` on path traversal or null bytes.
 - `sanitizeJson`: `maxSize` is bytes (UTF-8); uses `Buffer.byteLength` / `TextEncoder` / `string.length` fallback chain
 - `sanitizeNumber`: `NaN`/`Infinity` always rejected; out-of-range values silently clamped with debug log
 - `sanitizeForLogging`: deep clones via `structuredClone`; returns `'[Log Sanitization Failed]'` on clone error
+- **Rejection reasons.** Every `ValidationError` carries `data.reason`, and a `data.recovery.hint` wherever the caller can change the input: `invalid_url` (`sanitizeUrl`; the hint names the allowed schemes), `invalid_path` / `path_traversal` / `absolute_path_disallowed` (`sanitizePath`), `invalid_json` / `json_too_large` (`sanitizeJson`; the latter names the byte cap), `invalid_number` (`sanitizeNumber`), and `unsupported_sanitize_context` (`sanitizeString`'s `'javascript'` context, which has no hint — it is a server-code choice)
+- `serializeForLogging`: `sanitizeForLogging`, then `JSON.stringify`, then a cut to at most `maxBytes` UTF-8 bytes on a character boundary — redaction first, so a cut never keeps part of a secret. A truncated `text` is a prefix of the whole serialization and no longer valid JSON; `truncated` says so. Returns a string so a deep payload survives the logger's four-level field depth. A value `JSON.stringify` rejects (a `bigint`) yields `'[Log Serialization Failed]'`. Backs the failed-call payload record (`LOG_TOOL_FAILURE_PAYLOADS`)
 
 ### Sensitive fields
 
@@ -81,7 +84,7 @@ const clean = await sanitization.sanitizeHtml(userHtml, {
 });
 
 // URL validation
-const safeUrl = await sanitization.sanitizeUrl(userUrl, ['http', 'https', 'mailto']);
+const safeUrl = await sanitization.sanitizeUrl(userUrl, ['http', 'https', 'ftp']);
 
 // Path sanitization (Node-only)
 const info = sanitization.sanitizePath(userPath, { rootDir: '/app/data', allowAbsolute: false });
@@ -190,10 +193,10 @@ interface IdGenerationOptions {
 | Method | Signature | Notes |
 |:-------|:----------|:------|
 | `generate` | `(prefix?, options?) -> string` | `PREFIX_XXXXXX` or just `XXXXXX` if no prefix |
-| `generateForEntity` | `(entityType, options?) -> string` | Uses registered prefix; throws `McpError(ValidationError)` if type unknown |
-| `generateRandomString` | `(length?, charset?) -> string` | Raw random string; defaults: length 6, charset `A-Z0-9` |
+| `generateForEntity` | `(entityType, options?) -> string` | Uses registered prefix; throws `McpError(ValidationError)` with `data.reason: 'unknown_entity_type'` if type unknown |
+| `generateRandomString` | `(length?, charset?) -> string` | Raw random string; defaults: length 6, charset `A-Z0-9`. A charset outside 1–256 characters throws `ValidationError` with `data.reason: 'invalid_charset'` |
 | `isValid` | `(id, entityType, options?) -> boolean` | Regex-validates format against prefix + separator + charset{length} |
-| `getEntityType` | `(id, separator?) -> string` | Resolves entity type from prefix; throws `McpError(ValidationError)` if unknown |
+| `getEntityType` | `(id, separator?) -> string` | Resolves entity type from prefix; throws `McpError(ValidationError)` — `data.reason: 'invalid_id_format'` when the ID has no `PREFIX<sep>` part, `'unknown_entity_type'` when the prefix is unregistered, each with a `recovery.hint` (the latter lists the registered prefixes) |
 | `normalize` | `(id, separator?) -> string` | Canonical prefix casing + uppercase random part |
 | `stripPrefix` | `(id, separator?) -> string` | Returns random part; returns original if separator not found |
 | `setEntityPrefixes` | `(config) -> void` | Replaces all prefixes and rebuilds reverse lookup |

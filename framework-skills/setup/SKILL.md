@@ -4,7 +4,7 @@ description: >
   Post-init orientation for an MCP server built on @cyanheads/mcp-ts-core. Use after running `@cyanheads/mcp-ts-core init` to understand the project structure, conventions, and skill sync model. Also use when onboarding to an existing project for the first time.
 metadata:
   author: cyanheads
-  version: "1.11"
+  version: "1.12"
   audience: external
   type: workflow
 ---
@@ -40,7 +40,7 @@ Dockerfile                                      # Starter multi-stage image
 .vscode/                                        # Recommended extensions + editor settings
 server.json                                     # MCP Registry publishing metadata
 changelog/template.md                           # Format reference for per-version changelog files
-scripts/                                        # build, clean, devcheck, lint-mcp, list-skills, build-changelog, tree, check-docs-sync
+scripts/                                        # Framework scripts (build, devcheck and its checks, lint-mcp, lint-packaging, Docker install-otel and prune-musl-packages, release-github, …), re-synced by `maintenance`
 framework-skills/                               # External skills copied from the package (source of truth)
 src/
   index.ts                                      # createApp() entry point

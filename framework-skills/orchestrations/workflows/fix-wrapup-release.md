@@ -4,7 +4,7 @@ description: >
   Workflow for landing known work (handoff document findings, tracked GH issues, observed gaps) and shipping it: fix → optional simplify and field-test verification → wrap-up → release across one or more MCP server projects. Generalizes "I have known issues to fix and ship" regardless of how the issues were surfaced. Chains the `field-test`, `report-issue-local`, `code-simplifier`, `git-wrapup`, and `release-and-publish` skills. Read `../SKILL.md` first for the universal rules and sub-agent strategy.
 metadata:
   author: cyanheads
-  version: "1.1"
+  version: "1.2"
   audience: external
   type: workflow
 ---
@@ -20,7 +20,7 @@ The input varies but the workflow is the same. Read the inputs into a common sha
 | Source | Shape it as |
 |:---|:---|
 | Handoff document (numbered findings, repro steps, acceptance criteria) | Validate each finding live in Phase 1a; file each valid one as a GH issue via `report-issue-local`; skip invalidated findings |
-| GH issues already filed | Use as-is. Read each with `gh issue view N --comments` to capture the full thread (the body alone misses clarifications and decision updates) |
+| GH issues already filed | Use as-is. Read each with `gh issue view N` (the body) and `gh issue view N --comments` (the thread — the body alone misses clarifications and decision updates) |
 | Observed gap or casual report ("I noticed this", "fix the description on tool X") | If material enough to ship in a release, file a GH issue first to capture rationale and create an audit trail. Trivial typo-fix-and-ship can skip the issue step. |
 
 The validation/filing step is the difference between "input is a hypothesis" (handoff) and "input is verified" (tracked GH issues). The rest of the workflow is identical.
@@ -47,7 +47,7 @@ For unsourced QA — where the bugs are unknown until you test — use `field-te
 
 Per target:
 
-1. **Identify issues** — collect GH issue numbers to fix, the handoff document, or the explicit gap description. Read each issue with `gh issue view N --comments` to capture the full thread.
+1. **Identify issues** — collect GH issue numbers to fix, the handoff document, or the explicit gap description. Read each issue with `gh issue view N` and `gh issue view N --comments` — body, then thread.
 2. **Clean working tree** — `git status --short` must be empty
 3. **Current version** — `git describe --tags --abbrev=0`, `grep '"version"' package.json`
 4. **Repo visibility** — `gh repo view --json visibility -q '.visibility'`. Determines wrap-up scope.
@@ -62,7 +62,7 @@ Each phase's Objective column is the goal state per target — the verifiable en
 | 1a | Validate (conditional) | Each handoff finding field-tested live; valid ones filed as GH issues; invalidated ones reported back with reason. If zero validate, workflow stops | one sub-agent per target | **barrier** — cross-target synthesis: orchestrator confirms validated findings before fix proceeds (or stops workflow if zero validate) |
 | 1b | Fix | Per target: targeted issues fixed in source, tests updated/added, `devcheck` + `rebuild` + `test` green, each fixed issue commented with fix details, working tree dirty for review | parallel fanout (one sub-agent per target — hard constraint) | **barrier** — orchestrator reviews diffs before verify (explicit gate in checklist) |
 | 2 | Verify | Per target: full diff cold-reviewed; simplified if warranted; each fix re-exercised against the running server with actual tool output in the summary | parallel fanout | **barrier** — orchestrator reviews simplified diff and verified outputs; release authorization required |
-| 3 | Wrap-up + release | Per target: fixes split into per-file commits with a release commit on top; annotated tag; published per repo visibility; tag annotation is structured markdown with issue backlinks | parallel fanout (Bash git only) | gate-free |
+| 3 | Wrap-up + release | Per target: fixes grouped into one commit per concern (a file never splits across commits) with a release commit on top; annotated tag passing `bun run release:github -- --check` (flat bullets with issue backlinks, changelog link last); published per repo visibility | parallel fanout (Bash git only) | gate-free |
 | 4 | Issue cleanup | Every shipped issue closed (reason: completed) carrying exactly one what-landed comment that cites the version | orchestrator (serial) | — |
 
 Phase 1a is conditional — only runs when the input is a handoff document or otherwise unvalidated. When the input is already tracked GH issues, skip directly to Phase 1b. The release portion of Phase 3 is conditional on user authorization to ship.
@@ -89,7 +89,7 @@ If zero findings validate, report to the user and stop the workflow.
 **One sub-agent per target — hard constraint** (no file-locking; concurrent edits to the same `src/` conflict).
 
 Each sub-agent:
-1. Reads all open issues for its target via `gh issue view N --comments` (full thread — body alone misses clarifications)
+1. Reads all open issues for its target via `gh issue view N` and `gh issue view N --comments` (body, then thread — the body alone misses clarifications)
 2. **Validates each issue against source code** — the issue's analysis or proposed approach may be wrong; sub-agent applies judgment about the right fix and notes any deviation in its GH comment
 3. Prioritizes: security → crashes → bugs → enhancements → docs/chore
 4. Implements fixes using the best modern approach (the GH issue is input, not a spec)
@@ -162,7 +162,7 @@ If no what-landed comment exists yet, the version belongs in that one comment ("
 | 5 | Code-simplify removes intentional complexity | Orchestrator gate after Phase 2 reviews the full diff |
 | 6 | Wrap-up sub-agent collapses multi-fix diff into one commit | Phase 3 prompt enumerates the commit structure |
 | 7 | Wrap-up sub-agent makes unplanned intermediate commits outside the planned structure | Prompt defines exact commit shape; agents must not invent extras |
-| 8 | Reading `gh issue view N` alone misses thread context where decisions were updated | Always include `--comments` |
+| 8 | Reading `gh issue view N` alone misses thread context where decisions were updated; `--comments` alone prints no body without a TTY | Always run both |
 | 9 | MCP Registry returns 502 transiently during publish | Retry up to 2x with backoff |
 | 10 | Phase 1a sub-agent validates an issue that's actually a misunderstanding | Sub-agent must field-test, not just read the claim — live verification catches false positives |
 
@@ -178,4 +178,4 @@ If no what-landed comment exists yet, the version belongs in that one comment ("
 - [ ] Phase 3: published per scope (push, npm if public, MCP Registry if applicable, GH release, Docker if applicable)
 - [ ] Phase 4: shipped issues closed, one what-landed comment each; skipped issues remain open
 - [ ] Post-workflow verification: `git ls-remote --tags origin`, `npm view <pkg>@<version>` if public, GH release artifacts attached
-- [ ] Tag/release quality review: tag subject omits version number, structured markdown, no marketing adjectives, issue backlinks present
+- [ ] Tag/release quality review: `bun run release:github -- --check` passed before the push; no marketing adjectives, issue backlinks present
