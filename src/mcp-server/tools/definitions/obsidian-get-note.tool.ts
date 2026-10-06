@@ -13,7 +13,7 @@ import {
   type SectionExtraction,
 } from '@/services/obsidian/section-extractor.js';
 import { SectionSchema, TargetSchema } from './_shared/schemas.js';
-import { withCaseFallback } from './_shared/suggest-paths.js';
+import { discloseCaseSubstitution, withCaseFallback } from './_shared/suggest-paths.js';
 
 const StatSchema = z.object({
   ctime: z.number().describe('Created time, ms since epoch.'),
@@ -23,7 +23,7 @@ const StatSchema = z.object({
 
 export const obsidianGetNote = tool('obsidian_get_note', {
   description:
-    'Read a note from the vault — by path, the active file, or a periodic note. Choose a `format` projection: raw body, full object, structural document map, or a single section.',
+    'Read a note from the vault — by path, the active file, or a periodic note. Choose a `format` projection: raw body, full object, structural document map, or a single section. A `path` with no exact match but a single case-insensitive match in its folder reads that file instead and reports the path as sent in `requestedPath`; write and delete tools match paths exactly.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     format: z
@@ -71,7 +71,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
                     target: z
                       .string()
                       .describe(
-                        'Link target as written — vault path, basename, or alias. No existence check.',
+                        'Link target — a vault path or basename. A wikilink gives it as Obsidian reads it, without its `#heading` or `|alias` (`\\|alias` in a table); a markdown link gives its URL as written. No existence check.',
                       ),
                     type: z.enum(['wikilink', 'markdown']).describe('Source syntax.'),
                   })
@@ -125,11 +125,17 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       .describe('Mode-discriminated projection of the requested note.'),
   }),
   enrichment: {
+    requestedPath: z
+      .string()
+      .optional()
+      .describe(
+        'The `target.path` as sent. Present only when it had no exact match and its single case-insensitive match in the same folder, `result.path`, was read instead — write and delete tools need `result.path`.',
+      ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Guidance when a heading locator matched several headings — names the path that was read and points at `candidates` for the rest.',
+        'Guidance when the read substituted a case-insensitive path match (names both paths), when a heading locator matched several headings (names the path that was read and points at `candidates` for the rest), or both.',
       ),
   },
   auth: ['tool:obsidian_get_note:read'],
@@ -226,11 +232,16 @@ export const obsidianGetNote = tool('obsidian_get_note', {
 
     if (input.format === 'content') {
       if (target.type === 'path') {
-        const { result: content, resolvedPath } = await withCaseFallback(ctx, svc, target, (t) =>
+        const fallback = await withCaseFallback(ctx, svc, target, (t) =>
           svc.getNoteContent(ctx, t),
         );
+        discloseCaseSubstitution(ctx, fallback, 'read');
         return {
-          result: { format: 'content' as const, path: resolvedPath ?? target.path, content },
+          result: {
+            format: 'content' as const,
+            path: fallback.resolvedPath ?? target.path,
+            content: fallback.result,
+          },
         };
       }
       const note = await svc.getNoteJson(ctx, target);
@@ -238,9 +249,9 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     }
 
     if (input.format === 'full') {
-      const { result: note } = await withCaseFallback(ctx, svc, target, (t) =>
-        svc.getNoteJson(ctx, t),
-      );
+      const fallback = await withCaseFallback(ctx, svc, target, (t) => svc.getNoteJson(ctx, t));
+      discloseCaseSubstitution(ctx, fallback, 'read');
+      const note = fallback.result;
       return {
         result: {
           format: 'full' as const,
@@ -256,13 +267,15 @@ export const obsidianGetNote = tool('obsidian_get_note', {
 
     if (input.format === 'document-map') {
       if (target.type === 'path') {
-        const { result: map, resolvedPath } = await withCaseFallback(ctx, svc, target, (t) =>
+        const fallback = await withCaseFallback(ctx, svc, target, (t) =>
           svc.getDocumentMap(ctx, t),
         );
+        discloseCaseSubstitution(ctx, fallback, 'read');
+        const map = fallback.result;
         return {
           result: {
             format: 'document-map' as const,
-            path: resolvedPath ?? target.path,
+            path: fallback.resolvedPath ?? target.path,
             headings: map.headings,
             blocks: map.blocks,
             frontmatterFields: map.frontmatterFields,
@@ -289,9 +302,9 @@ export const obsidianGetNote = tool('obsidian_get_note', {
         format: input.format,
       });
     }
-    const { result: note } = await withCaseFallback(ctx, svc, target, (t) =>
-      svc.getNoteJson(ctx, t),
-    );
+    const fallback = await withCaseFallback(ctx, svc, target, (t) => svc.getNoteJson(ctx, t));
+    const caseNotice = discloseCaseSubstitution(ctx, fallback, 'read');
+    const note = fallback.result;
     // `extractSection` throws `NotFound` for missing heading/block/frontmatter
     // targets — those route through the contract; anything else bubbles up to
     // the framework's default classifier.
@@ -310,9 +323,8 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     const { candidates, sectionTarget, value } = extracted;
     if (candidates) {
       const repeatedPath = candidates.every((c) => c === sectionTarget);
-      ctx.enrich.notice(
-        `Heading \`${input.section.target}\` is ambiguous — ${candidates.length} headings share that name; read \`${sectionTarget}\`. See \`candidates\` for the rest.${repeatedPath ? ' Every one has the same full path, so the write tools reject it with `ambiguous_section`.' : ''}`,
-      );
+      const headingNotice = `Heading \`${input.section.target}\` is ambiguous — ${candidates.length} headings share that name; read \`${sectionTarget}\`. See \`candidates\` for the rest.${repeatedPath ? ' Every one has the same full path, so the write tools reject it with `ambiguous_section`.' : ''}`;
+      ctx.enrich.notice(caseNotice ? `${caseNotice} ${headingNotice}` : headingNotice);
     }
     return {
       result: {
@@ -403,6 +415,39 @@ function stringifyValue(v: unknown): string {
 }
 
 /**
+ * Wikilink: `[[body]]` or `![[body]]`, matched as Obsidian's metadata cache
+ * reads it — from `[[` to the first `]]` on the same line. Single `[` and `]`
+ * belong to the body (`[[Note|see [1]]]` links `Note`), but a second `[[`
+ * starts the link over, so every match attempt stops at the next `[[`, `]]`,
+ * or newline and the scan stays linear in note length. {@link wikilinkTarget}
+ * takes the target out of the body.
+ */
+const WIKILINK = /!?\[\[((?:(?!\[\[|\]\])[^\n])*)\]\]/g;
+
+/**
+ * The target of a wikilink body: the text before the first `|` (alias) or `#`
+ * (section). A backslash right before the alias pipe escapes it — Obsidian
+ * reads `[[Note\|A]]` as `Note` (the only way to alias inside a table cell) —
+ * while any other backslash stays: `[[Note\#H]]` and `[[Note\\|A]]` give `Note\`.
+ */
+function wikilinkTarget(body: string): string {
+  const end = body.search(/[|#]/);
+  if (end < 0) return body.trim();
+  const target = body.slice(0, end);
+  return (body[end] === '|' && target.endsWith('\\') ? target.slice(0, -1) : target).trim();
+}
+
+/**
+ * Markdown link: `[text](url)` or `[text](url "title")`. The URL is either
+ * `<bracketed text with spaces>` — the markdown spec's escape hatch for paths
+ * containing spaces — or a non-whitespace run whose parentheses come in
+ * balanced pairs (`Note(1).md`). The text may not contain `[` or `]`, and a
+ * bare URL ends at an unpaired `(`, so an unclosed `[` or `[a](` stops at the
+ * next bracket or parenthesis instead of scanning to the end of the note.
+ */
+const MARKDOWN_LINK = /\[[^[\]]*\]\((<[^<>\n]+>|(?:[^()\s]|\([^()\s]*\))+)(?:\s+"[^"]*")?\)/g;
+
+/**
  * Extract outgoing link references from note content. Captures Obsidian
  * wikilinks (`[[target]]`, `![[target]]`, with optional `|alias` or
  * `#section`) and markdown links (`[text](target)`). External URIs
@@ -418,17 +463,12 @@ function parseOutgoingLinks(
   const cleaned = stripMarkdownCode(content);
   const links: Array<{ target: string; type: 'wikilink' | 'markdown' }> = [];
 
-  for (const m of cleaned.matchAll(/!?\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g)) {
-    const target = m[1]?.trim();
+  for (const m of cleaned.matchAll(WIKILINK)) {
+    const target = wikilinkTarget(m[1] ?? '');
     if (target) links.push({ target, type: 'wikilink' });
   }
 
-  /**
-   * URL group accepts either `<bracketed text with spaces>` or a non-whitespace
-   * run. The bracketed form is the markdown spec's escape hatch for paths
-   * containing spaces.
-   */
-  for (const m of cleaned.matchAll(/\[[^\]]*\]\((<[^<>\n]+>|[^)\s]+)(?:\s+"[^"]*")?\)/g)) {
+  for (const m of cleaned.matchAll(MARKDOWN_LINK)) {
     let target = m[1]?.trim();
     if (!target) continue;
     if (target.startsWith('<') && target.endsWith('>')) {

@@ -7,16 +7,26 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianGetNote } from '@/mcp-server/tools/definitions/obsidian-get-note.tool.js';
-import { contractErrorOf, repeatKey, servePluginVersion, setupHarness } from '../helpers.js';
+import {
+  contractErrorOf,
+  noteJson,
+  repeatKey,
+  servePluginVersion,
+  setupHarness,
+} from '../helpers.js';
 
 const harness = setupHarness();
 
 describe('obsidian_get_note / format: content', () => {
   it('returns content via /vault/{path} with text/markdown accept', async () => {
+    let accept: string | undefined;
     harness
       .current()
       .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
-      .reply(200, '# title\n\nbody');
+      .reply((opts) => {
+        accept = opts.headers.Accept ?? opts.headers.accept;
+        return { statusCode: 200, data: '# title\n\nbody' };
+      });
 
     const input = obsidianGetNote.input.parse({
       format: 'content',
@@ -26,6 +36,7 @@ describe('obsidian_get_note / format: content', () => {
       input,
       createMockContext({ errors: obsidianGetNote.errors }),
     );
+    expect(accept).toBe('text/markdown');
     expect(out.result).toEqual({
       format: 'content',
       path: 'Note.md',
@@ -57,9 +68,7 @@ describe('obsidian_get_note / format: content', () => {
       input,
       createMockContext({ errors: obsidianGetNote.errors }),
     );
-    if (out.result.format !== 'content') throw new Error('expected content branch');
-    expect(out.result.path).toBe('today.md');
-    expect(out.result.content).toBe('daily body');
+    expect(out.result).toEqual({ format: 'content', path: 'today.md', content: 'daily body' });
   });
 });
 
@@ -143,43 +152,18 @@ describe('obsidian_get_note / format: full', () => {
       input,
       createMockContext({ errors: obsidianGetNote.errors }),
     );
-    if (out.result.format !== 'full') throw new Error('expected full branch');
-    expect(out.result.frontmatter).toEqual({ title: 'T' });
-    expect(out.result.tags).toEqual(['t1']);
-    expect(out.result.stat).toEqual({ ctime: 1, mtime: 2, size: 4 });
+    expect(out.result).toEqual({
+      format: 'full',
+      path: 'Note.md',
+      content: 'body',
+      frontmatter: { title: 'T' },
+      tags: ['t1'],
+      stat: { ctime: 1, mtime: 2, size: 4 },
+    });
   });
 });
 
 describe('obsidian_get_note / format: document-map', () => {
-  it('returns headings, blocks, and frontmatter fields (plugin v4.x)', async () => {
-    servePluginVersion(harness.current().pool, '4.2.0');
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
-      .reply(
-        200,
-        {
-          headings: ['Top', 'Sub'],
-          blocks: ['abc'],
-          frontmatterFields: ['title'],
-        },
-        { headers: { 'content-type': 'application/json' } },
-      );
-
-    const input = obsidianGetNote.input.parse({
-      format: 'document-map',
-      target: { type: 'path', path: 'Note.md' },
-    });
-    const out = await obsidianGetNote.handler(
-      input,
-      createMockContext({ errors: obsidianGetNote.errors }),
-    );
-    if (out.result.format !== 'document-map') throw new Error('expected document-map branch');
-    expect(out.result.headings).toEqual(['Top', 'Sub']);
-    expect(out.result.blocks).toEqual(['abc']);
-    expect(out.result.frontmatterFields).toEqual(['title']);
-  });
-
   /**
    * Both maps plugin 5.2.0 served for one note, recorded live: the flat 1.x
    * map (`Markdown-Patch-Version: 1`) and the 2.0 tree. The note carries a
@@ -711,7 +695,6 @@ describe('obsidian_get_note / section heading resolution', () => {
   });
 
   it('omits both fields for a frontmatter section', async () => {
-    mockNote('body');
     harness
       .current()
       .pool.intercept({ path: '/vault/Other.md', method: 'GET' })
@@ -761,8 +744,8 @@ describe('obsidian_get_note / section heading resolution', () => {
     expect(structured.notice).toContain('Overview::Alpha::Shared');
 
     const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
-    expect(text).toContain('Overview::Alpha::Shared');
-    expect(text).toContain('Overview::Beta::Shared');
+    expect(text).toContain('*Resolved:* Overview::Alpha::Shared');
+    expect(text).toContain('*Candidates:* Overview::Alpha::Shared, Overview::Beta::Shared');
   });
 });
 
@@ -792,6 +775,168 @@ describe('obsidian_get_note / case-insensitive fallback', () => {
     if (out.result.format !== 'content') throw new Error('expected content branch');
     expect(out.result.path).toBe('Notes/mynote.md');
     expect(out.result.content).toBe('# canonical body');
+  });
+
+  const REQUESTED = 'Notes/MyNote.md';
+  const CANONICAL = 'Notes/mynote.md';
+  const CASE_NOTICE =
+    '`Notes/MyNote.md` has no exact match; read `Notes/mynote.md`, the one file in that folder whose name matches it ignoring case. Write and delete tools match paths exactly — pass them `Notes/mynote.md`.';
+  const DUP_NOTE = ['# Root', '## Dup', 'first', '## Dup', 'second'].join('\n');
+  const DUP_NOTICE =
+    'Heading `Root::Dup` is ambiguous — 2 headings share that name; read `Root::Dup`. See `candidates` for the rest. Every one has the same full path, so the write tools reject it with `ambiguous_section`.';
+  const asJson = { headers: { 'content-type': 'application/json' } };
+
+  /** The requested path 404s and its folder holds exactly one case-insensitive match. */
+  function serveCaseMatch(canonicalReply: () => void): void {
+    const { pool } = harness.current();
+    pool
+      .intercept({ path: `/vault/${REQUESTED}`, method: 'GET' })
+      .reply(404, { message: 'absent' });
+    pool.intercept({ path: '/vault/Notes/', method: 'GET' }).reply(200, { files: ['mynote.md'] });
+    canonicalReply();
+  }
+
+  function serveCanonicalNote(content: string): () => void {
+    return () =>
+      harness
+        .current()
+        .pool.intercept({ path: `/vault/${CANONICAL}`, method: 'GET' })
+        .reply(200, noteJson(CANONICAL, content), asJson);
+  }
+
+  function textOf(res: { content: unknown[] }): string {
+    return res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+  }
+
+  it.each([
+    [
+      'content',
+      {},
+      () =>
+        harness
+          .current()
+          .pool.intercept({ path: `/vault/${CANONICAL}`, method: 'GET' })
+          .reply(200, 'body'),
+    ],
+    ['full', {}, serveCanonicalNote('body')],
+    [
+      'document-map',
+      {},
+      () => {
+        servePluginVersion(harness.current().pool, '4.2.0');
+        harness
+          .current()
+          .pool.intercept({ path: `/vault/${CANONICAL}`, method: 'GET' })
+          .reply(200, { headings: ['Top'], blocks: [], frontmatterFields: [] }, asJson);
+      },
+    ],
+    [
+      'section',
+      { section: { type: 'heading', target: 'Root' } },
+      serveCanonicalNote('# Root\nbody'),
+    ],
+  ] as const)(
+    'discloses the substitution on both surfaces (format %s)',
+    async (format, extra, reply) => {
+      serveCaseMatch(reply);
+      const res = await runToolContract(obsidianGetNote, {
+        format,
+        target: { type: 'path', path: REQUESTED },
+        ...extra,
+      });
+
+      expect(res.isError).toBeFalsy();
+      const structured = res.structuredContent as {
+        notice?: string;
+        requestedPath?: string;
+        result: { path: string };
+      };
+      expect(structured.result.path).toBe(CANONICAL);
+      expect(structured.requestedPath).toBe(REQUESTED);
+      expect(structured.notice).toBe(CASE_NOTICE);
+      expect((res.content.at(-1) as { text: string }).text).toBe(
+        `\n\n**requestedPath:** ${REQUESTED}\n> ${CASE_NOTICE}`,
+      );
+    },
+  );
+
+  it('keeps both messages when a substituted section read also matches an ambiguous heading', async () => {
+    serveCaseMatch(serveCanonicalNote(DUP_NOTE));
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'section',
+      target: { type: 'path', path: REQUESTED },
+      section: { type: 'heading', target: 'Root::Dup' },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const structured = res.structuredContent as {
+      notice?: string;
+      requestedPath?: string;
+      result: { path: string; candidates?: string[] };
+    };
+    expect(structured.result).toMatchObject({
+      path: CANONICAL,
+      candidates: ['Root::Dup', 'Root::Dup'],
+    });
+    expect(structured.requestedPath).toBe(REQUESTED);
+    expect(structured.notice).toBe(`${CASE_NOTICE} ${DUP_NOTICE}`);
+    expect((res.content.at(-1) as { text: string }).text).toBe(
+      `\n\n**requestedPath:** ${REQUESTED}\n> ${CASE_NOTICE} ${DUP_NOTICE}`,
+    );
+  });
+
+  it('carries no requestedPath or case notice on an exact-path hit', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: `/vault/${CANONICAL}`, method: 'GET' })
+      .reply(200, noteJson(CANONICAL, 'body'), asJson);
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'full',
+      target: { type: 'path', path: CANONICAL },
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).not.toHaveProperty('requestedPath');
+    expect(res.structuredContent).not.toHaveProperty('notice');
+    expect(textOf(res)).not.toContain('requestedPath');
+  });
+
+  it('keeps the heading notice alone on an exact-path ambiguous section read', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: `/vault/${CANONICAL}`, method: 'GET' })
+      .reply(200, noteJson(CANONICAL, DUP_NOTE), asJson);
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'section',
+      target: { type: 'path', path: CANONICAL },
+      section: { type: 'heading', target: 'Root::Dup' },
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).not.toHaveProperty('requestedPath');
+    expect((res.structuredContent as { notice?: string }).notice).toBe(DUP_NOTICE);
+  });
+
+  it.each([
+    ['an ambiguous_path conflict', ['mynote.md', 'MYNOTE.md'], 'ambiguous_path'],
+    ['a "did you mean" miss', ['MyNote'], 'note_missing'],
+  ])('carries no requestedPath on %s', async (_label, files, reason) => {
+    const { pool } = harness.current();
+    pool
+      .intercept({ path: `/vault/${REQUESTED}`, method: 'GET' })
+      .reply(404, { message: 'absent' });
+    pool.intercept({ path: '/vault/Notes/', method: 'GET' }).reply(200, { files });
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'full',
+      target: { type: 'path', path: REQUESTED },
+    });
+
+    expect(res.isError).toBe(true);
+    expect(
+      (res.structuredContent as { error: { data: { reason: string } } }).error.data.reason,
+    ).toBe(reason);
+    expect(res.structuredContent).not.toHaveProperty('requestedPath');
+    expect(textOf(res)).not.toContain('requestedPath');
   });
 });
 
@@ -883,6 +1028,164 @@ describe('obsidian_get_note / includeLinks', () => {
     ]);
   });
 
+  /**
+   * Targets Obsidian 1.14.4's metadata cache derives for each form (read back
+   * through the Local REST API's `links` / `unresolvedLinks`): `\|` is the alias
+   * separator in a table cell and in prose alike, while `\#` is no escape and
+   * `\\|` keeps one backslash.
+   */
+  const ESCAPED_PIPE_FORMS = [
+    ['[[Alpha\\|x]]', 'Alpha'],
+    ['![[Beta\\|x]]', 'Beta'],
+    ['[[Dir/Gamma\\|x]]', 'Dir/Gamma'],
+    ['[[Delta#H\\|x]]', 'Delta'],
+    ['[[Epsilon\\#H]]', 'Epsilon\\'],
+    ['[[Zeta\\\\|x]]', 'Zeta\\'],
+  ] as const;
+
+  it.each([
+    ['a table', ['| Link |', '| --- |', ...ESCAPED_PIPE_FORMS.map(([link]) => `| ${link} |`)]],
+    ['prose', ESCAPED_PIPE_FORMS.map(([link]) => `- ${link}`)],
+  ])(
+    'derives the target Obsidian derives for escaped-pipe and backslash forms in %s',
+    async (_where, lines) => {
+      mockFullNote(lines.join('\n'));
+      const input = obsidianGetNote.input.parse({
+        format: 'full',
+        target: { type: 'path', path: 'Note.md' },
+        includeLinks: true,
+      });
+      const out = await obsidianGetNote.handler(
+        input,
+        createMockContext({ errors: obsidianGetNote.errors }),
+      );
+      if (out.result.format !== 'full') throw new Error('expected full branch');
+      expect(out.result.outgoingLinks).toEqual(
+        ESCAPED_PIPE_FORMS.map(([, target]) => ({ target, type: 'wikilink' })),
+      );
+    },
+  );
+
+  it('carries escaped-pipe targets to structuredContent and the content[] link list', async () => {
+    mockFullNote(ESCAPED_PIPE_FORMS.map(([link]) => `| ${link} |`).join('\n'));
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+
+    expect(res.isError).toBeFalsy();
+    const structured = res.structuredContent as {
+      result: { outgoingLinks?: Array<{ target: string; type: string }> };
+    };
+    expect(structured.result.outgoingLinks?.map((l) => l.target)).toEqual(
+      ESCAPED_PIPE_FORMS.map(([, target]) => target),
+    );
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain(
+      [
+        '**Outgoing links (6)**',
+        ...ESCAPED_PIPE_FORMS.map(([, target]) => `- [wikilink] ${target}`),
+        '',
+        '**Content**',
+      ].join('\n'),
+    );
+  });
+
+  /**
+   * Targets Obsidian 1.14.4's metadata cache derives for links carrying single
+   * `[` or `]` (read back through the Local REST API's `unresolvedLinks`). A
+   * link runs from `[[` to the first `]]` on the same line; single brackets
+   * belong to it, but a second `[[` starts it over, and a link broken across
+   * lines is not indexed.
+   */
+  const BRACKET_FORMS = [
+    ['[[Ghost Q|a [b]]]', ['Ghost Q']],
+    ['[[Ghost R|see [1]]]', ['Ghost R']],
+    ['[[Ghost S#Sec [x]|A]]', ['Ghost S']],
+    ['[[Ghost T#Sec [x]]]', ['Ghost T']],
+    ['[[Ghost U|a [b]]', ['Ghost U']],
+    ['[[Ghost V|a ]b]]', ['Ghost V']],
+    ['[[Ghost W\\|a [b]]]', ['Ghost W']],
+    ['![[Ghost X|a [b]]]', ['Ghost X']],
+    ['| [[Ghost Y\\|a [b]]] |', ['Ghost Y']],
+    ['[[Ghost AA|x [[Ghost AB]] y]]', ['Ghost AB']],
+    ['[[Ghost [AC]]]', ['Ghost [AC']],
+    ['[[Ghost AD]x]]', ['Ghost AD]x']],
+    ['[[Ghost AE#S]x|A]]', ['Ghost AE']],
+    ['[[Ghost AF#S[x|A]]', ['Ghost AF']],
+    ['[[Ghost AG|a]b]]', ['Ghost AG']],
+    ['[[Ghost AH|[1]]] and [[Ghost AI|[2]]]', ['Ghost AH', 'Ghost AI']],
+    ['[[[Ghost BA]]', ['[Ghost BA']],
+    ['[[Ghost BB|x]]]', ['Ghost BB']],
+    ['[[Ghost BC\n|x]]', []],
+    ['[[[[Ghost BD]]', ['[Ghost BD']],
+    ['[[ [[Ghost BE]]', ['Ghost BE']],
+    ['[[Ghost BF[|a]]', ['Ghost BF[']],
+  ] as const;
+
+  it('derives the target Obsidian derives for links containing single brackets', async () => {
+    mockFullNote(BRACKET_FORMS.map(([line]) => `- ${line}`).join('\n'));
+    const input = obsidianGetNote.input.parse({
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
+    if (out.result.format !== 'full') throw new Error('expected full branch');
+    expect(out.result.outgoingLinks).toEqual(
+      BRACKET_FORMS.flatMap(([, targets]) =>
+        targets.map((target) => ({ target, type: 'wikilink' })),
+      ),
+    );
+  });
+
+  /**
+   * Each shape repeats an opener that never closes, the worst case for a
+   * backtracking scan. Best-of-3 thread CPU time per size; a linear scan grows
+   * ~16x from 5k to 80k characters, a quadratic one ~256x.
+   */
+  it.each([
+    ['[['],
+    ['[[a'],
+    ['[[a|'],
+    ['[[a\\'],
+    ['[[a|[b]'],
+    ['[[a]'],
+    ['[[[a'],
+    ['['],
+    ['[a]('],
+    ['[a](<'],
+    ['[a](b "'],
+    ['[a]((a'],
+  ])('scans %j repeated to 80k characters in linear time', async (shape) => {
+    async function cpuMs(size: number): Promise<number> {
+      const content = shape.repeat(Math.ceil(size / shape.length)).slice(0, size);
+      let best = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < 3; i++) {
+        mockFullNote(content);
+        const input = obsidianGetNote.input.parse({
+          format: 'full',
+          target: { type: 'path', path: 'Note.md' },
+          includeLinks: true,
+        });
+        const ctx = createMockContext({ errors: obsidianGetNote.errors });
+        const start = process.threadCpuUsage();
+        await obsidianGetNote.handler(input, ctx);
+        const used = process.threadCpuUsage(start);
+        best = Math.min(best, (used.user + used.system) / 1000);
+      }
+      return best;
+    }
+
+    const small = await cpuMs(5_000);
+    const large = await cpuMs(80_000);
+    expect(large / small).toBeLessThan(64);
+  });
+
   it('captures internal markdown links and filters external URIs', async () => {
     mockFullNote(
       [
@@ -909,6 +1212,49 @@ describe('obsidian_get_note / includeLinks', () => {
       { target: '../shared.md', type: 'markdown' },
       { target: 'assets/x.png', type: 'markdown' },
     ]);
+  });
+
+  it('keeps balanced parentheses and square brackets inside a bare markdown URL', async () => {
+    mockFullNote(['[paren](Notes/Note(1).md)', '[bracket](Notes/Note[1].md)'].join('\n'));
+    const input = obsidianGetNote.input.parse({
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+    const out = await obsidianGetNote.handler(
+      input,
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
+    if (out.result.format !== 'full') throw new Error('expected full branch');
+    expect(out.result.outgoingLinks).toEqual([
+      { target: 'Notes/Note(1).md', type: 'markdown' },
+      { target: 'Notes/Note[1].md', type: 'markdown' },
+    ]);
+  });
+
+  /**
+   * Only wikilink targets drop their `#heading`; a markdown link reports its
+   * URL as written, fragment included, and the `target` description says so.
+   */
+  it('reports a markdown link URL as written, `#fragment` included', async () => {
+    mockFullNote(['[[Wiki#H]]', '[md](Notes/Md.md#H)'].join('\n'));
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+      includeLinks: true,
+    });
+
+    expect(
+      (res.structuredContent as { result: { outgoingLinks?: unknown } }).result.outgoingLinks,
+    ).toEqual([
+      { target: 'Wiki', type: 'wikilink' },
+      { target: 'Notes/Md.md#H', type: 'markdown' },
+    ]);
+    const full = obsidianGetNote.output.shape.result.options[1];
+    expect(full.shape.format.value).toBe('full');
+    const description = full.shape.outgoingLinks.unwrap().element.shape.target.description ?? '';
+    expect(description).toMatch(/markdown link/i);
+    expect(description).toMatch(/as written/);
   });
 
   it('captures bracketed markdown URLs containing spaces (regression: angle-bracket form)', async () => {
@@ -1071,8 +1417,7 @@ describe('obsidian_get_note / format()', () => {
     const blocks = obsidianGetNote.format!({
       result: { format: 'content', path: 'A.md', content: 'body' },
     });
-    expect((blocks[0] as { text: string }).text).toContain('A.md');
-    expect((blocks[0] as { text: string }).text).toContain('body');
+    expect((blocks[0] as { text: string }).text).toBe('**A.md** (format: content)\n\nbody');
   });
 
   it('renders full with frontmatter, tags, stat, and content', () => {
@@ -1086,11 +1431,19 @@ describe('obsidian_get_note / format()', () => {
         stat: { ctime: 1, mtime: 2, size: 3 },
       },
     });
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('author');
-    expect(text).toContain('casey');
-    expect(text).toContain('size=3');
-    expect(text).toContain('body');
+    expect((blocks[0] as { text: string }).text).toBe(
+      [
+        '**A.md** (format: full)',
+        '*Tags:* t',
+        '*Stat:* ctime=1 mtime=2 size=3',
+        '',
+        '**Frontmatter**',
+        '- `author`: casey',
+        '',
+        '**Content**',
+        'body',
+      ].join('\n'),
+    );
   });
 
   it('renders an outgoing-links section when outgoingLinks is populated', () => {
@@ -1211,9 +1564,19 @@ describe('obsidian_get_note / format()', () => {
         frontmatterFields: ['f1'],
       },
     });
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('H1');
-    expect(text).toContain('^b1');
-    expect(text).toContain('f1');
+    expect((blocks[0] as { text: string }).text).toBe(
+      [
+        '**A.md** (format: document-map)',
+        '',
+        '**Headings (1)**',
+        '- H1',
+        '',
+        '**Blocks (1)**',
+        '- ^b1',
+        '',
+        '**Frontmatter fields (1)**',
+        '- f1',
+      ].join('\n'),
+    );
   });
 });

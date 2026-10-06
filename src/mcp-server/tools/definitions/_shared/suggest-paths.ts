@@ -4,8 +4,12 @@
  * 1. **Case-insensitive fallback.** If a path lookup 404s, list the parent
  *    directory and look for a single case-insensitive filename match. If
  *    found, retry against the canonical filesystem path (matches v2.x
- *    behavior). This silently fixes "Readme.md" vs "README.md" on Linux; on
- *    Mac/Windows the OS already case-folds and the fallback is a no-op.
+ *    behavior) and report the path that was asked for as `requestedPath`, so
+ *    the caller can disclose the substitution. The fallback is reachable on
+ *    every host: the plugin's `note+json` and document-map reads resolve
+ *    through Obsidian's case-sensitive vault index even on a case-insensitive
+ *    filesystem (macOS, Windows). Only the raw-markdown read case-folds there,
+ *    answering 200 for a wrong-case path before any fallback runs.
  *
  * 2. **"Did you mean" suggestions.** When no case match exists but the parent
  *    directory has near-matches (e.g., extension-stripped variants), re-throw
@@ -31,6 +35,11 @@ interface ProbeResult {
   extInsensitive: string[];
 }
 
+/** Outcome of {@link withCaseFallback}; `requestedPath` is present only when another path was read. */
+export type CaseFallback<T> =
+  | { result: T; resolvedPath: string | undefined; requestedPath?: never }
+  | { result: T; resolvedPath: string; requestedPath: string };
+
 /**
  * Wrap a service call with case-insensitive path fallback and "did you mean"
  * enrichment. Non-path targets pass through — their paths are resolved
@@ -39,7 +48,7 @@ interface ProbeResult {
  * For path targets:
  *   - **Exact match** → returns `{ result, resolvedPath: target.path }`.
  *   - **Single case match** → retries with the canonical path and returns
- *     `{ result, resolvedPath: <canonical> }`.
+ *     `{ result, resolvedPath: <canonical>, requestedPath: target.path }`.
  *   - **Multiple case matches** → throws `Conflict` with the candidates so the
  *     agent can disambiguate.
  *   - **No case match, extension-stripped near-matches** → throws `NotFound`
@@ -48,13 +57,14 @@ interface ProbeResult {
  *
  * `resolvedPath` is `undefined` for non-path targets — callers derive the
  * canonical path from the result itself (typically `NoteJson.path`).
+ * `requestedPath` is present only on the single-case-match branch.
  */
 export async function withCaseFallback<T>(
   ctx: Context,
   svc: ObsidianService,
   target: NoteTarget,
   fn: (target: NoteTarget) => Promise<T>,
-): Promise<{ result: T; resolvedPath: string | undefined }> {
+): Promise<CaseFallback<T>> {
   if (target.type !== 'path') {
     return { result: await fn(target), resolvedPath: undefined };
   }
@@ -68,7 +78,7 @@ export async function withCaseFallback<T>(
     const sole = probe.caseMatches.length === 1 ? probe.caseMatches[0] : undefined;
     if (sole !== undefined) {
       const result = await fn({ type: 'path', path: sole });
-      return { result, resolvedPath: sole };
+      return { result, resolvedPath: sole, requestedPath: target.path };
     }
     if (probe.caseMatches.length > 1) {
       const list = probe.caseMatches.map((m) => `"${m}"`).join(', ');
@@ -95,11 +105,32 @@ export async function withCaseFallback<T>(
 }
 
 /**
+ * Disclose a `withCaseFallback` substitution on the caller's enrichment: the
+ * `requestedPath` field plus a one-line notice naming both paths. `action` is
+ * what the tool did with the canonical file. Returns the notice — `notice` is
+ * last-wins, so a caller that sets another one must fold this text into it —
+ * or `undefined` when nothing was substituted.
+ */
+export function discloseCaseSubstitution(
+  ctx: Context,
+  fallback: CaseFallback<unknown>,
+  action: 'read' | 'opened',
+): string | undefined {
+  if (fallback.requestedPath === undefined) return;
+  const { requestedPath, resolvedPath } = fallback;
+  const notice = `\`${requestedPath}\` has no exact match; ${action} \`${resolvedPath}\`, the one file in that folder whose name matches it ignoring case. Write and delete tools match paths exactly — pass them \`${resolvedPath}\`.`;
+  ctx.enrich({ requestedPath });
+  ctx.enrich.notice(notice);
+  return notice;
+}
+
+/**
  * List the parent directory of `path` and return up to {@link MAX_SUGGESTIONS}
  * close-match candidates. Match order: case-insensitive equality first, then
  * extension-stripped equality. Returns `[]` on listing failure or empty
- * basename. Used by callers that need suggestions without performing the
- * underlying operation (e.g., `obsidian_open_in_ui`'s explicit messaging).
+ * basename. Used by callers that need suggestions without substituting a
+ * match (e.g., `obsidian_delete_note`'s exact-case miss, which names the
+ * candidates but never deletes one in place of the requested path).
  */
 export async function findSimilarPaths(
   ctx: Context,

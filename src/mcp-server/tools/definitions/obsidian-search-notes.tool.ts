@@ -150,7 +150,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       .record(z.string(), z.unknown())
       .optional()
       .describe(
-        'JSONLogic tree. Required for `jsonlogic` mode; ignored in `text` and `omnisearch` modes (use `query` instead — this field must be an object, so passing a string here is rejected). `glob` and `regexp` take `[PATTERN, VALUE]` — pattern first: `{"glob": ["Projects/*.md", {"var": "path"}]}`. Backlinks ("what links here") have no dedicated tool or upstream endpoint but are expressible this way: `{"regexp": ["\\\\[\\\\[Target Note(\\\\||#|\\\\]\\\\])", {"var": "content"}]}` finds every note whose body wikilinks `Target Note`, in plain, aliased, or section form. `obsidian_get_note` with `includeLinks: true` covers the outgoing direction.',
+        'JSONLogic tree. Required for `jsonlogic` mode; ignored in `text` and `omnisearch` modes (use `query` instead — this field must be an object, so passing a string here is rejected). `glob` and `regexp` take `[PATTERN, VALUE]` — pattern first: `{"glob": ["Projects/*.md", {"var": "path"}]}`. Backlinks ("what links here") have no dedicated tool; find them this way: `{"regexp": ["\\\\[\\\\[Target Note(\\\\\\\\?\\\\||#|\\\\]\\\\])", {"var": "content"}]}` finds every readable note whose body wikilinks or embeds `Target Note`, in plain, aliased (`|`, or the table-safe `\\|`), or section form. `obsidian_get_note` with `includeLinks: true` covers the outgoing direction.',
       ),
     contextLength: z
       .number()

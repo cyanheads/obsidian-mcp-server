@@ -1,6 +1,6 @@
 /**
  * @fileoverview Unit tests for the path-resolution helpers used by
- * obsidian_get_note / obsidian_delete_note / obsidian_open_in_ui.
+ * obsidian_get_note / obsidian_open_in_ui.
  * @module tests/tools/suggest-paths.test
  */
 
@@ -76,10 +76,11 @@ describe('findSimilarPaths', () => {
   });
 
   it('skips directory entries', async () => {
+    // `mynote.assets/` strips to `mynote` like a file would, so only the skip keeps it out.
     harness
       .current()
       .pool.intercept({ path: '/vault/', method: 'GET' })
-      .reply(200, { files: ['mynote/', 'mynote.md'] });
+      .reply(200, { files: ['mynote.assets/', 'mynote.md'] });
 
     const out = await findSimilarPaths(createMockContext(), harness.current().service, 'MyNote');
     expect(out).toEqual(['mynote.md']);
@@ -89,14 +90,18 @@ describe('findSimilarPaths', () => {
 describe('withCaseFallback', () => {
   const path = (p: string): NoteTarget => ({ type: 'path', path: p });
 
-  it('passes through non-path targets without listing the parent', async () => {
-    const out = await withCaseFallback(
-      createMockContext(),
-      harness.current().service,
-      { type: 'active' },
-      async () => 'ok',
-    );
-    expect(out).toEqual({ result: 'ok', resolvedPath: undefined });
+  it("passes a non-path target's NotFound through without a case fallback", async () => {
+    const orig = notFound('No active file', { reason: 'no_active_file' });
+    await expect(
+      withCaseFallback(
+        createMockContext(),
+        harness.current().service,
+        { type: 'active' },
+        async () => {
+          throw orig;
+        },
+      ),
+    ).rejects.toBe(orig);
   });
 
   it('returns target.path when the exact path resolves on the first try', async () => {
@@ -114,11 +119,17 @@ describe('withCaseFallback', () => {
     expect(out).toEqual({ result: 'body', resolvedPath: 'N.md' });
   });
 
-  it('re-throws non-NotFound errors verbatim', async () => {
+  it('re-throws non-NotFound errors verbatim, even when a case match exists', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/', method: 'GET' })
+      .reply(200, { files: ['n.md'] });
+
     const orig = forbidden('nope', { reason: 'x' });
     await expect(
-      withCaseFallback(createMockContext(), harness.current().service, path('N.md'), async () => {
-        throw orig;
+      withCaseFallback(createMockContext(), harness.current().service, path('N.md'), async (t) => {
+        if (t.type === 'path' && t.path === 'N.md') throw orig;
+        return 'body';
       }),
     ).rejects.toBe(orig);
   });
@@ -145,7 +156,25 @@ describe('withCaseFallback', () => {
     );
     expect(calls).toBe(2);
     expect(seen).toEqual(['N.md', 'n.md']);
-    expect(out).toEqual({ result: 'body-n.md', resolvedPath: 'n.md' });
+    expect(out).toEqual({ result: 'body-n.md', resolvedPath: 'n.md', requestedPath: 'N.md' });
+  });
+
+  it('reports requestedPath only when it substituted another path', async () => {
+    const exact = await withCaseFallback(
+      createMockContext(),
+      harness.current().service,
+      path('N.md'),
+      async () => 'body',
+    );
+    const passThrough = await withCaseFallback(
+      createMockContext(),
+      harness.current().service,
+      { type: 'active' },
+      async () => 'ok',
+    );
+    expect(exact).not.toHaveProperty('requestedPath');
+    expect(passThrough).toEqual({ result: 'ok', resolvedPath: undefined });
+    expect(passThrough).not.toHaveProperty('requestedPath');
   });
 
   it('throws Conflict when more than one case-insensitive match exists', async () => {

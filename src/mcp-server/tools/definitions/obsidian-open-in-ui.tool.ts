@@ -15,11 +15,11 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import type { NoteTarget } from '@/services/obsidian/types.js';
-import { withCaseFallback } from './_shared/suggest-paths.js';
+import { discloseCaseSubstitution, withCaseFallback } from './_shared/suggest-paths.js';
 
 export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
   description:
-    'Open a file in the Obsidian app UI. By default fails when the path does not exist; the `failIfMissing` flag controls the open-or-create behavior. Opening an existing file needs read access; opening a missing one creates it, so that case needs write access to the path.',
+    'Open a file in the Obsidian app UI. By default fails when the path does not exist; the `failIfMissing` flag controls the open-or-create behavior. Opening an existing file needs read access; opening a missing one creates it, so that case needs write access to the path. A path with no exact match but a single case-insensitive match in its folder opens that file instead and reports the path as sent in `requestedPath`.',
   annotations: { openWorldHint: true, destructiveHint: false, idempotentHint: true },
   input: z.object({
     path: z.string().min(1).describe('Vault-relative path of the file to open.'),
@@ -41,6 +41,20 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
       .boolean()
       .describe('True when the file did not exist before the call and was created by Obsidian.'),
   }),
+  enrichment: {
+    requestedPath: z
+      .string()
+      .optional()
+      .describe(
+        'The `path` as sent. Present only when it had no exact match and its single case-insensitive match in the same folder, the output `path`, was opened instead — write and delete tools need the output `path`.',
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Names both paths when a case-insensitive match was opened in place of the requested path.',
+      ),
+  },
   auth: ['tool:obsidian_open_in_ui:write'],
   errors: [
     {
@@ -95,10 +109,9 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
     let existed = true;
 
     try {
-      const { resolvedPath: rp } = await withCaseFallback(ctx, svc, target, (t) =>
-        svc.getNoteJson(ctx, t),
-      );
-      resolvedPath = rp ?? input.path;
+      const fallback = await withCaseFallback(ctx, svc, target, (t) => svc.getNoteJson(ctx, t));
+      resolvedPath = fallback.resolvedPath ?? input.path;
+      discloseCaseSubstitution(ctx, fallback, 'opened');
     } catch (err) {
       // Match on `data.reason` rather than the JSON-RPC code so the handler text
       // doesn't trip `error-contract-prefer-fail` on a comparison literal. The

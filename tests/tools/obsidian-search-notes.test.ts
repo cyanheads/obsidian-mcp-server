@@ -177,7 +177,7 @@ describe('obsidian_search_notes / text', () => {
     );
     if (out.result.mode !== 'text') throw new Error('expected text branch');
     const hit = out.result.hits[0];
-    expect(hit?.matches).toHaveLength(10);
+    expect(hit?.matches.map((m) => m.context)).toEqual(matches.slice(0, 10).map((m) => m.context));
     expect(hit?.truncated).toBe(true);
     expect(hit?.totalMatches).toBe(25);
   });
@@ -208,7 +208,7 @@ describe('obsidian_search_notes / text', () => {
     expect(hit?.totalMatches).toBe(8);
   });
 
-  it('leaves `truncated` and `totalMatches` undefined when matches fit under the cap', async () => {
+  it('omits `truncated` and `totalMatches` when matches fit under the cap', async () => {
     harness
       .current()
       .pool.intercept({
@@ -226,9 +226,11 @@ describe('obsidian_search_notes / text', () => {
       createMockContext({ errors: obsidianSearchNotes.errors }),
     );
     if (out.result.mode !== 'text') throw new Error('expected text branch');
-    const hit = out.result.hits[0];
-    expect(hit?.truncated).toBeUndefined();
-    expect(hit?.totalMatches).toBeUndefined();
+    expect(out.result.hits).toHaveLength(1);
+    const [hit] = out.result.hits;
+    expect(hit?.matches).toHaveLength(1);
+    expect(hit).not.toHaveProperty('truncated');
+    expect(hit).not.toHaveProperty('totalMatches');
   });
 });
 
@@ -305,20 +307,25 @@ describe('obsidian_search_notes / cursor pagination', () => {
 
 describe('obsidian_search_notes / jsonlogic', () => {
   it('forwards the logic object as JSON', async () => {
+    const logic = { '!!': [{ var: 'tags' }] };
+    let sentBody = '';
     harness
       .current()
       .pool.intercept({ path: '/search/', method: 'POST' })
-      .reply(200, [{ filename: 'A.md', result: true }], {
-        headers: { 'content-type': 'application/json' },
+      .reply((opts) => {
+        sentBody = opts.body ?? '';
+        return {
+          statusCode: 200,
+          data: [{ filename: 'A.md', result: true }],
+          responseOptions: { headers: { 'content-type': 'application/json' } },
+        };
       });
 
     const out = await obsidianSearchNotes.handler(
-      obsidianSearchNotes.input.parse({
-        mode: 'jsonlogic',
-        logic: { '!!': [{ var: 'tags' }] },
-      }),
+      obsidianSearchNotes.input.parse({ mode: 'jsonlogic', logic }),
       createMockContext({ errors: obsidianSearchNotes.errors }),
     );
+    expect(JSON.parse(sentBody)).toEqual(logic);
     if (out.result.mode !== 'jsonlogic') throw new Error('expected jsonlogic branch');
     expect(out.result.hits).toEqual([{ filename: 'A.md', result: true }]);
     expect(out.result.totalCount).toBe(1);
@@ -376,13 +383,17 @@ describe('obsidian_search_notes / omnisearch (mode-conditional)', () => {
       createMockContext({ errors: omnisearchTool.errors }),
     );
     if (out.result.mode !== 'omnisearch') throw new Error('expected omnisearch branch');
-    expect(out.result.hits).toHaveLength(1);
-    const hit = out.result.hits[0];
-    expect(hit?.filename).toBe('Projects/Note A.md');
-    expect(hit?.basename).toBe('Note A');
-    expect(hit?.score).toBe(7.42);
-    expect(hit?.excerpt).toBe("Line 1\nLine 2 — Bob's pick & <mark>highlight</mark>");
-    expect(hit).not.toHaveProperty('vault');
+    // `toEqual` also fails on an extra key, so a leaked `vault` or `path` breaks it.
+    expect(out.result.hits).toEqual([
+      {
+        filename: 'Projects/Note A.md',
+        basename: 'Note A',
+        score: 7.42,
+        foundWords: ['bob'],
+        matches: [{ match: 'bob', offset: 12 }],
+        excerpt: "Line 1\nLine 2 — Bob's pick & <mark>highlight</mark>",
+      },
+    ]);
     expect(out.result.truncated).toBe(false);
     expect(out.result.totalCount).toBe(1);
   });
@@ -515,10 +526,17 @@ describe('obsidian_search_notes / format()', () => {
       },
     });
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('A.md');
-    expect(text).toContain('snippet');
-    expect(text).toContain('1 on this page');
-    expect(text).toContain('1 total');
+    expect(text).toBe(
+      [
+        '**Search (text) — 1 on this page · 1 total**',
+        '',
+        '### A.md',
+        'match at context[0–1] · subject[0–1]',
+        '```text',
+        'snippet',
+        '```',
+      ].join('\n'),
+    );
   });
 
   it('renders structured hits as JSON code blocks', () => {
@@ -530,8 +548,19 @@ describe('obsidian_search_notes / format()', () => {
       },
     });
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('```json');
-    expect(text).toContain('"mtime": 1');
+    expect(text).toBe(
+      [
+        '**Search (jsonlogic) — 1 on this page · 1 total**',
+        '',
+        '### A.md',
+        'result:',
+        '```json',
+        '{',
+        '  "mtime": 1',
+        '}',
+        '```',
+      ].join('\n'),
+    );
   });
 
   it('annotates truncated text hits with the "truncated, showing first N of M" indicator', () => {
@@ -593,17 +622,23 @@ describe('obsidian_search_notes / format()', () => {
       },
     });
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('Projects/Note A.md');
-    expect(text).toContain('score: 7.42');
-    expect(text).toContain('`match`');
-    // The excerpt is vault text, so it is fenced rather than interpolated into
-    // a blockquote — a blockquote leaks its own structure and folds the next
-    // line in by lazy continuation.
-    expect(text).toContain('context around the match');
-    expect(text).not.toContain('> context around the match');
-    expect(text).toMatch(/^```text$/m);
-    // `matches[].offset` reaches the reader instead of being dropped.
-    expect(text).toContain('@ 14');
+    /**
+     * The excerpt is vault text, so it is fenced rather than interpolated into
+     * a blockquote — a blockquote leaks its own structure and folds the next
+     * line in by lazy continuation. `matches[].offset` reaches the reader.
+     */
+    expect(text).toBe(
+      [
+        '**Search (omnisearch) — 1 on this page · 1 total**',
+        '',
+        '### Projects/Note A.md (score: 7.42)',
+        '**Matched:** `match`',
+        '**Offsets:** `match` @ 14',
+        '```text',
+        'context around the match',
+        '```',
+      ].join('\n'),
+    );
   });
 
   it('warns about omnisearch truncation when the upstream cap was hit', () => {
@@ -820,16 +855,44 @@ describe('obsidian_search_notes / jsonlogic operator-order guidance', () => {
     expect(logicDescription).toMatch(/"regexp"\s*:\s*\[\s*"/);
     expect(logicDescription).toMatch(/\{\s*"var"\s*:\s*"content"\s*\}\s*\]/);
   });
+
+  /**
+   * The documented recipe, run as the regex a caller would send, against the
+   * forms Obsidian indexes as a link to `Target Note`. `\|` is the only way to
+   * alias a link inside a table cell; `\#` is no escape, so `[[Target Note\#H]]`
+   * links to `Target Note\`, not to `Target Note`.
+   */
+  it('documents a backlinks recipe that matches every form Obsidian links', () => {
+    const logicDescription = obsidianSearchNotes.input.shape.logic.description ?? '';
+    const recipe = /`(\{"regexp": \[.*?\]\})`/.exec(logicDescription)?.[1];
+    if (!recipe) throw new Error('backlinks recipe not found in the `logic` description');
+    const [pattern] = (JSON.parse(recipe) as { regexp: [string, unknown] }).regexp;
+    const backlink = new RegExp(pattern);
+
+    for (const body of [
+      'See [[Target Note]].',
+      'See [[Target Note|alias]].',
+      'See [[Target Note#Heading]].',
+      '| [[Target Note\\|alias]] |',
+      '![[Target Note\\|embed]]',
+    ]) {
+      expect(backlink.test(body), body).toBe(true);
+    }
+    for (const body of ['See [[Target Notes]].', 'See [[Target Note\\#Heading]].']) {
+      expect(backlink.test(body), body).toBe(false);
+    }
+  });
+
+  it('does not claim backlinks lack an upstream source', () => {
+    const logicDescription = obsidianSearchNotes.input.shape.logic.description ?? '';
+    expect(logicDescription).not.toContain('upstream endpoint');
+  });
 });
 
 describe('obsidian_search_notes / logic_invalid', () => {
   const declaredRecovery = obsidianSearchNotes.errors!.find(
     (e) => e.reason === 'logic_invalid',
   )?.recovery;
-
-  it('declares logic_invalid on the tool contract', () => {
-    expect(declaredRecovery).toBeTypeOf('string');
-  });
 
   it('maps an upstream 400 on the jsonlogic route to reason logic_invalid', async () => {
     harness
@@ -1046,9 +1109,10 @@ describe('obsidian_search_notes / context-relative match offsets', () => {
     expect(matchShape.description).not.toMatch(/within the context window/i);
     for (const key of ['start', 'end'] as const) {
       expect(matchShape.shape[key]!.description).not.toMatch(/in the surrounding context/i);
+      expect(matchShape.shape[key]!.description).toMatch(/within the (same )?subject/i);
     }
-    expect(matchShape.shape.contextStart!.description).toMatch(/context/i);
-    expect(matchShape.shape.contextEnd!.description).toMatch(/context/i);
+    expect(matchShape.shape.contextStart!.description).toMatch(/within `context`/);
+    expect(matchShape.shape.contextEnd!.description).toMatch(/within `context`/);
   });
 });
 
@@ -1098,8 +1162,7 @@ describe('obsidian_search_notes / format() cannot be broken out of by upstream t
     const fences = text.match(/^`{4,}/gm) ?? [];
     expect(fences.length).toBeGreaterThanOrEqual(2);
     // Both offset origins are legible to the reader.
-    expect(text).toContain('100');
-    expect(text).toContain('469');
+    expect(text).toContain('match at context[100–105] · subject[469–474]');
   });
 
   it('renders an omnisearch excerpt containing markdown verbatim and contained', () => {
@@ -1238,7 +1301,7 @@ describe('obsidian_search_notes / context_length_too_large', () => {
 
   it('does not carry the raw upstream body or envelope on the replacement error', async () => {
     const err = await captureError(() => replyWith(500, RANGE_ERROR));
-    expect(err?.data).toBeDefined();
+    expect(err?.data?.reason).toBe('context_length_too_large');
     expect(Object.hasOwn(err!.data!, 'body')).toBe(false);
     expect(Object.hasOwn(err!.data!, 'upstream')).toBe(false);
     // The message must not smuggle the upstream body back in either.

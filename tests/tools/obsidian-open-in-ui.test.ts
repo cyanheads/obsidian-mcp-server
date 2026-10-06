@@ -6,7 +6,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import { obsidianOpenInUi } from '@/mcp-server/tools/definitions/obsidian-open-in-ui.tool.js';
@@ -18,6 +18,13 @@ import {
 import { contractErrorOf, makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
+
+/** The recovery hint the tool's own contract declares, so the test cannot drift from it. */
+function declaredRecovery(reason: string): string {
+  const entry = obsidianOpenInUi.errors?.find((e) => e.reason === reason);
+  if (!entry) throw new Error(`obsidian_open_in_ui declares no '${reason}' contract entry`);
+  return entry.recovery;
+}
 
 const noteJson = (path: string) => ({
   path,
@@ -71,12 +78,12 @@ describe('obsidian_open_in_ui', () => {
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
       .reply(200, noteJson('N.md'), { headers: { 'content-type': 'application/json' } });
-    let opened = false;
+    let openedPath = '';
     harness
       .current()
-      .pool.intercept({ path: (p) => (p as string).startsWith('/open/N.md'), method: 'POST' })
-      .reply(() => {
-        opened = true;
+      .pool.intercept({ path: (p) => (p as string).startsWith('/open/'), method: 'POST' })
+      .reply((opts) => {
+        openedPath = opts.path;
         return { statusCode: 200, data: '' };
       });
 
@@ -84,7 +91,8 @@ describe('obsidian_open_in_ui', () => {
       obsidianOpenInUi.input.parse({ path: 'N.md' }),
       createMockContext({ errors: obsidianOpenInUi.errors }),
     );
-    expect(opened).toBe(true);
+    // No query string: `newLeaf` defaults to false and is sent only when true.
+    expect(openedPath).toBe('/open/N.md');
     expect(out).toEqual({ path: 'N.md', opened: true, createdIfMissing: false });
   });
 
@@ -109,7 +117,7 @@ describe('obsidian_open_in_ui', () => {
     });
   });
 
-  it('appends `did you mean` to the note_missing message when a close match exists', async () => {
+  it('leads the note_missing recovery hint with `did you mean` when a close match exists', async () => {
     harness
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
@@ -184,33 +192,58 @@ describe('obsidian_open_in_ui', () => {
     expect(out).toEqual({ path: 'N.md', opened: true, createdIfMissing: true });
   });
 
-  it('resolves a case mismatch instead of creating a second file, with failIfMissing=false', async () => {
-    harness.current().pool.intercept({ path: '/vault/MyNote.md', method: 'GET' }).reply(404, '');
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/', method: 'GET' })
-      .reply(200, { files: ['mynote.md'] });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/mynote.md', method: 'GET' })
-      .reply(200, noteJson('mynote.md'), {
-        headers: { 'content-type': 'application/vnd.olrapi.note+json' },
-      });
-    let openedPath = '';
-    harness
-      .current()
-      .pool.intercept({ path: (p) => (p as string).startsWith('/open/'), method: 'POST' })
-      .reply((opts) => {
-        openedPath = opts.path;
-        return { statusCode: 200, data: '' };
-      });
+  it.each([true, false])(
+    'opens the single case match instead of creating a file, and discloses it on both surfaces, with failIfMissing=%s',
+    async (failIfMissing) => {
+      const { pool } = harness.current();
+      pool.intercept({ path: '/vault/MyNote.md', method: 'GET' }).reply(404, '');
+      pool.intercept({ path: '/vault/', method: 'GET' }).reply(200, { files: ['mynote.md'] });
+      pool
+        .intercept({ path: '/vault/mynote.md', method: 'GET' })
+        .reply(200, noteJson('mynote.md'), { headers: { 'content-type': 'application/json' } });
+      let openedPath = '';
+      pool
+        .intercept({ path: (p) => (p as string).startsWith('/open/'), method: 'POST' })
+        .reply((opts) => {
+          openedPath = opts.path;
+          return { statusCode: 200, data: '' };
+        });
 
-    const out = await obsidianOpenInUi.handler(
-      obsidianOpenInUi.input.parse({ path: 'MyNote.md', failIfMissing: false }),
-      createMockContext({ errors: obsidianOpenInUi.errors }),
+      const res = await runToolContract(obsidianOpenInUi, { path: 'MyNote.md', failIfMissing });
+
+      expect(res.isError).toBeFalsy();
+      expect(openedPath).toBe('/open/mynote.md');
+      const notice =
+        '`MyNote.md` has no exact match; opened `mynote.md`, the one file in that folder whose name matches it ignoring case. Write and delete tools match paths exactly — pass them `mynote.md`.';
+      expect(res.structuredContent).toEqual({
+        path: 'mynote.md',
+        opened: true,
+        createdIfMissing: false,
+        requestedPath: 'MyNote.md',
+        notice,
+      });
+      expect((res.content.at(-1) as { text: string }).text).toBe(
+        `\n\n**requestedPath:** MyNote.md\n> ${notice}`,
+      );
+    },
+  );
+
+  it('carries no requestedPath or notice when the exact path exists', async () => {
+    const { pool } = harness.current();
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson('N.md'), { headers: { 'content-type': 'application/json' } });
+    pool
+      .intercept({ path: (p) => (p as string).startsWith('/open/N.md'), method: 'POST' })
+      .reply(200, '');
+
+    const res = await runToolContract(obsidianOpenInUi, { path: 'N.md' });
+
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toEqual({ path: 'N.md', opened: true, createdIfMissing: false });
+    expect(res.content.map((b) => (b as { text?: string }).text ?? '').join('\n')).toBe(
+      ['**Opened N.md**', '*Opened:* true', '*Created if missing:* false'].join('\n'),
     );
-    expect(openedPath).toContain('/open/mynote.md');
-    expect(out).toEqual({ path: 'mynote.md', opened: true, createdIfMissing: false });
   });
 
   /**
@@ -242,7 +275,7 @@ describe('obsidian_open_in_ui', () => {
       data: {
         reason: 'ambiguous_path',
         matches: ['MyNote.md', 'MYNOTE.md'],
-        recovery: { hint: expect.stringContaining('matches') },
+        recovery: { hint: declaredRecovery('ambiguous_path') },
       },
     });
     expect(opened).toBe(false);
@@ -334,36 +367,6 @@ describe('obsidian_open_in_ui — path policy on the create-capable branch', () 
     expect(requests).toContain('POST /open/Inbox/new.md');
   });
 
-  it('resolves a case-mismatch path through the fallback and opens the canonical file', async () => {
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/MyNote.md', method: 'GET' })
-      .reply(404, { message: 'absent' });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/', method: 'GET' })
-      .reply(200, { files: ['mynote.md'] });
-    harness
-      .current()
-      .pool.intercept({ path: '/vault/mynote.md', method: 'GET' })
-      .reply(200, noteJson('mynote.md'), { headers: { 'content-type': 'application/json' } });
-    let openedPath = '';
-    harness
-      .current()
-      .pool.intercept({ path: (p) => (p as string).startsWith('/open/mynote.md'), method: 'POST' })
-      .reply((opts) => {
-        openedPath = opts.path;
-        return { statusCode: 200, data: '' };
-      });
-
-    const out = await obsidianOpenInUi.handler(
-      obsidianOpenInUi.input.parse({ path: 'MyNote.md' }),
-      createMockContext({ errors: obsidianOpenInUi.errors }),
-    );
-    expect(openedPath).toContain('/open/mynote.md');
-    expect(out).toEqual({ path: 'mynote.md', opened: true, createdIfMissing: false });
-  });
-
   it('forwards newLeaf=true as a query parameter', async () => {
     harness
       .current()
@@ -385,6 +388,6 @@ describe('obsidian_open_in_ui — path policy on the create-capable branch', () 
       obsidianOpenInUi.input.parse({ path: 'N.md', newLeaf: true }),
       createMockContext({ errors: obsidianOpenInUi.errors }),
     );
-    expect(seenPath).toContain('newLeaf=true');
+    expect(seenPath).toBe('/open/N.md?newLeaf=true');
   });
 });
