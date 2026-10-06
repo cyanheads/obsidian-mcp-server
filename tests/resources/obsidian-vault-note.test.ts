@@ -40,7 +40,7 @@ describe('obsidian://vault/{+path}', () => {
     expect(out.tags).toEqual(['t']);
   });
 
-  it('surfaces 404 as NotFound', async () => {
+  it('surfaces 404 as NotFound with reason note_missing', async () => {
     harness
       .current()
       .pool.intercept({ path: '/vault/Missing.md', method: 'GET' })
@@ -54,7 +54,10 @@ describe('obsidian://vault/{+path}', () => {
           uri: new URL('obsidian://vault/Missing.md'),
         }),
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'note_missing' },
+    });
   });
 
   /**

@@ -21,6 +21,14 @@ const harness = setupHarness();
 
 const cl = (n: number) => ({ headers: { 'content-length': String(n) } });
 
+/**
+ * Recorded request headers keep the casing the service sent, so lower-case
+ * every key before reading one — an absent-header assertion against a single
+ * spelling would pass whatever casing the header actually went out in.
+ */
+const lowerKeys = (headers: Record<string, string>): Record<string, string> =>
+  Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+
 describe('obsidian_patch_note', () => {
   it('PATCHes with the requested operation and reports both sizes (plugin v4.x headers)', async () => {
     const pool = harness.current().pool;
@@ -30,7 +38,7 @@ describe('obsidian_patch_note', () => {
     let seenHeaders: Record<string, string> = {};
     let seenBody = '';
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
-      seenHeaders = (opts.headers as Record<string, string>) ?? {};
+      seenHeaders = lowerKeys(opts.headers);
       seenBody = String(opts.body ?? '');
       return { statusCode: 200, data: '' };
     });
@@ -47,15 +55,11 @@ describe('obsidian_patch_note', () => {
       createMockContext({ errors: obsidianPatchNote.errors }),
     );
 
-    expect(seenHeaders.operation ?? seenHeaders.Operation).toBe('prepend');
-    expect(seenHeaders['target-type'] ?? seenHeaders['Target-Type']).toBe('block');
+    expect(seenHeaders.operation).toBe('prepend');
+    expect(seenHeaders['target-type']).toBe('block');
     // applyIfContentPreexists: true → omit the Reject header (force-apply path).
-    expect(
-      seenHeaders['reject-if-content-preexists'] ?? seenHeaders['Reject-If-Content-Preexists'],
-    ).toBeUndefined();
-    expect(seenHeaders['trim-target-whitespace'] ?? seenHeaders['Trim-Target-Whitespace']).toBe(
-      'true',
-    );
+    expect(seenHeaders).not.toHaveProperty('reject-if-content-preexists');
+    expect(seenHeaders['trim-target-whitespace']).toBe('true');
     expect(seenBody).toBe('note prefix');
     expect(out).toEqual({
       path: 'Note.md',
@@ -156,8 +160,14 @@ describe('obsidian_patch_note', () => {
       currentSizeInBytes: 47,
     });
     const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
-    expect(text).toContain('Log::Today');
-    expect(text).toContain(operation);
+    expect(text).toBe(
+      [
+        '**Patched Note.md**',
+        `*Operation:* ${operation}`,
+        '*Section:* heading → Log::Today',
+        '*Size:* 40 → 47 bytes',
+      ].join('\n'),
+    );
   });
 
   it('surfaces an ambiguous bare leaf as a Conflict naming every candidate', async () => {
@@ -223,7 +233,8 @@ describe('obsidian_patch_note', () => {
     expect(text).toContain('reason ambiguous_section');
   });
 
-  it('classifies a 404 as NotFound (pre-PATCH HEAD throws note_missing)', async () => {
+  it('throws note_missing (NotFound) from the pre-PATCH HEAD, before any PATCH', async () => {
+    // No PATCH intercept — a write here would surface "No mock intercept".
     harness.current().pool.intercept({ path: '/vault/Missing.md', method: 'HEAD' }).reply(404, '');
 
     await expect(
@@ -236,7 +247,10 @@ describe('obsidian_patch_note', () => {
         }),
         createMockContext({ errors: obsidianPatchNote.errors }),
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'note_missing' },
+    });
   });
 
   /** Plugin v5.x speaks markdown-patch 2.0: a JSON instruction body with an array heading target. */

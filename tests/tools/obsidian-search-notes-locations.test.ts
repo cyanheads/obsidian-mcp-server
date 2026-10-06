@@ -350,6 +350,9 @@ describe('obsidian_search_notes / text locations — properties', () => {
   it.each([11, 12, 13, 14])('seed %i', async (seed) => {
     const rand = seededRandom(seed);
     const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)] as T;
+    /** Guards against a seed whose runs never reach the multi-span partition checks. */
+    let unchangedRuns = 0;
+    let mergedLocations = 0;
     for (let run = 0; run < 60; run++) {
       const notes: SimulatedNote[] = [0, 1].map((n) => {
         const parts: string[] = [];
@@ -370,6 +373,7 @@ describe('obsidian_search_notes / text locations — properties', () => {
       expect(merged.bytes, label).toBeLessThanOrEqual(before.bytes);
       if (distinct < 2) {
         expect(merged.result.hits, label).toEqual(before.result.hits);
+        if (before.result.hits.length > 0) unchangedRuns++;
         continue;
       }
       for (const hit of merged.result.hits) {
@@ -384,6 +388,7 @@ describe('obsidian_search_notes / text locations — properties', () => {
           while (i < spans.length && (spans[i]?.match.end ?? 0) < loc.match.end) i++;
           expect(spans[i]?.match.end, label).toBe(loc.match.end);
           const covered = spans.slice(first, i + 1);
+          if (covered.length > 1) mergedLocations++;
           const kinds = new Set(subjects.slice(first, i + 1).map((t) => t.subject));
           expect(kinds.size, label).toBe(1);
           const texts = covered.map((s) => sliceOf(s).toLowerCase());
@@ -399,5 +404,7 @@ describe('obsidian_search_notes / text locations — properties', () => {
         expect(i, label).toBe(spans.length);
       }
     }
+    expect(unchangedRuns).toBeGreaterThan(0);
+    expect(mergedLocations).toBeGreaterThan(0);
   });
 });

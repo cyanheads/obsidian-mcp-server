@@ -44,9 +44,13 @@ describe('obsidian_manage_frontmatter / get', () => {
       createMockContext({ errors: obsidianManageFrontmatter.errors }),
     );
 
-    if (out.result.operation !== 'get') throw new Error('expected get branch');
-    expect(out.result.exists).toBe(true);
-    expect(out.result.value).toBe(5);
+    expect(out.result).toEqual({
+      operation: 'get',
+      path: 'N.md',
+      key: 'priority',
+      exists: true,
+      value: 5,
+    });
   });
 
   it('reports exists=false when the key is absent', async () => {
@@ -63,9 +67,13 @@ describe('obsidian_manage_frontmatter / get', () => {
       }),
       createMockContext({ errors: obsidianManageFrontmatter.errors }),
     );
-    if (out.result.operation !== 'get') throw new Error('expected get branch');
-    expect(out.result.exists).toBe(false);
-    expect(out.result.value).toBeNull();
+    expect(out.result).toEqual({
+      operation: 'get',
+      path: 'N.md',
+      key: 'priority',
+      exists: false,
+      value: null,
+    });
   });
 });
 
@@ -107,11 +115,27 @@ describe('obsidian_manage_frontmatter / set', () => {
       createTargetIfMissing: true,
       rejectIfContentPreexists: true,
     });
-    expect(res.structuredContent).toMatchObject({
-      result: { operation: 'set', path: 'N.md', key: 'tags', frontmatter: { tags: ['a'] } },
+    const after = '---\ntags:\n  - a\n---\nbody';
+    expect(res.structuredContent).toEqual({
+      result: {
+        operation: 'set',
+        path: 'N.md',
+        key: 'tags',
+        frontmatter: { tags: ['a'] },
+        previousSizeInBytes: 50,
+        currentSizeInBytes: Buffer.byteLength(after, 'utf8'),
+      },
     });
     const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
-    expect(text).toContain('tags');
+    expect(text).toBe(
+      [
+        '**Frontmatter set `tags` in N.md**',
+        `*Size:* 50 → ${Buffer.byteLength(after, 'utf8')} bytes`,
+        '',
+        '**Frontmatter (1 keys after change)**',
+        '- `tags`: `["a"]`',
+      ].join('\n'),
+    );
   });
 
   it('PATCHes the frontmatter field with JSON content type and refetches (plugin v4.x)', async () => {
@@ -206,7 +230,7 @@ describe('obsidian_manage_frontmatter / delete', () => {
     );
 
     expect(getCount).toBe(1);
-    expect(putBody).not.toContain('priority:');
+    expect(putBody).toBe(['---', 'author: casey', '---', '', 'body'].join('\n'));
     if (out.result.operation !== 'delete') throw new Error('expected delete branch');
     expect(out.result.frontmatter).toEqual({ author: 'casey' });
     expect(out.result.previousSizeInBytes).toBe(Buffer.byteLength(before, 'utf8'));

@@ -67,7 +67,7 @@ describe('a slash-terminated OBSIDIAN_BASE_URL reaches the wire un-doubled', () 
     expect(urls).toEqual(['https://gateway.test/obsidian/tags/']);
   });
 
-  it('derives the Omnisearch URL from the normalized host', async () => {
+  it('derives the Omnisearch URL from the host alone, forcing http on port 51361', async () => {
     const { service } = serviceFromEnv('https://obsidian.test/');
 
     expect(service.omnisearchUrl).toBe('http://obsidian.test:51361');

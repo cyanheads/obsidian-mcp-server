@@ -82,11 +82,9 @@ describe('deleteFrontmatterKey', () => {
     expect(deleteKey(input, 'title')).toBe(input);
   });
 
-  it('strips the entire frontmatter block when the last key is removed', () => {
+  it('strips the entire frontmatter block and its separator when the last key is removed', () => {
     const input = ['---', 'tags: [a]', '---', '', 'Body.'].join('\n');
-    const out = deleteKey(input, 'tags');
-    expect(out.startsWith('---')).toBe(false);
-    expect(out).toContain('Body.');
+    expect(deleteKey(input, 'tags')).toBe('Body.');
   });
 });
 
@@ -107,11 +105,11 @@ describe('reconcileTags / add', () => {
     expect(r.content).toBe(input);
   });
 
-  it('appends an inline #tag when location is "inline"', () => {
+  it('appends an inline #tag on its own line when location is "inline"', () => {
     const input = 'Line of body.\n';
     const r = reconcile(input, ['new'], 'add', 'inline');
     expect(r.applied).toEqual(['new']);
-    expect(r.content).toContain('#new');
+    expect(r.content).toBe('Line of body.\n#new\n');
   });
 
   it('skips an inline tag that already exists', () => {
@@ -129,15 +127,14 @@ describe('reconcileTags / add', () => {
     expect(r.applied.sort()).toEqual(['fresh', 'present']);
     expect(r.skipped).toEqual([]);
     expect(readFrontmatter(r.content).tags).toEqual(['present', 'fresh']);
-    expect(r.content).toContain('#present');
-    expect(r.content).toContain('#fresh');
+    expect(bodyOf(r.content)).toBe('Body without inline.\n#present #fresh\n');
   });
 
   it('does not consider tags inside fenced code blocks as present', () => {
     const input = '```\n#fake\n```\nBody';
     const r = reconcile(input, ['fake'], 'add', 'inline');
     expect(r.applied).toEqual(['fake']);
-    expect(r.content).toContain('#fake\n```'); // original code block intact
+    expect(r.content).toBe('```\n#fake\n```\nBody\n#fake\n');
   });
 });
 
@@ -156,22 +153,11 @@ describe('reconcileTags / remove', () => {
     expect(r.skipped).toEqual(['z']);
   });
 
-  it('removes inline #tags when location is "inline"', () => {
-    const input = 'Mentions #drop and continues.';
-    const r = reconcile(input, ['drop'], 'remove', 'inline');
-    expect(r.applied).toEqual(['drop']);
-    expect(r.content).not.toContain('#drop');
-    expect(r.content).toContain('Mentions');
-  });
-
   it('leaves #tags inside fenced code blocks untouched', () => {
     const input = '```\n#keep\n```\nBody #keep here.';
     const r = reconcile(input, ['keep'], 'remove', 'inline');
     expect(r.applied).toEqual(['keep']);
-    // Inline outside the fence is gone:
-    expect(r.content.replace(/```[\s\S]*?```/, '<<FENCE>>')).not.toContain('#keep');
-    // The fenced version is preserved:
-    expect(r.content).toContain('```\n#keep\n```');
+    expect(r.content).toBe('```\n#keep\n```\nBody here.');
   });
 });
 
@@ -290,10 +276,13 @@ describe('listTagsFromContent', () => {
     expect(r.inline).toEqual(['shown']);
   });
 
-  it('tolerates missing/non-array frontmatter tags', () => {
-    const r = listTagsFromContent('body', { tags: undefined });
-    expect(r.frontmatter).toEqual([]);
-    expect(r.inline).toEqual([]);
+  it.each([
+    ['missing', undefined, []],
+    ['a number', 42, []],
+    ['a comma- and space-separated string', 'alpha, beta #gamma', ['alpha', 'beta', 'gamma']],
+    ['an array holding non-strings', ['a', 1, '#b', { x: 1 }, '  '], ['a', 'b']],
+  ])('normalizes a frontmatter tags value that is %s', (_label, tags, expected) => {
+    expect(listTagsFromContent('body', { tags }).frontmatter).toEqual(expected);
   });
 });
 
@@ -458,12 +447,14 @@ describe('frontmatterParseError', () => {
     expect(frontmatterParseError('title: MCP Review: v2')).toBeDefined();
   });
 
-  it('reports an unresolvable alias left by a rewritten list marker', () => {
+  it('reports an empty alias left by a rewritten list marker', () => {
     expect(frontmatterParseError('tags:\n  * alpha')).toBeDefined();
   });
 
   it('reports YAML that parses to something other than a mapping', () => {
-    expect(frontmatterParseError('- a\n- b')).toBeDefined();
+    expect(frontmatterParseError('- a\n- b')).toBe(
+      'Frontmatter must be a YAML mapping of properties.',
+    );
   });
 
   it('reports a truncated scalar left by a stray quote', () => {
@@ -559,9 +550,9 @@ describe('reconcileTags / remove inline — byte fidelity', () => {
   });
 
   it('drops the space that preceded the tag rather than the one that followed', () => {
-    expect(reconcile('Mentions #drop and continues.', ['drop'], 'remove', 'inline').content).toBe(
-      'Mentions and continues.',
-    );
+    const r = reconcile('Mentions #drop and continues.', ['drop'], 'remove', 'inline');
+    expect(r.applied).toEqual(['drop']);
+    expect(r.content).toBe('Mentions and continues.');
   });
 
   it('keeps a hard line break that followed the removed tag', () => {
@@ -1134,7 +1125,9 @@ describe('inline tags — boundary, HTML comments, and math (Obsidian readback)'
   });
 
   it.each(ROWS)('remove reaches exactly the tags Obsidian reads: %s', (_label, input, expected) => {
-    for (const tag of probeTags(input)) {
+    const tags = new Set([...expected, ...probeTags(input)]);
+    expect(tags.size, 'a row needs at least one #xx probe').toBeGreaterThan(0);
+    for (const tag of tags) {
       const r = reconcile(input, [tag], 'remove', 'inline');
       if (expected.includes(tag)) {
         expect(r.applied, tag).toEqual([tag]);
@@ -1313,7 +1306,9 @@ describe('mutation helpers refuse a block they cannot re-emit', () => {
 
   it('still edits a block that parses, alias and all, when nothing is orphaned', () => {
     const anchored = '---\nbase: &base\n  kept: yes\nconsumer: *base\nspare: drop-me\n---\nbody';
-    expect(deleteKey(anchored, 'spare')).not.toContain('spare');
+    expect(deleteKey(anchored, 'spare')).toBe(
+      '---\nbase: &base\n  kept: yes\nconsumer: *base\n---\nbody',
+    );
   });
 
   it('frontmatterParseError reports an alias the emitter cannot resolve', () => {
@@ -1343,21 +1338,38 @@ describe('reconcileTags / frontmatter — a tags sequence is edited in place', (
     const r = reconcile(MIXED, ['added'], 'add', 'frontmatter');
 
     expect(r.applied).toEqual(['added']);
-    expect(r.content).toContain('- keep # trailing comment');
-    expect(r.content).toContain("- 'quoted'");
-    expect(r.content).toContain('- 42');
-    expect(r.content).toContain('- { meta: preserved }');
-    expect(r.content).toContain('- added');
-    expect(r.content).toContain('other: yes');
+    expect(r.content).toBe(
+      [
+        '---',
+        'tags:',
+        '  - keep # trailing comment',
+        "  - 'quoted'",
+        '  - 42',
+        '  - { meta: preserved }',
+        '  - added',
+        'other: yes',
+        '---',
+        'body',
+      ].join('\n'),
+    );
   });
 
   it('removes only the matching string item', () => {
     const r = reconcile(MIXED, ['keep'], 'remove', 'frontmatter');
 
     expect(r.applied).toEqual(['keep']);
-    expect(r.content).not.toContain('- keep');
-    expect(r.content).toContain('- 42');
-    expect(r.content).toContain('- { meta: preserved }');
+    expect(r.content).toBe(
+      [
+        '---',
+        'tags:',
+        "  - 'quoted'",
+        '  - 42',
+        '  - { meta: preserved }',
+        'other: yes',
+        '---',
+        'body',
+      ].join('\n'),
+    );
   });
 
   it('keeps the key when a removal leaves only entries that are not string tags', () => {
@@ -1368,8 +1380,7 @@ describe('reconcileTags / frontmatter — a tags sequence is edited in place', (
       'frontmatter',
     );
 
-    expect(r.content).toContain('tags:');
-    expect(r.content).toContain('- 42');
+    expect(r.content).toBe('---\ntags:\n  - 42\n---\nbody');
   });
 
   it('drops the key when the removal empties the sequence', () => {
@@ -1380,8 +1391,7 @@ describe('reconcileTags / frontmatter — a tags sequence is edited in place', (
       'frontmatter',
     );
 
-    expect(r.content).not.toContain('tags:');
-    expect(r.content).toContain('keep: yes');
+    expect(r.content).toBe('---\nkeep: yes\n---\nbody');
   });
 
   it('reports a tag already in the sequence as skipped and writes nothing new', () => {
@@ -1502,7 +1512,9 @@ function describeReadback(title: string, rows: Readback): void {
       'remove reaches exactly the tags Obsidian reads: %s',
       (_label, input, expected) => {
         const probes = [...input.matchAll(/#([a-z]{2})(?![a-z])/g)].map((m) => m[1] ?? '');
-        for (const tag of new Set([...expected, ...probes])) {
+        const tags = new Set([...expected, ...probes]);
+        expect(tags.size, 'a row needs at least one #xx probe').toBeGreaterThan(0);
+        for (const tag of tags) {
           const r = reconcile(input, [tag], 'remove', 'inline');
           if (expected.includes(tag)) {
             expect(r.applied, tag).toEqual([tag]);
@@ -1544,7 +1556,7 @@ describe('inline tags — issue #140 shapes (Obsidian readback)', () => {
     ['bold link text', '[**#bk**](u)', ['bk']],
   ]);
   describeReadback('link syntax, already read as Obsidian does', [
-    ['a URL fragment in a destination', '[x](https://example.dev/#frag)', []],
+    ['a URL fragment in a destination', '[x](https://example.dev/#fr)', []],
     ['a hash in an angle-bracketed destination', '[x](<a #tb.md>)', []],
     ['a hash in a link title', '[x](u "t #tc")', []],
     ['a hash in a reference label', '[x][#td]\n\n[#td]: u', []],

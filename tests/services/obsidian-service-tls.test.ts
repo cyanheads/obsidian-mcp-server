@@ -198,11 +198,17 @@ describe('ObsidianService TLS relaxation', () => {
 
     await exerciseEveryCallSite(service, ctx);
 
+    // The two Local REST API calls, then the two Omnisearch calls.
+    expect(calls.map((call) => new URL(call.url).protocol)).toEqual([
+      'https:',
+      'https:',
+      'http:',
+      'http:',
+    ]);
     for (const call of calls) {
       if (call.url.startsWith('https:')) expect(call.init).toMatchObject(relaxed);
       else expect(call.init).not.toHaveProperty('tls');
     }
-    expect(calls.some((call) => call.url.startsWith('http://'))).toBe(true);
   });
 
   /**
@@ -379,16 +385,15 @@ describe('ObsidianService certificate rejection (issue #133)', () => {
     expect(calls).toHaveLength(2);
   });
 
-  it('leaves a refused connection unclassified as a certificate failure, and retried', async () => {
+  it('classifies a refused connection as unreachable, not a certificate failure, and retries it', async () => {
     const { calls, fetchImpl } = sequencedFetch(
       nodeFetchRejection('ECONNREFUSED', `connect ECONNREFUSED 127.0.0.1:27124`),
     );
 
-    const err = await rejectionOf<{ data?: { reason?: string } }>(
-      verifyingService(fetchImpl).listTags(createMockContext()),
-    );
+    const err = await rejectionOf(verifyingService(fetchImpl).listTags(createMockContext()));
 
-    expect(err.data?.reason).not.toBe('certificate_rejected');
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toMatchObject({ reason: 'obsidian_unreachable' });
     expect(calls).toHaveLength(4);
   });
 

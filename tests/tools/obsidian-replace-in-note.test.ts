@@ -520,20 +520,28 @@ describe('obsidian_replace_in_note / format()', () => {
     if (!render) throw new Error('obsidian_replace_in_note declares no format()');
     const text = render({
       path: 'N.md',
-      totalReplacements: 3,
-      perReplacement: [{ search: 'draft', count: 3, bodyCount: 2, frontmatterCount: 1 }],
+      totalReplacements: 4,
+      perReplacement: [
+        { search: 'draft', count: 3, bodyCount: 2, frontmatterCount: 1 },
+        { search: 'todo', count: 1, bodyCount: 1, frontmatterCount: 0 },
+      ],
       previousSizeInBytes: 10,
       currentSizeInBytes: 12,
     })
       .map((c) => (c.type === 'text' ? c.text : ''))
       .join('\n');
 
-    expect(text).toContain('N.md');
-    expect(text).toContain('3');
-    expect(text).toContain('body 2');
-    expect(text).toContain('frontmatter 1');
-    expect(text).toContain('10');
-    expect(text).toContain('12');
+    expect(text).toBe(
+      [
+        '**Replaced in N.md**',
+        '*Total replacements:* 4',
+        '*Size:* 10 → 12 bytes',
+        '',
+        '**Per replacement**',
+        '- `draft` → 3 matches (body 2, frontmatter 1)',
+        '- `todo` → 1 match (body 1, frontmatter 0)',
+      ].join('\n'),
+    );
   });
 });
 

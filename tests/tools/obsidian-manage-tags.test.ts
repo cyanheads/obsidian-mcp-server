@@ -52,18 +52,21 @@ describe('obsidian_manage_tags / list', () => {
     if (out.result.operation !== 'list') throw new Error('expected list branch');
     expect(out.result.tags.frontmatter).toEqual(['foo', 'baz']);
     expect(out.result.tags.inline).toEqual(['foo', 'bar']);
-    expect(out.result.tags.all.sort()).toEqual(['bar', 'baz', 'foo']);
+    // Frontmatter order first, then inline tags not already seen.
+    expect(out.result.tags.all).toEqual(['foo', 'baz', 'bar']);
   });
 });
 
 describe('obsidian_manage_tags / add', () => {
   it('writes back when applied is non-empty and reports the post-state tag set', async () => {
+    const before = ['---', 'tags:', '  - existing', '---', 'Body without inline tags.'].join('\n');
+    const after = ['---', 'tags:', '  - existing', '  - fresh', '---', 'body'].join('\n');
     let putCalls = 0;
     let putBody = '';
     harness
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(200, noteJson('Body without inline tags.', { tags: ['existing'] }, ['existing']), {
+      .reply(200, noteJson(before, { tags: ['existing'] }, ['existing']), {
         headers: { 'content-type': 'application/json' },
       });
     harness
@@ -77,11 +80,9 @@ describe('obsidian_manage_tags / add', () => {
     harness
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
-      .reply(
-        200,
-        noteJson(putBody || 'body', { tags: ['existing', 'fresh'] }, ['existing', 'fresh']),
-        { headers: { 'content-type': 'application/json' } },
-      );
+      .reply(200, noteJson(after, { tags: ['existing', 'fresh'] }, ['existing', 'fresh']), {
+        headers: { 'content-type': 'application/json' },
+      });
 
     const out = await obsidianManageTags.handler(
       obsidianManageTags.input.parse({
@@ -94,15 +95,22 @@ describe('obsidian_manage_tags / add', () => {
     );
 
     expect(putCalls).toBe(1);
-    if (out.result.operation !== 'add') throw new Error('expected add branch');
-    expect(out.result.applied).toEqual(['fresh']);
-    expect(out.result.tags).toEqual(['existing', 'fresh']);
-    expect(out.result.previousSizeInBytes).toBe(
-      Buffer.byteLength('Body without inline tags.', 'utf8'),
+    expect(putBody).toBe(
+      ['---', 'tags:', '  - existing', '  - fresh', '---', 'Body without inline tags.'].join('\n'),
     );
-    /** Post-write GET already happens for the tag list echo — currentSize derives
-     * from Buffer.byteLength of that upstream-returned body (mock returns 'body'). */
-    expect(out.result.currentSizeInBytes).toBe(4);
+    /**
+     * `tags` and `currentSizeInBytes` come from the post-write GET, whose body
+     * deliberately differs from what was written.
+     */
+    expect(out.result).toEqual({
+      operation: 'add',
+      path: 'N.md',
+      applied: ['fresh'],
+      skipped: [],
+      tags: ['existing', 'fresh'],
+      previousSizeInBytes: Buffer.byteLength(before, 'utf8'),
+      currentSizeInBytes: Buffer.byteLength(after, 'utf8'),
+    });
   });
 
   it('skips both the write and the post-fetch when no tag changed', async () => {
@@ -147,7 +155,10 @@ describe('obsidian_manage_tags / add', () => {
 });
 
 describe('obsidian_manage_tags / remove', () => {
-  it('throws tags_required (ValidationError) when tags is empty/missing', async () => {
+  it.each([
+    ['omitted', undefined],
+    ['empty', []],
+  ])('throws tags_required (ValidationError) when tags is %s', async (_label, tags) => {
     harness
       .current()
       .pool.intercept({ path: '/vault/N.md', method: 'GET' })
@@ -160,6 +171,7 @@ describe('obsidian_manage_tags / remove', () => {
         obsidianManageTags.input.parse({
           target: { type: 'path', path: 'N.md' },
           operation: 'remove',
+          tags,
         }),
         createMockContext({ errors: obsidianManageTags.errors }),
       ),
@@ -219,21 +231,15 @@ describe('obsidian_manage_tags / a mixed-type tags sequence keeps its non-string
   }
 
   it('appends without rewriting the entries it does not recognize', async () => {
-    const putBody = await run('add', ['added']);
-
-    expect(putBody).toContain('- 42');
-    expect(putBody).toContain('{ meta: preserved }');
-    expect(putBody).toContain('- added');
-    expect(putBody).toContain('# a trailing comment');
-    expect(putBody).toContain('other: yes');
+    expect(await run('add', ['added'])).toBe(
+      MIXED.replace('  - { meta: preserved }', '  - { meta: preserved }\n  - added'),
+    );
   });
 
   it('removes only the matching string item', async () => {
-    const putBody = await run('remove', ['keep']);
-
-    expect(putBody).not.toContain('- keep');
-    expect(putBody).toContain('- 42');
-    expect(putBody).toContain('{ meta: preserved }');
+    expect(await run('remove', ['keep'])).toBe(
+      MIXED.replace('  - keep # a trailing comment\n', ''),
+    );
   });
 });
 
@@ -417,8 +423,15 @@ describe('obsidian_manage_tags / remove inline — byte fidelity through the han
     const text = render(out)
       .map((c) => (c.type === 'text' ? c.text : ''))
       .join('\n');
-    expect(text).toContain('wip');
-    expect(text).toContain('N.md');
+    expect(text).toBe(
+      [
+        '**Removed tags from N.md** (operation: remove)',
+        `*Size:* ${Buffer.byteLength(RICH, 'utf8')} → ${Buffer.byteLength(EXPECTED, 'utf8')} bytes`,
+        '*Applied (1):* `#wip`',
+        '*Skipped (0):* _(none)_',
+        '*All tags now (1):* `#keepme`',
+      ].join('\n'),
+    );
   });
 
   it('does not treat a #tag inside a frontmatter scalar as an inline tag', async () => {
