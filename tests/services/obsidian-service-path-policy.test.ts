@@ -7,16 +7,18 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { Headers } from 'undici';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
+import { obsidianGetNote } from '@/mcp-server/tools/definitions/obsidian-get-note.tool.js';
 import {
   type ObsidianFetch,
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { type MockResponse, makeTestConfig, mockResponse } from '../helpers.js';
+import { type MockResponse, makeTestConfig, mockResponse, rejectionOf } from '../helpers.js';
 
 let ctx: Context;
 let upstreamHits = 0;
@@ -75,13 +77,12 @@ describe('write tools — assertWritable before upstream', () => {
 
   it('READ_ONLY=true short-circuits writeNote with read_only_mode subreason', async () => {
     const svc = buildService({ readOnly: true });
-    let caughtSubreason: string | undefined;
-    try {
-      await svc.writeNote(ctx, { type: 'path', path: 'projects/foo.md' }, 'x');
-    } catch (err) {
-      caughtSubreason = (err as { data?: { subreason?: string } }).data?.subreason;
-    }
-    expect(caughtSubreason).toBe('read_only_mode');
+    await expect(
+      svc.writeNote(ctx, { type: 'path', path: 'projects/foo.md' }, 'x'),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+      data: { reason: 'path_forbidden', subreason: 'read_only_mode' },
+    });
     expect(upstreamHits).toBe(0);
   });
 });
@@ -120,8 +121,9 @@ describe('read tools — assertReadable before upstream', () => {
     const svc = buildService({ readPaths: ['projects'] }, replies);
     const out = await svc.listFiles(ctx);
     expect(out.files).toContain('projects/');
-    /** Children aren't filtered at the service level — caller-side reads are gated separately. */
-    expect(out.files).toContain('secret/');
+    /** Entries are filtered at the service level, so every consumer of a listing inherits the scope. */
+    expect(out.files).not.toContain('secret/');
+    expect(out.files).not.toContain('note.md');
   });
 
   it('listFiles blocks a non-root dir outside readPaths', async () => {
@@ -130,6 +132,242 @@ describe('read tools — assertReadable before upstream', () => {
       code: JsonRpcErrorCode.Forbidden,
     });
     expect(upstreamHits).toBe(0);
+  });
+});
+
+/** A nested scope `projects/work`: its parent folder is the path to it, nothing more. */
+describe('listFiles — folders on the way to the read scope', () => {
+  const listing = (files: string[]) => () =>
+    mockResponse(JSON.stringify({ files }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  it('lists an ancestor folder, returning only the scoped child', async () => {
+    const replies = new Map([['/vault/Projects/', listing(['Work/', 'Other/', 'readme.md'])]]);
+    const svc = buildService({ readPaths: ['projects/work'] }, replies);
+    expect(await svc.listFiles(ctx, 'Projects')).toEqual({ files: ['Work/'] });
+    expect(upstreamHits).toBe(1);
+  });
+
+  it('refuses a sibling of the scope and a string-prefix folder before any upstream call', async () => {
+    const svc = buildService({ readPaths: ['projects/work'] });
+    for (const dir of ['Projects/Other', 'Proj']) {
+      await expect(svc.listFiles(ctx, dir)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Forbidden,
+        data: { reason: 'path_forbidden', subreason: 'outside_read_paths' },
+      });
+    }
+    expect(upstreamHits).toBe(0);
+  });
+
+  it('leaves listings untouched when OBSIDIAN_READ_PATHS is unset', async () => {
+    const files = ['todo.md', 'Private/', 'Projects/'];
+    const svc = buildService(
+      { writePaths: ['projects/work'] },
+      new Map([['/vault/', listing(files)]]),
+    );
+    expect(await svc.listFiles(ctx)).toEqual({ files });
+  });
+});
+
+/**
+ * The case-fallback probe in `obsidian_get_note` lists the requested note's
+ * folder through `listFiles`. Under a file scope that folder is an ancestor,
+ * so its listing must already be filtered — otherwise the probe would offer
+ * out-of-scope siblings as "did you mean" suggestions.
+ */
+describe('case-fallback probe inherits the listFiles filter', () => {
+  const SIBLINGS = ['plan.txt', 'salary.md', 'Sub/'];
+
+  /** `Work/` holds `SIBLINGS`, plus `plan.md` when `planExists`. Scope: `work/plan.md`. */
+  function probeService(planExists: boolean) {
+    const paths: string[] = [];
+    const fetchImpl: ObsidianFetch = async (url) => {
+      const path = decodeURIComponent(new URL(url).pathname);
+      paths.push(path);
+      if (path === '/vault/Work/') {
+        const files = planExists ? ['plan.md', ...SIBLINGS] : SIBLINGS;
+        return mockResponse(JSON.stringify({ files }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (planExists && path === '/vault/Work/plan.md') {
+        return mockResponse('# Plan', {
+          status: 200,
+          headers: { 'content-type': 'text/markdown' },
+        });
+      }
+      return mockResponse(JSON.stringify({ message: 'Not Found', errorCode: 40400 }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    const svc = new ObsidianService(makeTestConfig({ readPaths: ['work/plan.md'] }), fetchImpl);
+    setObsidianService(svc);
+    return paths;
+  }
+
+  const getNote = async (path: string) =>
+    await obsidianGetNote.handler(
+      obsidianGetNote.input.parse({ target: { type: 'path', path }, format: 'content' }),
+      createMockContext({ errors: obsidianGetNote.errors }),
+    );
+
+  it('resolves a miscased in-scope note through the ancestor listing', async () => {
+    const paths = probeService(true);
+    const out = await getNote('Work/PLAN.md');
+    expect(JSON.stringify(out)).toContain('# Plan');
+    expect(paths).toEqual(['/vault/Work/PLAN.md', '/vault/Work/', '/vault/Work/plan.md']);
+  });
+
+  it('suggests no out-of-scope sibling for a missing in-scope note', async () => {
+    const paths = probeService(false);
+    const err = await rejectionOf<McpError>(getNote('Work/plan.md'));
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.message).not.toMatch(/Did you mean/);
+    expect(JSON.stringify(err.data ?? {})).not.toMatch(/plan\.txt|salary|Sub/);
+    // The probe did list the folder — the filter, not a refused listing, kept the siblings out.
+    expect(paths).toEqual(['/vault/Work/plan.md', '/vault/Work/']);
+  });
+});
+
+/**
+ * Per-note tag lists as the plugin's JsonLogic `{"var": "tags"}` returns them:
+ * deduplicated within a note, no `#`, no parent expansion, untagged notes
+ * absent. `Work/` is the read scope, `Drafts/` a write-only scope.
+ */
+const TAGGED_NOTES = [
+  { filename: 'Work/a.md', result: ['work/a', 'work/b', 'shared'] },
+  { filename: 'Work/b.md', result: ['shared', 'work/a'] },
+  { filename: 'Private/a.md', result: ['secret', 'shared', 'secret/deep'] },
+  { filename: 'todo.md', result: ['root-only'] },
+  { filename: 'Drafts/d.md', result: ['draft/idea'] },
+];
+
+const VAULT_TAGS = [
+  { name: 'work', count: 3 },
+  { name: 'work/a', count: 2 },
+  { name: 'work/b', count: 1 },
+  { name: 'shared', count: 3 },
+  { name: 'secret', count: 2 },
+  { name: 'secret/deep', count: 1 },
+  { name: 'root-only', count: 1 },
+  { name: 'draft', count: 1 },
+  { name: 'draft/idea', count: 1 },
+];
+
+interface RecordedCall {
+  body: string | undefined;
+  contentType: string | undefined;
+  method: string;
+  path: string;
+}
+
+/** Serves `/tags/` and JsonLogic `/search/` from the fixtures above, recording every call. */
+function tagService(config: Partial<ServerConfig>) {
+  const calls: RecordedCall[] = [];
+  const fetchImpl: ObsidianFetch = async (url, init) => {
+    const path = new URL(url).pathname;
+    const headers = new Headers(init.headers);
+    calls.push({
+      method: (init.method ?? 'GET').toUpperCase(),
+      path,
+      contentType: headers.get('content-type') ?? undefined,
+      body: init.body == null ? undefined : String(init.body),
+    });
+    const json = (body: unknown) =>
+      mockResponse(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    if (path === '/tags/') return json({ tags: VAULT_TAGS });
+    if (path === '/search/') return json(TAGGED_NOTES);
+    throw new Error(`No mock reply for ${path}`);
+  };
+  return { svc: new ObsidianService(makeTestConfig(config), fetchImpl), calls };
+}
+
+describe('listTags — unscoped reads keep the single /tags/ call', () => {
+  it.each([
+    ['no policy', {}],
+    ['write paths only', { writePaths: ['drafts'] }],
+    ['read-only', { readOnly: true }],
+    ['read-only with write paths', { readOnly: true, writePaths: ['drafts'] }],
+  ] as Array<[string, Partial<ServerConfig>]>)(
+    '%s → one GET /tags/, vault-wide occurrence counts',
+    async (_label, config) => {
+      const { svc, calls } = tagService(config);
+      expect(await svc.listTags(ctx)).toEqual(VAULT_TAGS);
+      expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(['GET /tags/']);
+    },
+  );
+});
+
+describe('listTags — OBSIDIAN_READ_PATHS scopes the listing to readable notes', () => {
+  it('makes one JsonLogic POST /search/ for the tags var and no GET /tags/', async () => {
+    const { svc, calls } = tagService({ readPaths: ['work'] });
+    await svc.listTags(ctx);
+    expect(calls).toEqual([
+      {
+        method: 'POST',
+        path: '/search/',
+        contentType: 'application/vnd.olrapi.jsonlogic+json',
+        body: JSON.stringify({ var: 'tags' }),
+      },
+    ]);
+  });
+
+  it('lists only tags carried by readable notes, counting notes with parents expanded once per note', async () => {
+    const { svc } = tagService({ readPaths: ['work'] });
+    expect(await svc.listTags(ctx)).toEqual([
+      // Work/a.md carries work/a and work/b — it adds 1 to `work`, not 2.
+      { name: 'work', count: 2 },
+      { name: 'work/a', count: 2 },
+      { name: 'work/b', count: 1 },
+      // Private/a.md also carries `shared`; only the two readable carriers count.
+      { name: 'shared', count: 2 },
+    ]);
+  });
+
+  it('counts a write-path-only note as readable, and drops it under OBSIDIAN_READ_ONLY', async () => {
+    const writable = await tagService({ readPaths: ['work'], writePaths: ['drafts'] }).svc.listTags(
+      ctx,
+    );
+    expect(writable).toContainEqual({ name: 'draft', count: 1 });
+    expect(writable).toContainEqual({ name: 'draft/idea', count: 1 });
+
+    const readOnly = await tagService({
+      readPaths: ['work'],
+      writePaths: ['drafts'],
+      readOnly: true,
+    }).svc.listTags(ctx);
+    expect(readOnly.map((t) => t.name)).toEqual(['work', 'work/a', 'work/b', 'shared']);
+  });
+
+  it('matches the read scope only at a segment boundary, returning no tags when no note is readable', async () => {
+    // `wor` is a string prefix of `Work/` but not a folder on the way to it.
+    expect(await tagService({ readPaths: ['wor'] }).svc.listTags(ctx)).toEqual([]);
+  });
+
+  it('expands every level of a deep hierarchical tag once per note', async () => {
+    const fetchImpl: ObsidianFetch = async () =>
+      mockResponse(
+        JSON.stringify([
+          { filename: 'Work/x.md', result: ['a/b/c/d', 'a/b/e'] },
+          { filename: 'Work/y.md', result: ['a/b/c'] },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), fetchImpl);
+    expect(await svc.listTags(ctx)).toEqual([
+      { name: 'a', count: 2 },
+      { name: 'a/b', count: 2 },
+      { name: 'a/b/c', count: 2 },
+      { name: 'a/b/c/d', count: 1 },
+      { name: 'a/b/e', count: 1 },
+    ]);
   });
 });
 

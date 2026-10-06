@@ -31,6 +31,7 @@ import {
   patchFormatFor,
   type RawDocumentMapV2,
   relativeHeadingLevels,
+  v1HeadingBody,
   v1PatchHeaders,
   v2Instruction,
   type Within,
@@ -452,13 +453,21 @@ export class ObsidianService {
     const safe = await this.#gateAsWrite(ctx, target);
     const url = this.#targetToPath(safe);
     const format = await this.#wireFormat(ctx, safe, instruction);
-    const resolvedTarget = await this.#resolveHeadingTarget(ctx, safe, instruction, format);
+    const { target: resolvedTarget, note } = await this.#resolveHeadingTarget(
+      ctx,
+      safe,
+      instruction,
+      format,
+    );
     const resolved = { ...instruction, target: resolvedTarget };
     if (format === '1') {
       await this.#request(ctx, url, {
         method: 'PATCH',
         headers: v1PatchHeaders(resolved),
-        body: content,
+        body:
+          note === undefined || resolved.contentType === 'json'
+            ? content
+            : v1HeadingBody(resolved, content, note),
       });
       return resolvedTarget;
     }
@@ -538,19 +547,33 @@ export class ObsidianService {
       if (normalized) url = `/vault/${encodeVaultPath(normalized)}/`;
     }
     /**
-     * Gate the directory itself when it's non-empty — root listings always
-     * pass so users can navigate into their scope. Children aren't filtered
-     * here; the per-file read gate on `getNoteContent` etc. catches access to
-     * out-of-scope individual notes.
+     * The root and folders on the way to the read scope list so a nested scope
+     * can be browsed to; any other out-of-scope folder is refused before the
+     * upstream call. Entries are filtered here rather than in callers, so every
+     * consumer of a listing — the `obsidian_list_notes` walk and the
+     * case-fallback probe alike — sees only readable entries and ancestors.
      */
     if (normalized) {
-      this.#policy.assertReadable(normalized);
+      this.#policy.assertListable(normalized);
     }
     const res = await this.#request(ctx, url, { method: 'GET', listRead: true });
-    return (await res.json()) as RawFileListing;
+    const listing = (await res.json()) as RawFileListing;
+    if (!this.#policy.restrictsReads) return listing;
+    return { files: this.#policy.filterListing(normalized, listing.files) };
   }
 
+  /**
+   * Vault tags with usage counts, hierarchical parents included. Unscoped, the
+   * plugin's `/tags/` with its occurrence counts. That payload carries no
+   * per-note attribution, so under OBSIDIAN_READ_PATHS the tags are collected
+   * per note with one JsonLogic search instead, kept to readable notes, and
+   * each one counts the readable notes carrying it or a tag nested under it.
+   */
   async listTags(ctx: Context): Promise<ObsidianTag[]> {
+    if (this.#policy.restrictsReads) {
+      const notes = await this.searchJsonLogic(ctx, { var: 'tags' });
+      return countTagsPerNote(this.#policy.filterReadable(notes));
+    }
     const res = await this.#request(ctx, '/tags/', { method: 'GET' });
     const body = (await res.json()) as RawTagsListing;
     return body.tags ?? [];
@@ -976,22 +999,24 @@ export class ObsidianService {
    * on the last repeat while a section read returns the first. A write to a
    * repeated path is rejected as ambiguous. The count comes from the plugin's
    * own parse (`#headingIndex`) wherever the plugin serves one, so the map the
-   * PATCH resolves against is also the one that counts its repeats.
+   * PATCH resolves against is also the one that counts its repeats. On 1.x the
+   * note read for that count comes back as `note`, for `v1HeadingBody`.
    */
   async #resolveHeadingTarget(
     ctx: Context,
     target: NoteTarget,
     instruction: PatchInstruction,
     format: PatchFormat,
-  ): Promise<string> {
-    if (instruction.targetType !== 'heading') return instruction.target;
-    const { headings, occurrences } = await this.#headingIndex(ctx, target, format);
+  ): Promise<{ note: string | undefined; target: string }> {
+    if (instruction.targetType !== 'heading')
+      return { target: instruction.target, note: undefined };
+    const { headings, occurrences, note } = await this.#headingIndex(ctx, target, format);
     const resolved = instruction.target.includes(HEADING_DELIMITER)
       ? instruction.target
       : this.#expandHeadingLeaf(target, instruction.target, headings);
 
     const repeats = occurrences.filter((p) => p === resolved);
-    if (repeats.length <= 1) return resolved;
+    if (repeats.length <= 1) return { target: resolved, note };
 
     const display = displayPath(this.#targetToPath(target));
     const named =
@@ -1021,7 +1046,7 @@ export class ObsidianService {
    * top-level heading tokens. Plugin v4.x serves only the 1.x array, which
    * cannot count repeats, so there the note body is fetched and scanned
    * locally (`listHeadingPaths`), which finds headings with the same `marked`
-   * lexing the map does.
+   * lexing the map does. That note text comes back as `note`.
    *
    * Both lists run in note order, as `#rawGetDocumentMap` explains, so the
    * `candidates` an ambiguity error names, and the first one its hint offers,
@@ -1031,13 +1056,13 @@ export class ObsidianService {
     ctx: Context,
     target: NoteTarget,
     format: PatchFormat,
-  ): Promise<{ headings: string[]; occurrences: string[] }> {
+  ): Promise<{ headings: string[]; note?: string; occurrences: string[] }> {
     const url = this.#targetToPath(target);
     if (format === '1') {
       const map = await this.#fetchDocumentMap<DocumentMap>(ctx, url, format);
       const { content } = await this.#rawGetNoteJson(ctx, target);
       const occurrences = listHeadingPaths(content);
-      return { headings: inNoteOrder(map.headings, occurrences), occurrences };
+      return { headings: inNoteOrder(map.headings, occurrences), note: content, occurrences };
     }
     const map = await this.#fetchDocumentMap<RawDocumentMapV2>(ctx, url, format);
     const flat = flattenHeadingTree(map.headings);
@@ -1579,6 +1604,30 @@ export class ObsidianService {
       return '';
     }
   }
+}
+
+/**
+ * Count, per tag, the notes carrying it or a tag nested under it. Each hit's
+ * `result` is the plugin's per-note tag list for `{"var": "tags"}` — strings,
+ * deduplicated, `#` stripped, not parent-expanded, untagged notes omitted — so
+ * one note carrying `work/a` and `work/b` adds 1 to `work`. Tags come back in
+ * order of first appearance.
+ */
+function countTagsPerNote(notes: readonly StructuredSearchHit[]): ObsidianTag[] {
+  const counts = new Map<string, number>();
+  for (const { result } of notes) {
+    const noteTags = new Set<string>();
+    for (const tag of result as string[]) {
+      const parts = tag.split('/');
+      for (let depth = 1; depth <= parts.length; depth++) {
+        noteTags.add(parts.slice(0, depth).join('/'));
+      }
+    }
+    for (const name of noteTags) {
+      if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+  }
+  return Array.from(counts, ([name, count]) => ({ name, count }));
 }
 
 /**

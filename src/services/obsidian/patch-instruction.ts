@@ -9,7 +9,7 @@
  */
 
 import { validationError } from '@cyanheads/mcp-ts-core/errors';
-import type { AtxHeadingFragment } from './section-extractor.js';
+import { type AtxHeadingFragment, v1HeadingSpan } from './section-extractor.js';
 import type { DocumentMap, PatchInstruction } from './types.js';
 
 /** A markdown-patch format, spelled as its `Markdown-Patch-Version` header value. */
@@ -67,6 +67,36 @@ export function v1PatchHeaders(p: PatchInstruction): Record<string, string> {
   if (!p.applyIfContentPreexists) headers['Reject-If-Content-Preexists'] = 'true';
   if (p.trimTargetWhitespace) headers['Trim-Target-Whitespace'] = 'true';
   return headers;
+}
+
+/**
+ * The body of a 1.x markdown heading write to `note`. The 1.x engine splices
+ * content in exactly as given, so content without a line break on a side runs
+ * into the line it meets there (`- three## B`). A line break is added after
+ * non-empty content that lacks one, and before content that lacks one where
+ * the note text the engine splices after does not end in one: an append to a
+ * section that runs to the end of a note with no final line break, any write
+ * to an empty section whose heading is the note's unterminated last line, an
+ * append with `trimTargetWhitespace` (which trims that line break away), and a
+ * prepend or replace under a heading line with trailing whitespace (which the
+ * engine splices inside). Empty content stays empty — a `replace` with it
+ * clears the section. A section the note lacks is created on its own line,
+ * so content for it needs only the closing break.
+ *
+ * A CRLF note stays out of reach: the engine places offsets counted on its
+ * normalized line endings into the note's own bytes, so the write lands
+ * mid-line whatever the content.
+ */
+export function v1HeadingBody(p: PatchInstruction, content: string, note: string): string {
+  if (content === '') return content;
+  const span = v1HeadingSpan(note, p.target);
+  const atLineStart =
+    span === undefined ||
+    /^\r?\n/.test(content) ||
+    (p.operation === 'append'
+      ? !p.trimTargetWhitespace && note.slice(0, span.end).endsWith('\n')
+      : note.slice(0, span.start).endsWith('\n'));
+  return `${atLineStart ? '' : '\n'}${content}${content.endsWith('\n') ? '' : '\n'}`;
 }
 
 /** A markdown-patch 2.0 write instruction, as this server sends one. */

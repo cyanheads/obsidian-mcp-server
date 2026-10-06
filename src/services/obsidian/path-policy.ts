@@ -52,6 +52,14 @@ export class PathPolicy {
     return !this.#readOnly && this.#readPaths === undefined && this.#writePaths === undefined;
   }
 
+  /**
+   * True when OBSIDIAN_READ_PATHS gates reads. Write paths and read-only gate
+   * writes only, so they leave this false and vault-wide reads stay vault-wide.
+   */
+  get restrictsReads(): boolean {
+    return this.#readPaths !== undefined;
+  }
+
   /** Snapshot for startup-banner logging. */
   describe(): {
     readPaths: readonly string[] | 'full vault';
@@ -107,11 +115,46 @@ export class PathPolicy {
     throw this.#deny(path, 'write', 'outside_write_paths');
   }
 
-  /** Drop reads outside scope. Used by `obsidian_search_notes` to silently filter. */
+  /** Drop hits outside the read scope, silently. Used by `obsidian_search_notes` and `listTags`. */
   filterReadable<T extends { filename: string }>(hits: readonly T[]): T[] {
-    /** Reads unrestricted when readPaths is unset — `isReadable` short-circuits to true. */
-    if (this.#readPaths === undefined) return [...hits];
+    if (!this.restrictsReads) return [...hits];
     return hits.filter((h) => this.isReadable(h.filename));
+  }
+
+  /**
+   * True when `path` is a folder on the way to the read scope: some readable
+   * prefix sits strictly below it, matched at segment boundaries and
+   * case-insensitively. The vault root is an ancestor whenever reads are
+   * restricted. Ancestors are listable so a nested scope can be browsed to;
+   * their names leak nothing the scope itself (in `instructions` and every
+   * `path_forbidden`) doesn't already state.
+   */
+  isScopeAncestor(path: string): boolean {
+    if (!this.restrictsReads) return false;
+    const candidate = normalize(path);
+    if (candidate === '') return true;
+    return this.#scopeFor('read').some((prefix) => prefix.startsWith(`${candidate}/`));
+  }
+
+  /** Throws `path_forbidden` unless `dir` is readable or a folder on the way to the read scope. */
+  assertListable(dir: string): void {
+    if (this.isReadable(dir) || this.isScopeAncestor(dir)) return;
+    throw this.#deny(dir, 'read', 'outside_read_paths');
+  }
+
+  /**
+   * Keep the entries of a listing of `dir` a caller may see: readable entries,
+   * plus folders on the way to the read scope. Entries are names relative to
+   * `dir`, folders ending in `/`, as the Local REST API lists them.
+   */
+  filterListing(dir: string, entries: readonly string[]): string[] {
+    const base = normalize(dir);
+    return entries.filter((entry) => {
+      const isDir = entry.endsWith('/');
+      const name = isDir ? entry.slice(0, -1) : entry;
+      const path = base ? `${base}/${name}` : name;
+      return this.isReadable(path) || (isDir && this.isScopeAncestor(path));
+    });
   }
 
   #deny(path: string, op: PathOp, subreason: PathForbiddenSubreason): Error {

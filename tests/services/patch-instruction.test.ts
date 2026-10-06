@@ -16,6 +16,7 @@ import {
   isIntegerKey,
   patchFormatFor,
   relativeHeadingLevels,
+  v1HeadingBody,
   v1PatchHeaders,
   v2Instruction,
 } from '@/services/obsidian/patch-instruction.js';
@@ -90,13 +91,96 @@ describe('v1PatchHeaders', () => {
   });
 });
 
+describe('v1HeadingBody', () => {
+  const TIGHT = '# T\n## A\n- one\n- two\n## B\ntext\n';
+  const at = (target: string, extra: Partial<PatchInstruction> = {}) => write({ target, ...extra });
+
+  it.each([
+    ['append', '- x', '- x\n'],
+    ['prepend', '- x', '- x\n'],
+    ['replace', '- x', '- x\n'],
+    ['append', 'two lines\nhere', 'two lines\nhere\n'],
+  ] as const)('closes a %s of %j with one line break', (operation, content, body) => {
+    expect(v1HeadingBody(at('T::A', { operation }), content, TIGHT)).toBe(body);
+  });
+
+  it.each(['- x\n', '- x\r\n', '- x\n\n', '\n'])('adds no second line break to %j', (content) => {
+    expect(v1HeadingBody(at('T::A'), content, TIGHT)).toBe(content);
+  });
+
+  it.each(['append', 'prepend', 'replace'] as const)(
+    'keeps empty content empty on a %s',
+    (operation) => {
+      expect(v1HeadingBody(at('T::A', { operation }), '', TIGHT)).toBe('');
+      expect(v1HeadingBody(at('T::A', { operation }), '', '# T\n## A')).toBe('');
+    },
+  );
+
+  it.each([
+    [
+      'an append to a section ending a note with no final line break',
+      '# T\n## A\n- one',
+      'T::A',
+      {},
+    ],
+    [
+      'an append to a parent whose last child ends the unterminated note',
+      '# T\n## A\n- one',
+      'T',
+      {},
+    ],
+    ['an append with trimTargetWhitespace', TIGHT, 'T::A', { trimTargetWhitespace: true }],
+    ['a prepend under an unterminated last heading', '# T\n## A', 'T::A', { operation: 'prepend' }],
+    ['a replace under an unterminated last heading', '# T\n## A', 'T::A', { operation: 'replace' }],
+    [
+      'a prepend under a heading with trailing spaces',
+      '# T\n## A  \nx\n',
+      'T::A',
+      { operation: 'prepend' },
+    ],
+    [
+      'a prepend three levels down, below frontmatter',
+      '---\na: 1\n---\n# T\n## A\n### C',
+      'T::A::C',
+      { operation: 'prepend' },
+    ],
+  ] as const)('opens %s with a line break', (_l, note, target, extra) => {
+    expect(v1HeadingBody(at(target, extra), '- x', note)).toBe('\n- x\n');
+  });
+
+  it.each([
+    ['an append to a section closed by the next heading', TIGHT, 'T::A', {}],
+    ['an append to a section ending a terminated note', '# T\n## A\n- one\n', 'T::A', {}],
+    [
+      'a prepend with trimTargetWhitespace',
+      TIGHT,
+      'T::A',
+      { operation: 'prepend', trimTargetWhitespace: true },
+    ],
+    ['a prepend under a setext heading', 'T\n===\n\nA\n---\nx\n', 'T::A', { operation: 'prepend' }],
+    [
+      'a section the note lacks, created on its own line',
+      '# T\n## A',
+      'T::A::New',
+      { createTargetIfMissing: true },
+    ],
+  ] as const)('does not open %s with a line break', (_l, note, target, extra) => {
+    expect(v1HeadingBody(at(target, extra), '- x', note)).toBe('- x\n');
+  });
+
+  it('keeps an opening line break the content already has', () => {
+    expect(v1HeadingBody(at('T::A'), '\n- x', '# T\n## A\n- one')).toBe('\n- x\n');
+    expect(v1HeadingBody(at('T::A'), '\r\n- x', '# T\n## A\n- one')).toBe('\r\n- x\n');
+  });
+});
+
 describe('v2Instruction', () => {
   it('splits a heading path into its array target, untitled and nested segments kept', () => {
     expect(v2Instruction(write({ target: '::A::B::C' }), 'x').target).toEqual(['', 'A', 'B', 'C']);
   });
 
-  it('keeps a block or frontmatter target as a string', () => {
-    expect(v2Instruction(write({ targetType: 'block', target: 'a::b' }), 'x').target).toBe('a::b');
+  it.each(['block', 'frontmatter'] as const)('keeps a %s target as a string', (targetType) => {
+    expect(v2Instruction(write({ targetType, target: 'a::b' }), 'x').target).toBe('a::b');
   });
 
   it('parses a JSON frontmatter value and keeps a markdown one as text', () => {
@@ -109,10 +193,11 @@ describe('v2Instruction', () => {
     expect(v2Instruction(fm, '[1]').value).toBe('[1]');
   });
 
-  it('leaves a non-string JSON array for table rows as the caller wrote it', () => {
+  it('wraps an all-string array as one table row and leaves any other JSON array as written', () => {
     const rows = write({ targetType: 'block', target: 't', contentType: 'json' });
-    expect(v2Instruction(rows, '[["a","b"]]').value).toEqual([['a', 'b']]);
+    expect(v2Instruction(rows, '["a","b"]').value).toEqual([['a', 'b']]);
     expect(v2Instruction(rows, '[]').value).toEqual([[]]);
+    expect(v2Instruction(rows, '[["a","b"]]').value).toEqual([['a', 'b']]);
     expect(v2Instruction(rows, '[1,2]').value).toEqual([1, 2]);
   });
 

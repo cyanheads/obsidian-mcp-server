@@ -3,6 +3,10 @@
  * `format: 'section'`. Headings are found the way the plugin's markdown-patch
  * finds them for its document map and PATCH targeting, so a section read
  * covers the span a section write edits, sliced from the note's own bytes.
+ * `marked` is pinned exact to the 17.x line markdown-patch parses with:
+ * `marked` 18 reads some shapes differently (a `#tag` line over `===`, a tab
+ * before an ATX closing sequence, an empty `- ` item), which would split this
+ * scan from the plugin's document map.
  * @module services/obsidian/section-extractor
  */
 
@@ -175,6 +179,42 @@ export function sectionBody(content: string, path: string): SectionBody | undefi
       .map(({ token }) => token.type),
     content: content.slice(at(heading.end), at(closing?.start ?? normalized.length)),
     subsections: next !== undefined && next.level > heading.level,
+  };
+}
+
+/**
+ * The span markdown-patch 1.x edits for the heading at full path `path` (its
+ * first occurrence; the service refuses a write to a repeated path), as
+ * offsets into `content`, or `undefined` when the note has no such heading.
+ * `start` is where a prepend or replace splices in: one past the heading's raw
+ * text with trailing whitespace trimmed, which is just past an ordinary
+ * heading line's line ending, inside a line's trailing spaces, and past the
+ * end of a note whose unterminated last line is the heading. `end` is where an
+ * append splices in: the next heading at the same or a shallower level, or the
+ * end of the note.
+ *
+ * The 1.x engine lexes the frontmatter-stripped body with its line endings
+ * normalized, then applies the token offsets to the note's own bytes unmapped;
+ * these offsets are computed the same way, so on a CRLF note they drift as the
+ * engine's do.
+ */
+export function v1HeadingSpan(
+  content: string,
+  path: string,
+): { end: number; start: number } | undefined {
+  const bodyStart = PLUGIN_FRONTMATTER.exec(content)?.[0].length ?? 0;
+  const { normalized } = normalizeLineEndings(content.slice(bodyStart));
+  const headings = [...topLevelTokens(normalized)].flatMap((top) => {
+    const heading = headingOf(normalized, top);
+    return heading ? [{ ...heading, raw: top.token.raw }] : [];
+  });
+  const h = headingPaths(headings).indexOf(path);
+  const heading = headings[h];
+  if (!heading) return;
+  const closing = headings.find((other, i) => i > h && other.level <= heading.level);
+  return {
+    start: bodyStart + heading.start + heading.raw.trimEnd().length + 1,
+    end: closing ? bodyStart + closing.start : content.length,
   };
 }
 

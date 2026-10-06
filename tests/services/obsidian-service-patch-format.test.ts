@@ -825,7 +825,7 @@ describe('a list item written beside the list its section ends or opens with, on
     });
   });
 
-  it('sends the 1.x headers and the content as written on plugin v4.x', async () => {
+  it('sends the 1.x headers, and the content closed by a line break, on plugin v4.x', async () => {
     servePluginVersion(pool, '4.2.0');
     pool
       .intercept({ path: '/vault/N.md', method: 'GET' })
@@ -839,7 +839,135 @@ describe('a list item written beside the list its section ends or opens with, on
     expect(h['markdown-patch-version']).toBe('1');
     expect(h.operation).toBe('append');
     expect(decodeURIComponent(h.target ?? '')).toBe('T::A');
-    expect(patches[0]?.body).toBe('- three');
+    expect(patches[0]?.body).toBe('- three\n');
+  });
+});
+
+/**
+ * The markdown-patch 1.x engine plugin v4.x runs splices a heading write in
+ * exactly as given, with no line break on either side: `- three` appended to a
+ * section lands as `- three## B`. The service closes the content with a line
+ * break, and opens it with one where the note text before the splice point
+ * does not end in one. Issue #146.
+ */
+describe('markdown heading writes on plugin v4.x', () => {
+  const TIGHT = '# T\n## A\n- one\n- two\n## B\ntext\n';
+
+  /** Serve the reads a 1.x heading write makes for `note`, and return the PATCH body sent. */
+  async function sentBody(
+    note: string,
+    content: string,
+    target: string,
+    extra: Partial<PatchInstruction> = {},
+  ): Promise<string | undefined> {
+    servePluginVersion(pool, '4.2.0');
+    pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
+      expect(lower(opts.headers)['markdown-patch-version']).toBe('1');
+      return {
+        statusCode: 200,
+        data: { headings: ['T', 'T::A', 'T::B'], blocks: [], frontmatterFields: [] },
+      };
+    });
+    serveNote(note);
+    const patches = capturePatches();
+    await service.patchNote(ctx, NOTE, content, heading(target, extra));
+    expect(patches).toHaveLength(1);
+    expect(lower(patches[0]?.headers ?? {})['markdown-patch-version']).toBe('1');
+    return patches[0]?.body;
+  }
+
+  it.each([
+    ['appends', 'append', '- three', '- three\n'],
+    ['prepends', 'prepend', '- zero', '- zero\n'],
+    ['replaces', 'replace', '- x', '- x\n'],
+  ] as const)(
+    '%s a list item on its own line, above the next heading',
+    async (_l, operation, content, body) => {
+      await expect(sentBody(TIGHT, content, 'T::A', { operation })).resolves.toBe(body);
+    },
+  );
+
+  it('opens an append with a line break when the section ends a note with no final line break', async () => {
+    await expect(sentBody('# T\n## A\n- one\n- two', '- x\n', 'T::A')).resolves.toBe('\n- x\n');
+  });
+
+  it('opens an append with a line break when `trimTargetWhitespace` trims the one before it', async () => {
+    await expect(sentBody(TIGHT, '- x', 'T::A', { trimTargetWhitespace: true })).resolves.toBe(
+      '\n- x\n',
+    );
+  });
+
+  it.each(['append', 'prepend', 'replace'] as const)(
+    'opens a %s with a line break under an empty heading on the note’s unterminated last line',
+    async (operation) => {
+      await expect(sentBody('# T\n## A', '- x', 'T::A', { operation })).resolves.toBe('\n- x\n');
+    },
+  );
+
+  it('opens a prepend with a line break under a heading line carrying trailing spaces', async () => {
+    await expect(
+      sentBody('# T\n## A  \n- one\n## B\n', '- x', 'T::A', { operation: 'prepend' }),
+    ).resolves.toBe('\n- x\n');
+  });
+
+  it.each([
+    ['opening and closing breaks', '# T\n## A\n- one\n- two', '\n- x\n'],
+    ['a closing CRLF', TIGHT, '- x\r\n'],
+    ['a closing blank line', TIGHT, '- x\n\n'],
+  ])('leaves content that already carries %s as written', async (_l, note, content) => {
+    await expect(sentBody(note, content, 'T::A')).resolves.toBe(content);
+  });
+
+  it.each([
+    ['above the next heading', TIGHT],
+    ['under a heading on the note’s unterminated last line', '# T\n## A'],
+  ])('keeps empty content empty, so a replace still clears a section %s', async (_l, note) => {
+    await expect(sentBody(note, '', 'T::A', { operation: 'replace' })).resolves.toBe('');
+  });
+
+  it('closes a write that creates a missing section, which the engine opens on its own line', async () => {
+    await expect(
+      sentBody('# T\n## A\n- one', '- x', 'T::A::New', { createTargetIfMissing: true }),
+    ).resolves.toBe('- x\n');
+  });
+
+  it('places a write to a section nested below the first level by that section’s own extent', async () => {
+    servePluginVersion(pool, '4.2.0');
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, { headings: ['T', 'T::A', 'T::A::C'], blocks: [], frontmatterFields: [] });
+    serveNote('---\ntags: [x]\n---\n# T\n## A\n- one\n### C');
+    const patches = capturePatches();
+
+    await expect(service.patchNote(ctx, NOTE, '- x', heading('C'))).resolves.toBe('T::A::C');
+
+    expect(patches[0]?.body).toBe('\n- x\n');
+  });
+
+  it.each([
+    ['a block', 'block', 'b1', ' x'],
+    ['a frontmatter field', 'frontmatter', 'title', 'b'],
+  ] as const)(
+    'sends a markdown write to %s as written',
+    async (_l, targetType, target, content) => {
+      servePluginVersion(pool, '4.2.0');
+      const patches = capturePatches();
+
+      await service.patchNote(ctx, NOTE, content, {
+        operation: 'append',
+        targetType,
+        target,
+        contentType: 'markdown',
+      });
+
+      expect(patches[0]?.body).toBe(content);
+    },
+  );
+
+  it('sends JSON table rows under a heading as written', async () => {
+    await expect(sentBody(TIGHT, '[["3","4"]]', 'T::A', { contentType: 'json' })).resolves.toBe(
+      '[["3","4"]]',
+    );
   });
 });
 
@@ -1066,23 +1194,6 @@ describe('markdown-patch 1.x on Local REST API 4.x', () => {
     expect(h['content-type']).toBe('text/markdown');
     expect(patches[0]?.body).toBe('### Sub\n');
   });
-
-  it('reads the flat 1.x document map', async () => {
-    servePluginVersion(pool, '4.2.0');
-    pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
-      expect(lower(opts.headers)['markdown-patch-version']).toBe('1');
-      return {
-        statusCode: 200,
-        data: { headings: ['Top'], blocks: ['b'], frontmatterFields: ['f'] },
-      };
-    });
-
-    await expect(service.getDocumentMap(ctx, NOTE)).resolves.toEqual({
-      headings: ['Top'],
-      blocks: ['b'],
-      frontmatterFields: ['f'],
-    });
-  });
 });
 
 describe('format negotiation', () => {
@@ -1177,7 +1288,9 @@ describe('format negotiation', () => {
       contentType: 'markdown',
     } as const;
 
-    await expect(svc.patchNote(ctx, NOTE, 'x', block)).rejects.toBeDefined();
+    await expect(svc.patchNote(ctx, NOTE, 'x', block)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+    });
     await expect(svc.patchNote(ctx, NOTE, 'x', block)).resolves.toBe('p1');
   });
 

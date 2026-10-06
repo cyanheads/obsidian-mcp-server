@@ -1,10 +1,12 @@
 /**
  * @fileoverview obsidian_list_tags — the most-used tags in the vault, with usage counts.
- * Wraps the plugin's `/tags/` endpoint, then shapes it for an LLM caller: `nameRegex`
- * and `minCount` narrow the candidate set, the survivors are ordered by usage, and
- * `limit` keeps the exploratory zero-argument call bounded on a vault with a long
- * single-use tail. The `obsidian://tags` resource wraps the same endpoint but keeps
- * snapshot semantics — unsorted, uncapped — so the two surfaces differ by design.
+ * Wraps `ObsidianService.listTags` — the plugin's `/tags/` endpoint, or under
+ * OBSIDIAN_READ_PATHS the tags of readable notes only, counted per note — then shapes
+ * it for an LLM caller: `nameRegex` and `minCount` narrow the candidate set, the
+ * survivors are ordered by usage, and `limit` keeps the exploratory zero-argument call
+ * bounded on a vault with a long single-use tail. The `obsidian://tags` resource wraps
+ * the same service call but keeps snapshot semantics — unsorted, uncapped — so the two
+ * surfaces differ by design.
  * @module mcp-server/tools/definitions/obsidian-list-tags.tool
  */
 
@@ -56,7 +58,11 @@ export const obsidianListTags = tool('obsidian_list_tags', {
         z
           .object({
             name: z.string().describe('Tag name without the leading `#`.'),
-            count: z.number().describe('Usage count across the vault.'),
+            count: z
+              .number()
+              .describe(
+                'Times the tag, or a tag nested under it, occurs across the vault. When OBSIDIAN_READ_PATHS is set: the number of readable notes carrying the tag or a tag nested under it.',
+              ),
           })
           .describe('A tag with its usage count.'),
       )
@@ -159,7 +165,9 @@ export const obsidianListTags = tool('obsidian_list_tags', {
       ctx.enrich.notice(
         narrowing
           ? `No tags matched ${narrowing}. Loosen or drop the filters to widen the listing.`
-          : 'No tags found. The vault may have no tagged notes.',
+          : svc.policy.restrictsReads
+            ? 'No tags found in the notes OBSIDIAN_READ_PATHS makes readable.'
+            : 'No tags found. The vault may have no tagged notes.',
       );
     } else if (candidates.length > input.limit) {
       ctx.enrich.truncated({

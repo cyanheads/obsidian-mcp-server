@@ -1,14 +1,21 @@
 /**
  * @fileoverview Handler tests for obsidian_list_notes — recursive walk,
- * filters across the tree, depth-limit truncation, and entry-cap truncation.
+ * filters across the tree, depth-limit truncation, entry-cap truncation, and
+ * the read-scope filter on listings.
  * @module tests/tools/obsidian-list-notes.test
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it } from 'vitest';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, describe, expect, it } from 'vitest';
+import type { ServerConfig } from '@/config/server-config.js';
 import { obsidianListNotes } from '@/mcp-server/tools/definitions/obsidian-list-notes.tool.js';
-import { contractErrorOf, setupHarness } from '../helpers.js';
+import {
+  type ObsidianFetch,
+  ObsidianService,
+  setObsidianService,
+} from '@/services/obsidian/obsidian-service.js';
+import { contractErrorOf, makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -357,5 +364,197 @@ describe('obsidian_list_notes / format()', () => {
     expect(text).toContain('entry_cap');
     expect(text).toContain('cap=1000');
     expect(text).toContain('Narrow filters or descend deeper.');
+  });
+});
+
+/**
+ * Under OBSIDIAN_READ_PATHS a listing holds readable entries and the folders
+ * on the way to the scope, nothing else. The stub vault answers every folder,
+ * so a walk that ignored the scope would surface `Private/`, `todo.md`,
+ * `Proj/`, and `Projects/Other/`.
+ */
+describe('obsidian_list_notes / OBSIDIAN_READ_PATHS scope', () => {
+  const VAULT: Record<string, string[]> = {
+    '': ['todo.md', 'Private/', 'Projects/', 'Proj/'],
+    Private: ['a.md'],
+    Projects: ['Work/', 'Other/', 'readme.md'],
+    'Projects/Work': ['w.md', 'Deep/'],
+    'Projects/Work/Deep': ['d.md'],
+    'Projects/Other': ['o.md'],
+    Proj: ['p.md'],
+  };
+
+  let listed: string[] = [];
+
+  afterEach(() => {
+    setObsidianService(undefined);
+    listed = [];
+  });
+
+  function scope(config: Partial<ServerConfig>, vault: Record<string, string[]> = VAULT) {
+    const fetchImpl: ObsidianFetch = async (url) => {
+      const dir = decodeURIComponent(new URL(url).pathname)
+        .replace(/^\/vault\/?/, '')
+        .replace(/\/$/, '');
+      listed.push(dir);
+      const files = vault[dir];
+      if (!files) {
+        return mockResponse(JSON.stringify({ message: 'Not Found', errorCode: 40400 }), {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return mockResponse(JSON.stringify({ files }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    setObsidianService(new ObsidianService(makeTestConfig(config), fetchImpl));
+  }
+
+  const list = (input: Record<string, unknown>) =>
+    obsidianListNotes.handler(
+      obsidianListNotes.input.parse(input),
+      createMockContext({ errors: obsidianListNotes.errors }),
+    );
+
+  const NESTED = { readPaths: ['projects/work'] };
+
+  it('lists only the path to a nested scope from the root, at every depth', async () => {
+    scope(NESTED);
+    expect((await list({ depth: 1 })).entries).toEqual([
+      { path: 'Projects', type: 'directory', truncated: true },
+    ]);
+    expect((await list({})).entries).toEqual([
+      { path: 'Projects', type: 'directory' },
+      { path: 'Projects/Work', type: 'directory', truncated: true },
+    ]);
+    expect((await list({ depth: 5 })).entries).toEqual([
+      { path: 'Projects', type: 'directory' },
+      { path: 'Projects/Work', type: 'directory' },
+      { path: 'Projects/Work/w.md', type: 'file' },
+      { path: 'Projects/Work/Deep', type: 'directory' },
+      { path: 'Projects/Work/Deep/d.md', type: 'file' },
+    ]);
+    // No out-of-scope folder was ever listed upstream.
+    expect(listed).not.toContain('Private');
+    expect(listed).not.toContain('Projects/Other');
+  });
+
+  it('walks into the scope at depth 3, marking only the depth-stopped folder truncated', async () => {
+    scope(NESTED);
+    const out = await list({ depth: 3 });
+    expect(out.entries).toEqual([
+      { path: 'Projects', type: 'directory' },
+      { path: 'Projects/Work', type: 'directory' },
+      { path: 'Projects/Work/w.md', type: 'file' },
+      { path: 'Projects/Work/Deep', type: 'directory', truncated: true },
+    ]);
+    expect(out.totals).toEqual({ entries: 4, files: 1, directories: 3 });
+  });
+
+  it('accepts an ancestor as `path` and returns only the scope beneath it', async () => {
+    scope(NESTED);
+    const out = await list({ path: 'Projects' });
+    expect(out.entries).toEqual([
+      { path: 'Projects/Work', type: 'directory' },
+      { path: 'Projects/Work/w.md', type: 'file' },
+      { path: 'Projects/Work/Deep', type: 'directory', truncated: true },
+    ]);
+  });
+
+  it('renders the scoped root listing identically on both wire surfaces', async () => {
+    scope(NESTED);
+    const res = await runToolContract(obsidianListNotes, {});
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      path: '',
+      entries: [
+        { path: 'Projects', type: 'directory' },
+        { path: 'Projects/Work', type: 'directory', truncated: true },
+      ],
+      totals: { entries: 2, files: 0, directories: 2 },
+    });
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toBe(
+      [
+        '**(vault root)** — 2 entries · 0 files, 2 directories · depth=2',
+        '',
+        'Entry `type`: a trailing `/` marks a `directory`; every other line is a `file`.',
+        '```',
+        '└── Projects/',
+        '    └── Work/ [truncated — pass deeper `depth` to expand]',
+        '```',
+      ].join('\n'),
+    );
+  });
+
+  it('refuses a non-ancestor `path` with path_forbidden before any upstream call', async () => {
+    scope(NESTED);
+    for (const path of ['Private', 'Proj', 'Projects/Other']) {
+      expect(await contractErrorOf(obsidianListNotes, { path })).toMatchObject({
+        code: JsonRpcErrorCode.Forbidden,
+        data: { reason: 'path_forbidden', subreason: 'outside_read_paths', path },
+      });
+    }
+    expect(listed).toEqual([]);
+  });
+
+  it('lists only a scoped file under its folder', async () => {
+    scope(
+      { readPaths: ['work/plan.md'] },
+      { '': ['Work/', 'todo.md'], Work: ['plan.md', 'salary.md', 'Sub/'], 'Work/Sub': ['x.md'] },
+    );
+    expect((await list({})).entries).toEqual([
+      { path: 'Work', type: 'directory' },
+      { path: 'Work/plan.md', type: 'file' },
+    ]);
+    expect((await list({ path: 'Work' })).entries).toEqual([
+      { path: 'Work/plan.md', type: 'file' },
+    ]);
+  });
+
+  it('reaches a write-path scope from the root, until OBSIDIAN_READ_ONLY hides it', async () => {
+    const config = { readPaths: ['private'], writePaths: ['projects/work'] };
+    scope(config);
+    expect((await list({ depth: 1 })).entries.map((e) => e.path)).toEqual(['Private', 'Projects']);
+    expect((await list({ path: 'Projects', depth: 1 })).entries.map((e) => e.path)).toEqual([
+      'Projects/Work',
+    ]);
+
+    scope({ ...config, readOnly: true });
+    expect((await list({ depth: 1 })).entries.map((e) => e.path)).toEqual(['Private']);
+  });
+
+  it('reports an empty scoped listing with the empty notice', async () => {
+    scope({ readPaths: ['nowhere/deep'] });
+    const ctx = createMockContext({ errors: obsidianListNotes.errors });
+    const out = await obsidianListNotes.handler(obsidianListNotes.input.parse({}), ctx);
+    expect(out.entries).toEqual([]);
+    expect(out.totals).toEqual({ entries: 0, files: 0, directories: 0 });
+    expect(getEnrichment(ctx).notice).toBe(
+      'The directory is empty or no entries matched the active filters.',
+    );
+  });
+
+  it('counts totals and the entry cap over returned entries only', async () => {
+    const crowded = Array.from({ length: 1100 }, (_, i) => `n${i}.md`);
+    scope(NESTED, {
+      ...VAULT,
+      '': [...crowded, 'Projects/'],
+    });
+    const out = await list({ depth: 3 });
+    expect(out.excluded).toBeUndefined();
+    expect(out.totals).toEqual({ entries: 4, files: 1, directories: 3 });
+  });
+
+  it('leaves listings unchanged when OBSIDIAN_READ_PATHS is unset', async () => {
+    scope({ writePaths: ['projects/work'], readOnly: false });
+    expect((await list({ depth: 1 })).entries.map((e) => e.path)).toEqual([
+      'todo.md',
+      'Private',
+      'Projects',
+      'Proj',
+    ]);
   });
 });

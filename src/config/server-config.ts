@@ -132,6 +132,11 @@ const ServerConfigSchema = z.object({
     .describe(
       'Global kill switch. When true, denies every write regardless of OBSIDIAN_WRITE_PATHS, and suppresses the OBSIDIAN_ENABLE_COMMANDS pair (commands can mutate). Defaults to false.',
     ),
+  deleteElicitation: envBoolean
+    .default(false)
+    .describe(
+      'When true, `obsidian_delete_note` asks the user to confirm each delete through an elicitation round, and HTTP startup requires a stateful session (MCP_SESSION_MODE=stateless is refused) unless OBSIDIAN_READ_ONLY=true, which disables the tool. Defaults to false: the delete runs on the first call, bounded by OBSIDIAN_WRITE_PATHS and OBSIDIAN_READ_ONLY.',
+    ),
   omnisearchUrl: z
     .string()
     .url()
@@ -155,6 +160,7 @@ export function getServerConfig(): ServerConfig {
     readPaths: 'OBSIDIAN_READ_PATHS',
     writePaths: 'OBSIDIAN_WRITE_PATHS',
     readOnly: 'OBSIDIAN_READ_ONLY',
+    deleteElicitation: 'OBSIDIAN_DELETE_ELICITATION',
     omnisearchUrl: 'OBSIDIAN_OMNISEARCH_URL',
   });
   return _config;

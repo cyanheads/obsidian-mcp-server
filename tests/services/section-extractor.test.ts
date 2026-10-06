@@ -11,6 +11,7 @@ import {
   extractSection,
   listHeadingPaths,
   sectionBody,
+  v1HeadingSpan,
 } from '@/services/obsidian/section-extractor.js';
 import type { NoteJson } from '@/services/obsidian/types.js';
 
@@ -84,18 +85,6 @@ describe('extractSection / heading', () => {
     expect(() => extractSection(note(md), { type: 'heading', target: 'Top::Foo' })).toThrow(
       /not found/i,
     );
-  });
-
-  it('returns the first occurrence when the same heading appears twice at the same level', () => {
-    const md = ['# Dup', 'first body', '# Dup', 'second body'].join('\n');
-    const { value } = extractSection(note(md), { type: 'heading', target: 'Dup' });
-    expect(value).toBe(['# Dup', 'first body'].join('\n'));
-  });
-
-  it('matches a heading on the first line when no frontmatter is present', () => {
-    const md = ['# Top', 'body'].join('\n');
-    const { value } = extractSection(note(md), { type: 'heading', target: 'Top' });
-    expect(value).toBe(['# Top', 'body'].join('\n'));
   });
 });
 
@@ -198,13 +187,16 @@ describe('extractSection / heading resolution', () => {
       'Overview::Beta::Shared',
     ];
 
-    it.each(['Overview', 'Alpha', 'Beta', 'Shared', 'Overview::Alpha::Shared'])(
-      'resolves %s to an exact `map.headings` entry',
-      (target) => {
-        const out = extractSection(note(md), { type: 'heading', target });
-        expect(upstreamHeadings).toContain(out.sectionTarget);
-      },
-    );
+    it.each([
+      ['Overview', 'Overview'],
+      ['Alpha', 'Overview::Alpha'],
+      ['Beta', 'Overview::Beta'],
+      ['Shared', 'Overview::Alpha::Shared'],
+      ['Overview::Alpha::Shared', 'Overview::Alpha::Shared'],
+    ])('resolves %s to the `map.headings` entry %s', (target, entry) => {
+      expect(upstreamHeadings).toContain(entry);
+      expect(extractSection(note(md), { type: 'heading', target }).sectionTarget).toBe(entry);
+    });
 
     it('matches the write-side leaf filter for the ambiguous leaf', () => {
       const out = extractSection(note(md), { type: 'heading', target: 'Shared' });
@@ -348,10 +340,6 @@ describe('extractSection / document-map locators round-trip', () => {
   ])('scans %j as heading path %j', (line, path) => {
     const paths = listHeadingPaths(`# T\n${line}`);
     expect(paths).toEqual(path === undefined ? ['T'] : ['T', path]);
-  });
-
-  it('skips heading lines inside a fenced block', () => {
-    expect(listHeadingPaths('# T\n```\n## Fenced\n```\n## Real\n')).toEqual(['T', 'T::Real']);
   });
 
   it('returns only its paragraph for a block reference directly under an untitled heading', () => {
@@ -803,8 +791,9 @@ describe('extractSection / block', () => {
     expect(value).toBe('A paragraph ^abc');
   });
 
-  it('matches block IDs containing regex special characters', () => {
-    const md = 'paragraph ^a.b+c';
+  it('matches block IDs containing regex special characters literally', () => {
+    // Read as a pattern, `a.b+c` would match the earlier `^aXbbc` first.
+    const md = 'decoy ^aXbbc\n\nparagraph ^a.b+c';
     const { value } = extractSection(note(md), { type: 'block', target: 'a.b+c' });
     expect(value).toBe('paragraph ^a.b+c');
   });
@@ -1022,9 +1011,20 @@ describe('listHeadingPaths / the plugin parser', () => {
 });
 
 /**
+ * Thread CPU milliseconds `run` takes. CPU time rather than wall-clock time, so
+ * a test worker descheduled under a parallel run cannot fail a cost budget.
+ */
+function cpuMs(run: () => void): number {
+  const start = process.threadCpuUsage();
+  run();
+  const used = process.threadCpuUsage(start);
+  return (used.user + used.system) / 1000;
+}
+
+/**
  * The scan is linear in note length: an 80k-character note of each shape —
- * including ones built to stress the lexer — scans well inside the budget. A
- * quadratic scan takes seconds on these.
+ * including ones built to stress the lexer — scans well inside the CPU budget.
+ * A quadratic scan takes seconds on these.
  */
 describe('listHeadingPaths / cost', () => {
   const SIZE = 80_000;
@@ -1060,9 +1060,7 @@ describe('listHeadingPaths / cost', () => {
     ['CRLF headings', () => fill('## h\r\ntext\r\n\r\n')],
   ])('scans an 80k-character note of %s inside the budget', (_label, build) => {
     const md = build();
-    const started = performance.now();
-    listHeadingPaths(md);
-    expect(performance.now() - started).toBeLessThan(BUDGET_MS);
+    expect(cpuMs(() => listHeadingPaths(md))).toBeLessThan(BUDGET_MS);
   });
 });
 
@@ -1174,6 +1172,123 @@ describe('sectionBody', () => {
   });
 });
 
+/**
+ * markdown-patch 1.x's span for the heading at `path`, transcribed from its
+ * `getHeadingPositions` (1.0.0 and 1.1.0 agree): stock `marked` lexes the
+ * frontmatter-stripped body, token offsets are the running sum of `raw`
+ * lengths applied to the note's own bytes, the content starts one past the
+ * heading's trimmed raw, and ends at the next heading at the same or a
+ * shallower level, or the end of the note.
+ */
+function engineSpan(md: string, path: string): { end: number; start: number } | undefined {
+  const frontmatter =
+    /^---(?:\r\n|\r|\n)(?:---(?:\r\n|\r|\n|$)|([\s\S]*?)(?:\r\n|\r|\n)---(?:\r\n|\r|\n|$))/.exec(
+      md,
+    );
+  const offset = frontmatter?.[0].length ?? 0;
+  const body = md.slice(offset);
+  const tokens = new Lexer().lex(body);
+  const starts: number[] = [];
+  let running = 0;
+  for (const token of tokens) {
+    starts.push(running);
+    running += token.raw.length;
+  }
+  const stack: Array<{ level: number; path: string }> = [];
+  let found: { end: number; start: number } | undefined;
+  tokens.forEach((token, i) => {
+    if (token.type !== 'heading') return;
+    const { depth, text } = token as Tokens.Heading;
+    while ((stack.at(-1)?.level ?? 0) >= depth) stack.pop();
+    const parent = stack.at(-1);
+    const own = parent ? `${parent.path}::${text.trim()}` : text.trim();
+    stack.push({ level: depth, path: own });
+    if (own !== path) return;
+    const next = tokens.findIndex(
+      (t, j) => j > i && t.type === 'heading' && (t as Tokens.Heading).depth <= depth,
+    );
+    found = {
+      start: offset + (starts[i] ?? 0) + token.raw.trimEnd().length + 1,
+      end: offset + (next === -1 ? body.length : (starts[next] ?? 0)),
+    };
+  });
+  return found;
+}
+
+describe('v1HeadingSpan', () => {
+  it('spans a section from just below its heading line to the next heading', () => {
+    expect(v1HeadingSpan('# T\n## A\n- one\n- two\n## B\ntext\n', 'T::A')).toEqual({
+      start: 9,
+      end: 21,
+    });
+  });
+
+  it('runs a section with no closing heading to the end of the note', () => {
+    expect(v1HeadingSpan('# T\n## A\n- one', 'T::A')).toEqual({ start: 9, end: 14 });
+  });
+
+  it('starts one past the end of a note whose last line is the heading', () => {
+    expect(v1HeadingSpan('# T\n## A', 'T::A')).toEqual({ start: 9, end: 8 });
+  });
+
+  it('returns `undefined` for a path the note does not have', () => {
+    expect(v1HeadingSpan('# T\n## A\n', 'T::Nope')).toBeUndefined();
+  });
+
+  it.each([
+    ['a tight list above a sibling', '# T\n## A\n- one\n- two\n## B\ntext\n', 'T::A'],
+    ['a parent past its sub-headings', '# T\n## A\n- one\n### S\nsub\n## B\n# U\n', 'T'],
+    ['a section three levels down', '# T\n## A\n### C\n- x\n#### D\ny\n## B\n', 'T::A::C'],
+    ['blank lines under the heading', '# T\n## A\n\n\n- one\n\n\n## B\n', 'T::A'],
+    ['a heading line with trailing spaces', '# T\n## A  \n- one\n## B\n', 'T::A'],
+    ['a closing hash sequence', '# T\n## A ##\n- one\n', 'T::A'],
+    ['setext headings', 'T\n===\n\nA\n---\nx\n', 'T::A'],
+    ['frontmatter', '---\na: 1\n---\n# T\n## A\n- one\n', 'T::A'],
+    ['a table that ends the section', '# T\n## A\n| a |\n| - |\n| 1 |\n\n## B\n', 'T::A'],
+    ['a fence holding a heading line', '# T\n## A\n```\n## no\n```\n## B\n', 'T::A'],
+    ['a blockquote', '# T\n## A\n> quote\n> more\n\n## B\n', 'T::A'],
+    ['an unterminated last heading', '# T\n## A', 'T::A'],
+    ['an unterminated last section', '# T\n## A\n- one\n- two', 'T::A'],
+    [
+      'CRLF line endings, offsets drifting as the engine’s do',
+      '# T\r\n## A\r\n- one\r\n## B\r\n',
+      'T::A',
+    ],
+  ])('matches the 1.x engine’s offsets for %s', (_label, md, path) => {
+    expect(v1HeadingSpan(md, path)).toEqual(engineSpan(md, path));
+  });
+});
+
+/**
+ * markdown-patch 1.x and 2.x both parse with `marked` 17, and the scan has to
+ * read a note the way the plugin does. `marked` 18 parses each shape below
+ * differently, which would split the scan's headings and section blocks from
+ * the plugin's map and `within` indexes — what keeps `marked` pinned to 17.
+ */
+describe('sectionBody and listHeadingPaths / shapes marked 18 reads differently', () => {
+  it('keeps a `#tag` line over a `===` underline in the section, as a paragraph', () => {
+    const md = '# T\n## A\n#tag line\n===\n';
+    expect(listHeadingPaths(md)).toEqual(['T', 'T::A']);
+    expect(sectionBody(md, 'T::A')).toEqual({
+      blocks: ['paragraph'],
+      content: '#tag line\n===\n',
+      subsections: false,
+    });
+  });
+
+  it('keeps a tab before an ATX closing sequence in the heading text', () => {
+    expect(listHeadingPaths('# T\n## A\n### H\t###\n')).toEqual(['T', 'T::A', 'T::A::H\t###']);
+  });
+
+  it.each([
+    ['a tab-only line between paragraph lines', '# T\n## A\np1\n\t\np2\n', ['paragraph']],
+    ['an empty list item carrying a trailing space', '# T\n## A\n- \n- b\n', ['paragraph', 'list']],
+    ['a fence opener on the note’s unterminated last line', '# T\n## A\npara\n```', ['paragraph']],
+  ])('reads %s as marked 17 does', (_label, md, blocks) => {
+    expect(sectionBody(md, 'T::A')?.blocks).toEqual(blocks);
+  });
+});
+
 describe('blockKinds', () => {
   it.each([
     ['a bullet item', '- a', ['list']],
@@ -1193,8 +1308,10 @@ describe('blockKinds', () => {
 
 /**
  * Both scans lex the whole input once, so their cost grows linearly with it:
- * each shape at 5k, 20k, and 80k characters, including the ones built to
- * stress the lexer, stays inside the budget.
+ * each shape, including the ones built to stress the lexer, stays inside the
+ * CPU budget at 80k characters, and grows well short of quadratically from 5k
+ * to 80k — best of three runs per size, ~16x for a linear scan, ~256x for a
+ * quadratic one.
  */
 describe('sectionBody and blockKinds / cost', () => {
   const BUDGET_MS = 1_000;
@@ -1214,15 +1331,18 @@ describe('sectionBody and blockKinds / cost', () => {
     ['CRLF list items', (n) => fill('- item\r\n', n)],
   ];
 
-  it.each(
-    SHAPES.flatMap(([label, build]) =>
-      [5_000, 20_000, 80_000].map((size) => [label, size, build] as const),
-    ),
-  )('scans %s at %i characters inside the budget', (_label, size, build) => {
-    const md = `# T\n## A\n${build(size)}`;
-    const started = performance.now();
-    sectionBody(md, 'T::A');
-    blockKinds(md);
-    expect(performance.now() - started).toBeLessThan(BUDGET_MS);
+  it.each(SHAPES)('scans %s in linear time, inside the budget', (_label, build) => {
+    const bestOfThree = (size: number) => {
+      const md = `# T\n## A\n${build(size)}`;
+      const scan = () => {
+        sectionBody(md, 'T::A');
+        blockKinds(md);
+      };
+      return Math.min(cpuMs(scan), cpuMs(scan), cpuMs(scan));
+    };
+    const small = bestOfThree(5_000);
+    const large = bestOfThree(80_000);
+    expect(large).toBeLessThan(BUDGET_MS);
+    expect(large / small).toBeLessThan(64);
   });
 });

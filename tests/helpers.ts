@@ -51,6 +51,7 @@ export function makeTestConfig(overrides: Partial<ServerConfig> = {}): ServerCon
     readPaths: undefined,
     writePaths: undefined,
     readOnly: false,
+    deleteElicitation: false,
     ...overrides,
   };
 }

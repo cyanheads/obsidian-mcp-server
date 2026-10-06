@@ -21,8 +21,20 @@ function cfg(overrides: Partial<ServerConfig> = {}): ServerConfig {
     readPaths: undefined,
     writePaths: undefined,
     readOnly: false,
+    deleteElicitation: false,
     ...overrides,
   };
+}
+
+/** The error `fn` throws; fails the test when it returns instead. */
+function thrownBy(fn: () => unknown): McpError {
+  try {
+    fn();
+  } catch (err) {
+    expect(err).toBeInstanceOf(McpError);
+    return err as McpError;
+  }
+  return expect.unreachable('expected a throw');
 }
 
 describe('PathPolicy.isUnrestricted', () => {
@@ -92,14 +104,7 @@ describe('PathPolicy writes — truth table', () => {
 describe('PathPolicy.assertReadable', () => {
   it('throws Forbidden with subreason outside_read_paths', () => {
     const p = new PathPolicy(cfg({ readPaths: ['public'] }));
-    let caught: unknown;
-    try {
-      p.assertReadable('secret/foo.md');
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(McpError);
-    const err = caught as McpError;
+    const err = thrownBy(() => p.assertReadable('secret/foo.md'));
     expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
     expect(err.data?.reason).toBe('path_forbidden');
     expect(err.data?.subreason).toBe('outside_read_paths');
@@ -116,30 +121,20 @@ describe('PathPolicy.assertReadable', () => {
 describe('PathPolicy.assertWritable', () => {
   it('routes outside_write_paths when path is not in writePaths', () => {
     const p = new PathPolicy(cfg({ writePaths: ['projects'] }));
-    try {
-      p.assertWritable('public/foo.md');
-    } catch (e) {
-      const err = e as McpError;
-      expect(err.data?.subreason).toBe('outside_write_paths');
-      expect(err.message).toMatch(/OBSIDIAN_WRITE_PATHS/);
-      expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/Allowed prefixes/);
-    }
-    expect.assertions(3);
+    const err = thrownBy(() => p.assertWritable('public/foo.md'));
+    expect(err.data?.subreason).toBe('outside_write_paths');
+    expect(err.message).toMatch(/OBSIDIAN_WRITE_PATHS/);
+    expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/Allowed prefixes/);
   });
 
   it('routes read_only_mode when readOnly=true (overrides writePaths)', () => {
     const p = new PathPolicy(cfg({ writePaths: ['projects'], readOnly: true }));
-    try {
-      p.assertWritable('projects/foo.md');
-    } catch (e) {
-      const err = e as McpError;
-      expect(err.data?.subreason).toBe('read_only_mode');
-      expect(err.message).toMatch(/read-only mode/);
-      expect(err.message).toMatch(/OBSIDIAN_READ_ONLY=true/);
-      expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/Unset OBSIDIAN_READ_ONLY/);
-      expect(err.data?.activeScope).toEqual([]);
-    }
-    expect.assertions(5);
+    const err = thrownBy(() => p.assertWritable('projects/foo.md'));
+    expect(err.data?.subreason).toBe('read_only_mode');
+    expect(err.message).toMatch(/read-only mode/);
+    expect(err.message).toMatch(/OBSIDIAN_READ_ONLY=true/);
+    expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/Unset OBSIDIAN_READ_ONLY/);
+    expect(err.data?.activeScope).toEqual([]);
   });
 });
 
@@ -209,27 +204,21 @@ describe('PathPolicy cross-platform separators', () => {
 
   it('out-of-scope Windows path denial echoes the original separator in error data', () => {
     const p = new PathPolicy(cfg({ readPaths: ['public'] }));
-    try {
-      p.assertReadable('secret\\foo.md');
-      expect.unreachable('should have thrown');
-    } catch (e) {
-      const err = e as McpError;
-      expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
-      // The wire-data path preserves the caller's original spelling so the
-      // operator sees what they sent — normalization is only for matching.
-      expect(err.data?.path).toBe('secret\\foo.md');
-    }
+    const err = thrownBy(() => p.assertReadable('secret\\foo.md'));
+    expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
+    // The wire-data path preserves the caller's original spelling so the
+    // operator sees what they sent — normalization is only for matching.
+    expect(err.data?.path).toBe('secret\\foo.md');
   });
 });
 
 describe('PathPolicy ↔ config-parser separator integration', () => {
   /**
-   * End-to-end demonstration of the parser/policy mismatch: an operator who
-   * configures `OBSIDIAN_READ_PATHS` with backslashes today gets a policy that
-   * silently rejects every candidate, because the parser preserves the
-   * backslash in the stored prefix while the policy's `normalize()` rewrites
-   * the candidate's backslashes to forward slashes. After the fix, the parser
-   * should also normalize separators so the two layers agree.
+   * The config parser and the policy's `normalize()` must agree on separators:
+   * a backslash-configured `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS`
+   * prefix is stored forward-slashed, so it matches candidates written with
+   * either separator. A parser that kept the backslash would reject every
+   * candidate, since the policy rewrites the candidate's backslashes.
    */
   const ENV_KEYS = [
     'OBSIDIAN_API_KEY',
@@ -286,6 +275,134 @@ describe('PathPolicy.filterReadable (silent search filter)', () => {
     const p = new PathPolicy(cfg());
     const hits = [{ filename: 'any/a.md' }, { filename: 'any/b.md' }];
     expect(p.filterReadable(hits)).toEqual(hits);
+  });
+});
+
+/**
+ * Vault-wide listings (`/tags/`) switch to per-note collection only when reads
+ * are gated. Write paths and read-only gate writes, never reads, so they must
+ * not flip it — `isUnrestricted` would be the wrong switch.
+ */
+describe('PathPolicy.restrictsReads', () => {
+  it.each([
+    ['nothing set', {}, false],
+    ['write paths only', { writePaths: ['projects'] }, false],
+    ['read-only only', { readOnly: true }, false],
+    ['read-only with write paths', { readOnly: true, writePaths: ['projects'] }, false],
+    ['read paths', { readPaths: ['public'] }, true],
+    ['read paths with read-only', { readPaths: ['public'], readOnly: true }, true],
+  ] as Array<[string, Partial<ServerConfig>, boolean]>)(
+    '%s → %s',
+    (_label, overrides, expected) => {
+      expect(new PathPolicy(cfg(overrides)).restrictsReads).toBe(expected);
+    },
+  );
+});
+
+/**
+ * Folders on the way to the read scope: listable and walkable so a nested
+ * scope can be browsed to, while every other out-of-scope name stays hidden.
+ */
+describe('PathPolicy.isScopeAncestor', () => {
+  it('is true for every folder above a nested scope, at segment boundaries', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['projects/work/deep'] }));
+    expect(p.isScopeAncestor('')).toBe(true);
+    expect(p.isScopeAncestor('Projects')).toBe(true);
+    expect(p.isScopeAncestor('projects/WORK')).toBe(true);
+    expect(p.isScopeAncestor('/Projects/Work/')).toBe(true);
+    expect(p.isScopeAncestor('Projects\\Work')).toBe(true);
+    // Not an ancestor: the scope itself, anything inside it, a sibling, a string prefix.
+    expect(p.isScopeAncestor('projects/work/deep')).toBe(false);
+    expect(p.isScopeAncestor('projects/work/deep/x')).toBe(false);
+    expect(p.isScopeAncestor('projects/other')).toBe(false);
+    expect(p.isScopeAncestor('proj')).toBe(false);
+    expect(p.isScopeAncestor('projects/wor')).toBe(false);
+  });
+
+  it('counts write paths, except under OBSIDIAN_READ_ONLY', () => {
+    const scoped = { readPaths: ['private'], writePaths: ['projects/work'] };
+    expect(new PathPolicy(cfg(scoped)).isScopeAncestor('projects')).toBe(true);
+    expect(new PathPolicy(cfg({ ...scoped, readOnly: true })).isScopeAncestor('projects')).toBe(
+      false,
+    );
+  });
+
+  it('is false everywhere when reads are unrestricted', () => {
+    expect(new PathPolicy(cfg()).isScopeAncestor('')).toBe(false);
+    expect(new PathPolicy(cfg({ writePaths: ['projects/work'] })).isScopeAncestor('projects')).toBe(
+      false,
+    );
+  });
+});
+
+describe('PathPolicy.assertListable', () => {
+  const p = new PathPolicy(cfg({ readPaths: ['projects/work'] }));
+
+  it('passes a readable folder and a folder on the way to the scope', () => {
+    expect(() => p.assertListable('Projects/Work/Sub')).not.toThrow();
+    expect(() => p.assertListable('Projects')).not.toThrow();
+  });
+
+  it('refuses any other folder with the read denial', () => {
+    for (const dir of ['Private', 'Proj', 'Projects/Other']) {
+      expect(thrownBy(() => p.assertListable(dir)).data).toMatchObject({
+        reason: 'path_forbidden',
+        op: 'read',
+        subreason: 'outside_read_paths',
+        path: dir,
+        activeScope: ['projects/work'],
+      });
+    }
+  });
+});
+
+describe('PathPolicy.filterListing', () => {
+  const ROOT = ['todo.md', 'Private/', 'Projects/', 'Proj/', 'projects-old/'];
+
+  it('keeps only folders on the way to a nested scope at the root', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['projects/work'] }));
+    expect(p.filterListing('', ROOT)).toEqual(['Projects/']);
+  });
+
+  it('keeps the scoped folder and drops its siblings one level down', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['projects/work'] }));
+    expect(p.filterListing('Projects', ['Work/', 'Other/', 'readme.md', 'Work.md'])).toEqual([
+      'Work/',
+    ]);
+    // A trailing slash or backslash separators on the listed folder resolve the same way.
+    expect(p.filterListing('/Projects/', ['Work/', 'Other/'])).toEqual(['Work/']);
+    expect(p.filterListing('Projects\\Work', ['w.md', 'Deep/'])).toEqual(['w.md', 'Deep/']);
+  });
+
+  it('keeps a scoped file and nothing beside it', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['work/plan.md'] }));
+    expect(p.filterListing('', ['Work/', 'todo.md'])).toEqual(['Work/']);
+    expect(p.filterListing('Work', ['plan.md', 'plan.txt', 'salary.md', 'Sub/'])).toEqual([
+      'plan.md',
+    ]);
+  });
+
+  it('treats a file named like an ancestor as out of scope', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['projects/work'] }));
+    expect(p.filterListing('', ['Projects', 'Projects/'])).toEqual(['Projects/']);
+  });
+
+  it('keeps write-path folders readable, except under OBSIDIAN_READ_ONLY', () => {
+    const scoped = { readPaths: ['private'], writePaths: ['projects/work'] };
+    expect(new PathPolicy(cfg(scoped)).filterListing('', ROOT)).toEqual(['Private/', 'Projects/']);
+    expect(new PathPolicy(cfg({ ...scoped, readOnly: true })).filterListing('', ROOT)).toEqual([
+      'Private/',
+    ]);
+  });
+
+  it('passes every entry through when reads are unrestricted', () => {
+    expect(new PathPolicy(cfg({ writePaths: ['projects'] })).filterListing('', ROOT)).toEqual(ROOT);
+  });
+
+  it('returns an empty listing when nothing in the folder is in scope', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['projects/work'] }));
+    expect(p.filterListing('Projects/Work', [])).toEqual([]);
+    expect(p.filterListing('', ['todo.md', 'Private/'])).toEqual([]);
   });
 });
 

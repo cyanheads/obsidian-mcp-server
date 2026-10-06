@@ -69,6 +69,13 @@
           "default": "false"
         },
         {
+          "name": "OBSIDIAN_DELETE_ELICITATION",
+          "description": "Opt-in delete confirmation. When true, obsidian_delete_note asks the user to confirm each delete through an elicitation round (the client must support elicitation), and HTTP startup requires a stateful session unless OBSIDIAN_READ_ONLY=true disables the tool. Off by default — the delete runs on the first call, bounded by OBSIDIAN_WRITE_PATHS and OBSIDIAN_READ_ONLY.",
+          "format": "string",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
           "name": "OBSIDIAN_OMNISEARCH_URL",
           "description": "Override URL for the Omnisearch plugin HTTP server. Unset derives from OBSIDIAN_BASE_URL host with port 51361. Required only if the Omnisearch plugin is not on the default port.",
           "format": "string",
@@ -148,6 +155,13 @@
         {
           "name": "OBSIDIAN_READ_ONLY",
           "description": "Global read-only kill switch. When true, every write is denied regardless of OBSIDIAN_WRITE_PATHS, and the command-palette pair is suppressed (commands can mutate). Useful for shared or public-facing deployments.",
+          "format": "string",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
+          "name": "OBSIDIAN_DELETE_ELICITATION",
+          "description": "Opt-in delete confirmation. When true, obsidian_delete_note asks the user to confirm each delete through an elicitation round (the client must support elicitation), and HTTP startup requires a stateful session unless OBSIDIAN_READ_ONLY=true disables the tool. Off by default — the delete runs on the first call, bounded by OBSIDIAN_WRITE_PATHS and OBSIDIAN_READ_ONLY.",
           "format": "string",
           "isRequired": false,
           "default": "false"

@@ -4,10 +4,15 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { describe, expect, it } from 'vitest';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, describe, expect, it } from 'vitest';
 import { obsidianListTags } from '@/mcp-server/tools/definitions/obsidian-list-tags.tool.js';
-import { setupHarness } from '../helpers.js';
+import {
+  type ObsidianFetch,
+  ObsidianService,
+  setObsidianService,
+} from '@/services/obsidian/obsidian-service.js';
+import { makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -48,12 +53,9 @@ describe('obsidian_list_tags', () => {
     const ctx = createMockContext({ errors: obsidianListTags.errors });
     const out = await obsidianListTags.handler(obsidianListTags.input.parse({}), ctx);
     expect(out.tags).toEqual([]);
-    const enrichment = getEnrichment(ctx);
-    expect(enrichment.notice).toMatch(/no tags/i);
     // An empty vault is not a filtered-out vault: `limit` is always applied but
     // never causes an empty result, so it must not appear in this notice.
-    expect(enrichment.notice).toMatch(/no tagged notes/i);
-    expect(enrichment.notice).not.toMatch(/limit/i);
+    expect(getEnrichment(ctx).notice).toBe('No tags found. The vault may have no tagged notes.');
   });
 
   it('applies nameRegex to keep only matching tags', async () => {
@@ -119,79 +121,50 @@ describe('obsidian_list_tags', () => {
   });
 
   /**
-   * Regression: `nameRegex` is compiled from user input with `new RegExp(...)`
-   * and run against every tag name. A catastrophic-backtracking pattern like
-   * `^(a+)+$` against a long all-`a` string blows up exponentially — on V8 a
-   * 28-character input takes seconds. Since tag names can be authored inside
-   * the vault (or appear in adversarial test data), an LLM that constructs a
-   * naive regex can stall the entire request.
-   *
-   * Acceptable fixes: validate patterns with `safe-regex2` (or equivalent)
-   * and throw `regex_invalid` on rejection, cap pattern length, cap tag-name
-   * length matched, or run the match in a worker with a hard wall-clock
-   * deadline. Any of those satisfies this test.
+   * `nameRegex` is compiled from caller input and run against every tag name,
+   * and tag names are vault-authored, so a catastrophic-backtracking pattern
+   * like `^(a+)+$` against a long all-`a` tag can stall the request. The static
+   * guard rejects it before any tag is read: no `/tags/` intercept is
+   * registered, so a handler that reached the vault would fail with "No mock
+   * intercept" instead of `regex_unsafe`.
    */
-  it('does not hang on a ReDoS pattern (rejects unsafe regex or completes within 1s)', async () => {
-    const longA = 'a'.repeat(28);
-    harness
-      .current()
-      .pool.intercept({ path: '/tags/', method: 'GET' })
-      .reply(
-        200,
-        { tags: [{ name: `${longA}b`, count: 1 }] },
-        { headers: { 'content-type': 'application/json' } },
-      );
-
-    const start = Date.now();
-    try {
-      await obsidianListTags.handler(
+  it('throws regex_unsafe (ValidationError) for a catastrophic-backtracking nameRegex before reading tags', async () => {
+    await expect(
+      obsidianListTags.handler(
         obsidianListTags.input.parse({ nameRegex: '^(a+)+$' }),
         createMockContext({ errors: obsidianListTags.errors }),
-      );
-    } catch (err) {
-      // Acceptable outcome: pattern-safety guard rejects the regex before
-      // running it. Bubble anything that isn't a McpError so an unexpected
-      // crash still fails the test.
-      expect(err).toMatchObject({ code: expect.any(Number) });
-    }
-    expect(Date.now() - start).toBeLessThan(1_000);
-  }, 10_000);
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'regex_unsafe', nameRegex: '^(a+)+$' },
+    });
+  });
 });
 
 describe('obsidian_list_tags / format()', () => {
-  it('renders each tag with its count', () => {
-    const blocks = obsidianListTags.format!({
-      tags: [{ name: 'foo', count: 2 }],
-      appliedFilters: { limit: 200 },
-    });
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('#foo');
-    expect(text).toContain('(2)');
+  const textOf = (result: Parameters<NonNullable<typeof obsidianListTags.format>>[0]) =>
+    (obsidianListTags.format!(result)[0] as { text: string }).text;
+
+  it('renders each tag with its count under a header echoing the default limit', () => {
+    expect(
+      textOf({
+        tags: [
+          { name: 'foo', count: 2 },
+          { name: 'foo/bar', count: 1 },
+        ],
+        appliedFilters: { limit: 200 },
+      }),
+    ).toBe(['**2 tags** · limit=200', '', '- `#foo` (2)', '- `#foo/bar` (1)'].join('\n'));
   });
 
-  it('renders a zero-count header when there are no tags', () => {
-    const blocks = obsidianListTags.format!({ tags: [], appliedFilters: { limit: 200 } });
-    expect((blocks[0] as { text: string }).text).toContain('0 tags');
-  });
-
-  it('echoes the active nameRegex in the header when a filter was applied', () => {
-    const blocks = obsidianListTags.format!({
-      tags: [{ name: 'work', count: 5 }],
-      appliedFilters: { nameRegex: '^work', limit: 200 },
-    });
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('nameRegex=`^work`');
-    expect(text).toContain('#work');
+  it('renders a bare zero-count header when there are no tags', () => {
+    expect(textOf({ tags: [], appliedFilters: { limit: 200 } })).toBe('**0 tags** · limit=200');
   });
 
   it('echoes the active nameRegex in the header even when the result is empty', () => {
-    const blocks = obsidianListTags.format!({
-      tags: [],
-      appliedFilters: { nameRegex: '^nothing-matches$', limit: 200 },
-    });
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('0 tags');
-    expect(text).toContain('^nothing-matches$');
+    expect(
+      textOf({ tags: [], appliedFilters: { nameRegex: '^nothing-matches$', limit: 200 } }),
+    ).toBe('**0 tags** · nameRegex=`^nothing-matches$` · limit=200');
   });
 });
 
@@ -243,13 +216,6 @@ describe('obsidian_list_tags / cap, sort, and truncation disclosure', () => {
     ]);
     const { out } = await call({});
     expect(out.tags.map((t) => t.name)).toEqual(['alpha', 'mike', 'zulu']);
-  });
-
-  it('defaults limit to exactly 200 and echoes it in appliedFilters', async () => {
-    reply(UNSORTED);
-    const { out } = await call({});
-    expect(out.appliedFilters.limit).toBe(200);
-    expect(obsidianListTags.input.parse({}).limit).toBe(200);
   });
 
   it('caps at the default 200 and discloses truncation through enrichment', async () => {
@@ -350,45 +316,159 @@ describe('obsidian_list_tags / cap, sort, and truncation disclosure', () => {
     reply(UNSORTED);
     const { out, enrichment } = await call({ minCount: 5_000 });
     expect(out.tags).toEqual([]);
-    expect(enrichment.notice).toMatch(/no tags/i);
+    expect(enrichment.notice).toBe(
+      'No tags matched minCount=5000. Loosen or drop the filters to widen the listing.',
+    );
     expect(enrichment.truncated).toBeUndefined();
   });
 
-  it('declares truncated, shown, and cap in the enrichment block', () => {
-    const keys = Object.keys(obsidianListTags.enrichment ?? {});
-    expect(keys).toContain('truncated');
-    expect(keys).toContain('shown');
-    expect(keys).toContain('cap');
+  /**
+   * The handler-level cases read the mock's enrichment store, which keeps
+   * whatever the handler set. Only the declared `enrichment` schema lets
+   * `truncated` / `shown` / `cap` through to a client, so this runs the
+   * production pipeline and reads both wire surfaces.
+   */
+  it('carries truncated, shown, and cap to both wire surfaces when the cap bites', async () => {
+    reply(UNSORTED);
+    const res = await runToolContract(obsidianListTags, { limit: 2 });
+
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      tags: [
+        { name: 'beta', count: 97 },
+        { name: 'epsilon', count: 40 },
+      ],
+      truncated: true,
+      shown: 2,
+      cap: 2,
+    });
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('**truncated:** true\n**shown:** 2\n**cap:** 2');
+    expect(text).toContain('Showing the 2 most-used of 5 matching tags.');
   });
 
-  it('no longer describes the tags output as upstream-ordered', () => {
-    const description = obsidianListTags.output.shape.tags.description ?? '';
-    expect(description).not.toMatch(/upstream-provided order/i);
-    expect(description).toMatch(/count/i);
+  it('describes the tags output as ordered by count, ties by name', () => {
+    expect(obsidianListTags.output.shape.tags.description).toBe(
+      'Matching tags ordered by `count` descending, ties broken by name ascending, truncated to `appliedFilters.limit`.',
+    );
   });
 });
 
 describe('obsidian_list_tags / format() echoes the applied cap and filters', () => {
-  it('renders limit and minCount alongside nameRegex', () => {
+  it('renders nameRegex, minCount, and limit in the header', () => {
     const text = (
       obsidianListTags.format!({
         tags: [{ name: 'work', count: 5 }],
         appliedFilters: { nameRegex: '^work', minCount: 3, limit: 25 },
       })[0] as { text: string }
     ).text;
-    expect(text).toContain('nameRegex=`^work`');
-    expect(text).toContain('minCount=3');
-    expect(text).toContain('limit=25');
+    expect(text).toBe(
+      ['**1 tags** · nameRegex=`^work` · minCount=3 · limit=25', '', '- `#work` (5)'].join('\n'),
+    );
+  });
+});
+
+/**
+ * Under `OBSIDIAN_READ_PATHS`, tags come from readable notes only, counted as
+ * readable notes carrying the tag or a tag nested under it. The stub serves a
+ * vault-wide `/tags/` too, so a listing that ignored the scope would surface
+ * `secret` and `proj/z` and the vault-wide `misc` count.
+ */
+describe('obsidian_list_tags / OBSIDIAN_READ_PATHS scope', () => {
+  const NOTES = [
+    { filename: 'Work/a.md', result: ['proj/x', 'misc'] },
+    { filename: 'Work/b.md', result: ['proj/x', 'proj/y'] },
+    { filename: 'Work/c.md', result: ['proj/y', 'solo'] },
+    { filename: 'Private/p.md', result: ['proj/z', 'secret', 'misc'] },
+  ];
+  const VAULT_WIDE = [
+    { name: 'proj', count: 5 },
+    { name: 'proj/x', count: 2 },
+    { name: 'proj/y', count: 2 },
+    { name: 'proj/z', count: 1 },
+    { name: 'misc', count: 2 },
+    { name: 'secret', count: 1 },
+    { name: 'solo', count: 1 },
+  ];
+
+  afterEach(() => {
+    setObsidianService(undefined);
   });
 
-  it('renders the limit even when it is the untouched default', () => {
-    const text = (
-      obsidianListTags.format!({
-        tags: [{ name: 'work', count: 5 }],
-        appliedFilters: { limit: 200 },
-      })[0] as { text: string }
-    ).text;
-    expect(text).toContain('limit=200');
-    expect(text).not.toContain('minCount');
+  function scope(readPaths: string[]) {
+    const fetchImpl: ObsidianFetch = async (url) => {
+      const path = new URL(url).pathname;
+      const body = path === '/search/' ? NOTES : { tags: VAULT_WIDE };
+      return mockResponse(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    setObsidianService(new ObsidianService(makeTestConfig({ readPaths }), fetchImpl));
+  }
+
+  it('returns only readable-note tags with note counts on both wire surfaces', async () => {
+    scope(['work']);
+    const res = await runToolContract(obsidianListTags, {});
+
+    expect(res.isError).toBeFalsy();
+    const structured = res.structuredContent as {
+      tags: Array<{ name: string; count: number }>;
+      appliedFilters: Record<string, unknown>;
+    };
+    expect(structured.tags).toEqual([
+      { name: 'proj', count: 3 },
+      { name: 'proj/x', count: 2 },
+      { name: 'proj/y', count: 2 },
+      { name: 'misc', count: 1 },
+      { name: 'solo', count: 1 },
+    ]);
+    expect(structured.appliedFilters).toEqual({ limit: 200 });
+
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toBe(
+      [
+        '**5 tags** · limit=200',
+        '',
+        '- `#proj` (3)',
+        '- `#proj/x` (2)',
+        '- `#proj/y` (2)',
+        '- `#misc` (1)',
+        '- `#solo` (1)',
+      ].join('\n'),
+    );
+  });
+
+  it('applies nameRegex, minCount, limit, and truncated to the scoped set', async () => {
+    scope(['work']);
+    const ctx = createMockContext({ errors: obsidianListTags.errors });
+    const out = await obsidianListTags.handler(
+      obsidianListTags.input.parse({ nameRegex: '^proj', minCount: 2, limit: 2 }),
+      ctx,
+    );
+    // Scoped candidates: proj 3, proj/x 2, proj/y 2 — proj/z is out of scope.
+    expect(out.tags).toEqual([
+      { name: 'proj', count: 3 },
+      { name: 'proj/x', count: 2 },
+    ]);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment).toMatchObject({ truncated: true, shown: 2, cap: 2 });
+    expect(enrichment.notice).toContain('Showing the 2 most-used of 3 matching tags.');
+  });
+
+  it('reports an empty scoped listing with a notice that names the read scope', async () => {
+    scope(['nowhere']);
+    const ctx = createMockContext({ errors: obsidianListTags.errors });
+    const out = await obsidianListTags.handler(obsidianListTags.input.parse({}), ctx);
+    expect(out.tags).toEqual([]);
+    expect(getEnrichment(ctx).notice).toBe(
+      'No tags found in the notes OBSIDIAN_READ_PATHS makes readable.',
+    );
+  });
+
+  it('describes count as readable notes under a read scope', () => {
+    const count = obsidianListTags.output.shape.tags.element.shape.count.description ?? '';
+    expect(count).toMatch(/OBSIDIAN_READ_PATHS/);
+    expect(count).toMatch(/readable notes carrying the tag or a tag nested under it/);
   });
 });

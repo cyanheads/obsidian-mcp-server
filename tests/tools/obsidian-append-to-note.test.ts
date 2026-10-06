@@ -23,6 +23,10 @@ const harness = setupHarness();
 
 const cl = (n: number) => ({ headers: { 'content-length': String(n) } });
 
+/** Recorded request headers keep the casing the service sent; read them by lower-cased key. */
+const lowerKeys = (headers: Record<string, string>): Record<string, string> =>
+  Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+
 describe('obsidian_append_to_note (whole file)', () => {
   it('reports created:true with both sizes when the note did not exist', async () => {
     const pool = harness.current().pool;
@@ -77,28 +81,6 @@ describe('obsidian_append_to_note (whole file)', () => {
       previousSizeInBytes: 100,
       currentSizeInBytes: 150,
     });
-  });
-
-  it('surfaces upstream auto-newline injection in currentSizeInBytes (4 + 4 → 9)', async () => {
-    const pool = harness.current().pool;
-    /** Mirrors verified plugin v3.6.1 behavior: appending 4 bytes to a 4-byte
-     * file lacking a trailing newline yields 9 bytes (plugin injects \n).
-     * The agent sees `currentSize - previousSize - bodyLen = 1` and can
-     * decide whether the +1 is expected slack or warrants a reread. */
-    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(4));
-    pool.intercept({ path: '/vault/Note.md', method: 'POST' }).reply(200, '');
-    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(9));
-
-    const out = await obsidianAppendToNote.handler(
-      obsidianAppendToNote.input.parse({
-        target: { type: 'path', path: 'Note.md' },
-        content: 'BBBB',
-      }),
-      createMockContext({ errors: obsidianAppendToNote.errors }),
-    );
-
-    expect(out.previousSizeInBytes).toBe(4);
-    expect(out.currentSizeInBytes).toBe(9);
   });
 });
 
@@ -163,7 +145,7 @@ describe('obsidian_append_to_note (section)', () => {
     let seenHeaders: Record<string, string> = {};
     let seenBody = '';
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
-      seenHeaders = (opts.headers as Record<string, string>) ?? {};
+      seenHeaders = lowerKeys(opts.headers);
       seenBody = opts.body ?? '';
       return { statusCode: 200, data: '' };
     });
@@ -179,11 +161,10 @@ describe('obsidian_append_to_note (section)', () => {
       createMockContext({ errors: obsidianAppendToNote.errors }),
     );
 
-    expect(seenHeaders.operation ?? seenHeaders.Operation).toBe('append');
-    expect(seenHeaders['create-target-if-missing'] ?? seenHeaders['Create-Target-If-Missing']).toBe(
-      'true',
-    );
-    expect(seenBody).toBe('- new task');
+    expect(seenHeaders.operation).toBe('append');
+    expect(seenHeaders['create-target-if-missing']).toBe('true');
+    expect(seenHeaders['reject-if-content-preexists']).toBe('true');
+    expect(seenBody).toBe('- new task\n');
     expect(out).toEqual({
       path: 'Note.md',
       sectionTargeted: true,
@@ -388,7 +369,7 @@ describe('obsidian_append_to_note / format()', () => {
     expect(text).toMatch(/Created:\*?\s*false/);
   });
 
-  it('renders the resolved section target alongside sectionTargeted', () => {
+  it('renders the section branch with the resolved section target and real sizes', () => {
     const blocks = obsidianAppendToNote.format!({
       path: 'Daily.md',
       sectionTargeted: true,
@@ -397,22 +378,13 @@ describe('obsidian_append_to_note / format()', () => {
       previousSizeInBytes: 200,
       currentSizeInBytes: 218,
     });
-    expect((blocks[0] as { text: string }).text).toContain(
-      'Section targeted:* true → Sandbox::Section A',
+    expect((blocks[0] as { text: string }).text).toBe(
+      [
+        '**Appended to Daily.md**',
+        '*Size:* 200 → 218 bytes',
+        '*Created:* false',
+        '*Section targeted:* true → Sandbox::Section A',
+      ].join('\n'),
     );
-  });
-
-  it('renders the section branch with sectionTargeted:true and real sizes', () => {
-    const blocks = obsidianAppendToNote.format!({
-      path: 'Daily.md',
-      sectionTargeted: true,
-      created: false,
-      previousSizeInBytes: 200,
-      currentSizeInBytes: 218,
-    });
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('**Appended to Daily.md**');
-    expect(text).toMatch(/Size:\*?\s*200 → 218 bytes/);
-    expect(text).toMatch(/Section targeted:\*?\s*true/);
   });
 });

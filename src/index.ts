@@ -14,6 +14,7 @@ import { getServerConfig } from '@/config/server-config.js';
 import { allPromptDefinitions } from '@/mcp-server/prompts/definitions/index.js';
 import { allResourceDefinitions } from '@/mcp-server/resources/definitions/index.js';
 import {
+  buildDeleteNoteTool,
   buildSearchNotesTool,
   commandToolDefinitions,
   readToolDefinitions,
@@ -72,14 +73,26 @@ function buildInstructions(): string {
   return sections.join('\n\n');
 }
 
+const writeToolSet = [
+  ...writeToolDefinitions,
+  buildDeleteNoteTool({ elicitation: config.deleteElicitation }),
+];
+
+/**
+ * The delete confirmation can run only when `obsidian_delete_note` is
+ * registered: `OBSIDIAN_READ_ONLY=true` disables it below, so the gate — and
+ * the session it needs — exists only with elicitation on and writes allowed.
+ */
+const deleteGateActive = config.deleteElicitation && !config.readOnly;
+
 const writeTools = config.readOnly
-  ? writeToolDefinitions.map((def) =>
+  ? writeToolSet.map((def) =>
       disabledTool(def, {
         reason: 'Disabled by OBSIDIAN_READ_ONLY=true.',
         hint: 'Unset OBSIDIAN_READ_ONLY (or set it to false) to enable write tools.',
       }),
     )
-  : writeToolDefinitions;
+  : writeToolSet;
 
 const commandTools =
   config.enableCommands && !config.readOnly
@@ -105,14 +118,19 @@ const { services } = await createApp({
   prompts: allPromptDefinitions,
   instructions: buildInstructions(),
   /**
+   * With `OBSIDIAN_DELETE_ELICITATION=true` (and writes allowed),
    * `obsidian_delete_note` confirms through `ctx.requestInput`, which a
    * 2025-era HTTP client can only answer on a stateful session — under
    * stateless HTTP the tool would be unusable for them. Required, not just
-   * defaulted: over HTTP, a resolved `stateless` mode (an explicit
-   * `MCP_SESSION_MODE=stateless`) fails startup with a `ConfigurationError`.
-   * stdio is never refused; `MCP_SESSION_MODE` has no effect there.
+   * defaulted, in that mode: over HTTP, a resolved `stateless` mode (an
+   * explicit `MCP_SESSION_MODE=stateless`) fails startup with a
+   * `ConfigurationError`. With the confirmation off, or the tool disabled by
+   * `OBSIDIAN_READ_ONLY=true`, nothing needs a session and `stateful` is only
+   * the default. stdio is never refused; `MCP_SESSION_MODE` has no effect there.
    */
-  sessionMode: { default: 'stateful', require: 'stateful' },
+  sessionMode: deleteGateActive
+    ? { default: 'stateful', require: 'stateful' }
+    : { default: 'stateful' },
   teardown: () => obsidian.close(),
 });
 
@@ -120,14 +138,18 @@ const { services } = await createApp({
  * Startup banner — emitted after createApp() returns so the framework's
  * `logger.initialize()` has run; calls inside `setup()` happen pre-init and
  * are dropped. Operators check this against their config to verify the active
- * path policy. The active scope on `path_forbidden` errors echoes the same
- * data so the LLM (or operator) can self-correct without scrolling the log.
+ * path policy and whether `obsidian_delete_note` asks before deleting
+ * (`deleteElicitation`, false under read-only like `enableCommands`, since
+ * the tool is disabled there). The active scope on `path_forbidden` errors echoes
+ * the same data so the LLM (or operator) can self-correct without scrolling
+ * the log.
  */
 const bannerCtx = requestContextService.createRequestContext({
   operation: 'startup',
   additionalContext: {
     ...policy.describe(),
     enableCommands: config.enableCommands && !config.readOnly,
+    deleteElicitation: deleteGateActive,
     omnisearchUrl: obsidian.omnisearchUrl,
     omnisearchReachable,
   },

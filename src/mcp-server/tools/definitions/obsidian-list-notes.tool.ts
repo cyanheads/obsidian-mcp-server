@@ -10,6 +10,11 @@
  * the depth limit cut off recursion. Drill deeper by passing a higher `depth`,
  * narrowing with `path`, or filtering with `extension`/`nameRegex`.
  *
+ * Under OBSIDIAN_READ_PATHS, `ObsidianService.listFiles` returns only readable
+ * entries and the folders on the way to the scope, and lists those folders
+ * when asked — so the walk descends into everything it is handed, and the
+ * entry cap and totals count returned entries only.
+ *
  * Named `_notes` rather than `_files` to disambiguate from agents' generic
  * file-system tools (Read, Glob, LS) — a `_files` tool surface tempts agents
  * to fish for non-vault paths through it.
@@ -149,7 +154,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
       reason: 'path_forbidden',
       thrownBy: 'service',
       code: JsonRpcErrorCode.Forbidden,
-      when: 'The supplied `path` is outside OBSIDIAN_READ_PATHS (root listings always pass; specific subdirectories must be readable).',
+      when: 'The supplied `path` is outside OBSIDIAN_READ_PATHS and is not a folder on the way to it. The vault root and the folders leading to a scoped path always list, showing only in-scope entries.',
       recovery:
         'List a directory inside the configured read scope, or omit `path` to list from the vault root. The error data echoes the active scope.',
     },
@@ -309,20 +314,13 @@ async function walkVault(
 
     const fullPath = dir ? `${dir}/${name}` : name;
     const entry: Entry = { path: fullPath, type: isDir ? 'directory' : 'file' };
-    /**
-     * Mark a subdir truncated when (a) we hit the depth cap, OR (b) policy
-     * blocks reading it — the listing surfaces it (operator can see it
-     * exists) but we don't try to walk inside, which would throw
-     * `path_forbidden` mid-walk and abort the whole listing.
-     */
-    const policyBlocked = isDir && !svc.policy.isReadable(fullPath);
-    if (isDir && (currentDepth >= opts.depth || policyBlocked)) entry.truncated = true;
+    if (isDir && currentDepth >= opts.depth) entry.truncated = true;
 
     state.entries.push(entry);
     if (isDir) state.totalDirs++;
     else state.totalFiles++;
 
-    if (isDir && currentDepth < opts.depth && !policyBlocked) {
+    if (isDir && currentDepth < opts.depth) {
       await walkVault(svc, ctx, fullPath, currentDepth + 1, state, opts);
       if (state.cappedByEntries) return;
     }

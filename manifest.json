@@ -32,6 +32,7 @@
         "OBSIDIAN_READ_PATHS": "${user_config.OBSIDIAN_READ_PATHS}",
         "OBSIDIAN_WRITE_PATHS": "${user_config.OBSIDIAN_WRITE_PATHS}",
         "OBSIDIAN_READ_ONLY": "${user_config.OBSIDIAN_READ_ONLY}",
+        "OBSIDIAN_DELETE_ELICITATION": "${user_config.OBSIDIAN_DELETE_ELICITATION}",
         "OBSIDIAN_OMNISEARCH_URL": "${user_config.OBSIDIAN_OMNISEARCH_URL}",
         "MCP_LOG_LEVEL": "${user_config.MCP_LOG_LEVEL}"
       }
@@ -96,6 +97,13 @@
     "OBSIDIAN_READ_ONLY": {
       "title": "Read-Only Mode",
       "description": "Global read-only kill switch. When true, every write is denied. Default: false.",
+      "type": "string",
+      "required": false,
+      "default": ""
+    },
+    "OBSIDIAN_DELETE_ELICITATION": {
+      "title": "Confirm Deletes",
+      "description": "When true, obsidian_delete_note asks you to confirm each delete in a form before removing the note. Off by default — the delete runs without asking.",
       "type": "string",
       "required": false,
       "default": ""

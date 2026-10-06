@@ -16,6 +16,7 @@ const ENV_KEYS = [
   'OBSIDIAN_READ_PATHS',
   'OBSIDIAN_WRITE_PATHS',
   'OBSIDIAN_READ_ONLY',
+  'OBSIDIAN_DELETE_ELICITATION',
   'OBSIDIAN_OMNISEARCH_URL',
 ] as const;
 
@@ -59,9 +60,13 @@ describe('getServerConfig', () => {
     vi.stubEnv('OBSIDIAN_API_KEY', 'k');
     vi.stubEnv('OBSIDIAN_VERIFY_SSL', 'no');
     vi.stubEnv('OBSIDIAN_ENABLE_COMMANDS', 'off');
+    vi.stubEnv('OBSIDIAN_READ_ONLY', '0');
+    vi.stubEnv('OBSIDIAN_DELETE_ELICITATION', 'false');
     const config = getServerConfig();
     expect(config.verifySsl).toBe(false);
     expect(config.enableCommands).toBe(false);
+    expect(config.readOnly).toBe(false);
+    expect(config.deleteElicitation).toBe(false);
   });
 
   it('rejects unrecognized boolean strings at startup', () => {
@@ -304,9 +309,32 @@ describe('OBSIDIAN_READ_ONLY', () => {
     vi.stubEnv('OBSIDIAN_READ_ONLY', '1');
     expect(getServerConfig().readOnly).toBe(true);
   });
+});
 
-  it('defaults to false', () => {
+describe('OBSIDIAN_DELETE_ELICITATION', () => {
+  it('defaults to false when unset or empty', () => {
     vi.stubEnv('OBSIDIAN_API_KEY', 'k');
-    expect(getServerConfig().readOnly).toBe(false);
+    expect(getServerConfig().deleteElicitation).toBe(false);
+    resetServerConfig();
+    vi.stubEnv('OBSIDIAN_DELETE_ELICITATION', '');
+    expect(getServerConfig().deleteElicitation).toBe(false);
+  });
+
+  it('coerces "true"/"1" to true and "false" to false', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_DELETE_ELICITATION', 'true');
+    expect(getServerConfig().deleteElicitation).toBe(true);
+    resetServerConfig();
+    vi.stubEnv('OBSIDIAN_DELETE_ELICITATION', '1');
+    expect(getServerConfig().deleteElicitation).toBe(true);
+    resetServerConfig();
+    vi.stubEnv('OBSIDIAN_DELETE_ELICITATION', 'false');
+    expect(getServerConfig().deleteElicitation).toBe(false);
+  });
+
+  it('rejects an unrecognized value at startup, naming the variable', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_DELETE_ELICITATION', 'ask');
+    expect(() => getServerConfig()).toThrow(/OBSIDIAN_DELETE_ELICITATION/);
   });
 });

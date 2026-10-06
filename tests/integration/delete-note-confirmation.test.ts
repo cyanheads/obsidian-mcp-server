@@ -1,20 +1,23 @@
 /**
- * @fileoverview Issue #120: `obsidian_delete_note` confirms through
- * `ctx.requestInput`, and whether that round trip can complete depends on the
- * protocol era of the client and on `MCP_SESSION_MODE`. A 2025-era client has
- * no `input_required` re-invoke — the SDK's legacy shim has to issue a real
- * `elicitation/create` from a live session — so only a stateful session can
- * carry it. `src/index.ts` declares `sessionMode: { default: 'stateful',
- * require: 'stateful' }` for exactly that reason, and nothing below the
- * transport can prove it holds.
+ * @fileoverview Issues #120 and #153: with `OBSIDIAN_DELETE_ELICITATION=true`,
+ * `obsidian_delete_note` confirms through `ctx.requestInput`, and whether that
+ * round trip can complete depends on the protocol era of the client and on
+ * `MCP_SESSION_MODE`. A 2025-era client has no `input_required` re-invoke —
+ * the SDK's legacy shim has to issue a real `elicitation/create` from a live
+ * session — so only a stateful session can carry it. `src/index.ts` declares
+ * `sessionMode: { default: 'stateful', require: 'stateful' }` in that mode for
+ * exactly that reason, and nothing below the transport can prove it holds.
+ * With the confirmation off (the default), or with `OBSIDIAN_READ_ONLY=true`
+ * disabling the tool, nothing needs a session, so the requirement is dropped.
  *
  * So this runs the real server as a subprocess and, over Streamable HTTP,
  * speaks raw JSON-RPC to it as a `2025-06-18` client against an in-test stub of
- * the Local REST API. The default (stateful) session completes the
- * confirmation and the vault sees exactly one DELETE; an explicit
- * `MCP_SESSION_MODE=stateless` refuses to start over HTTP with a
+ * the Local REST API. With the confirmation on, the default (stateful) session
+ * completes the confirmation and the vault sees exactly one DELETE; an
+ * explicit `MCP_SESSION_MODE=stateless` refuses to start over HTTP with a
  * `ConfigurationError`, while stdio with the same variable starts and answers
- * `initialize`.
+ * `initialize`. With it off, a stateless HTTP server starts and one
+ * `tools/call` deletes the note with no `elicitation/create`.
  *
  * Every child runs from an empty scratch directory: the server loads `.env`
  * from its working directory, and the repo's own `.env` must not reach it.
@@ -60,9 +63,10 @@ interface VaultStub {
 
 /**
  * The slice of the Local REST API `obsidian_delete_note` touches: a GET for the
- * content the confirmation quotes and its consent record hashes, and the DELETE
- * itself. `GET /` answers the capability probe so an unexpected 404 there
- * cannot colour a failure.
+ * content the confirmation quotes and its consent record hashes (as `note+json`
+ * when asked for it, the way the plugin serves it), and the DELETE itself.
+ * `GET /` answers the capability probe so an unexpected 404 there cannot
+ * colour a failure.
  */
 async function startVaultStub(): Promise<VaultStub> {
   const calls: string[] = [];
@@ -71,11 +75,22 @@ async function startVaultStub(): Promise<VaultStub> {
     calls.push(`${req.method} ${path}`);
 
     if (req.method === 'GET' && path === NOTE_PATH) {
+      const json = (req.headers.accept ?? '').includes('json');
       res.writeHead(200, {
-        'content-type': 'text/markdown; charset=utf-8',
+        'content-type': json ? 'application/vnd.olrapi.note+json' : 'text/markdown; charset=utf-8',
         'content-disposition': 'attachment; filename="Note.md"',
       });
-      res.end(NOTE_BODY);
+      res.end(
+        json
+          ? JSON.stringify({
+              path: 'Note.md',
+              content: NOTE_BODY,
+              frontmatter: {},
+              tags: [],
+              stat: { ctime: 0, mtime: 0, size: 0 },
+            })
+          : NOTE_BODY,
+      );
       return;
     }
     if (req.method === 'DELETE' && path === NOTE_PATH) {
@@ -373,8 +388,14 @@ class RawClient {
     return `http://127.0.0.1:${this.port}/mcp`;
   }
 
-  /** Returns the session id the server minted, or `null` on a stateless server. */
-  async initialize(): Promise<string | null> {
+  /**
+   * Returns the session id the server minted, or `null` on a stateless server.
+   * `capabilities` defaults to the bare 2025 elicitation declaration — no
+   * `form`/`url` members yet.
+   */
+  async initialize(
+    capabilities: Record<string, unknown> = { elicitation: {} },
+  ): Promise<string | null> {
     const res = await stage(
       'initialize',
       fetch(this.endpoint, {
@@ -386,8 +407,7 @@ class RawClient {
           method: 'initialize',
           params: {
             protocolVersion: PROTOCOL_VERSION,
-            // The bare 2025 declaration — no `form`/`url` members yet.
-            capabilities: { elicitation: {} },
+            capabilities,
             clientInfo: { name: 'delete-confirmation-integration', version: '1.0.0' },
           },
         }),
@@ -429,30 +449,72 @@ class RawClient {
 // Cases
 // ---------------------------------------------------------------------------
 
-describe('obsidian_delete_note confirmation over HTTP, 2025-era client', () => {
-  const running: Array<() => Promise<void>> = [];
+/** The server environment that turns the delete confirmation on. */
+const CONFIRMING = { OBSIDIAN_DELETE_ELICITATION: 'true' };
 
-  afterEach(async () => {
-    // Always tear the subprocess down, whatever the assertions did.
-    await Promise.all(running.splice(0).map((stop) => stop().catch(() => undefined)));
-  });
+const running: Array<() => Promise<void>> = [];
 
-  async function bootstrap(env: Record<string, string> = {}): Promise<{
-    client: RawClient;
-    vault: VaultStub;
-    sessionId: string | null;
-  }> {
-    const vault = await stage('vault stub listen', startVaultStub());
-    running.push(vault.close);
-    const server = await stage('server startup', startServer(vault.port, env), 25_000);
-    running.push(server.kill);
-    const client = new RawClient(server.port);
-    const sessionId = await client.initialize();
-    return { client, vault, sessionId };
+afterEach(async () => {
+  // Always tear the subprocess down, whatever the assertions did.
+  await Promise.all(running.splice(0).map((stop) => stop().catch(() => undefined)));
+});
+
+async function bootstrap(
+  env: Record<string, string> = {},
+  capabilities?: Record<string, unknown>,
+): Promise<{
+  client: RawClient;
+  vault: VaultStub;
+  sessionId: string | null;
+}> {
+  const vault = await stage('vault stub listen', startVaultStub());
+  running.push(vault.close);
+  const server = await stage('server startup', startServer(vault.port, env), 25_000);
+  running.push(server.kill);
+  const client = new RawClient(server.port);
+  const sessionId = await client.initialize(capabilities);
+  return { client, vault, sessionId };
+}
+
+/**
+ * The tools `tools/list` advertises. Fails unless the server answered with a
+ * tools array, so a broken listing cannot pass for one that omits a tool.
+ */
+async function listedTools(
+  client: RawClient,
+): Promise<Array<{ name: string; description?: string }>> {
+  const res = await stage(
+    'tools/list',
+    client.post({ jsonrpc: '2.0', id: 9, method: 'tools/list', params: {} }),
+  );
+  const listed = await firstFrame(res, (frame) => frame.id === 9);
+  const tools = (listed.result as { tools?: Array<{ name: string; description?: string }> })?.tools;
+  expect(tools, JSON.stringify(listed)).toBeInstanceOf(Array);
+  return tools as Array<{ name: string; description?: string }>;
+}
+
+/** The description `tools/list` advertises for `obsidian_delete_note`. */
+async function deleteToolDescription(client: RawClient): Promise<string | undefined> {
+  return (await listedTools(client)).find((t) => t.name === 'obsidian_delete_note')?.description;
+}
+
+/**
+ * The first frame `match` accepts from a POST's response, whichever way the
+ * server answered: an SSE stream (read frame by frame) or a single JSON body.
+ */
+async function firstFrame(res: Response, match: (frame: Frame) => boolean): Promise<Frame> {
+  if ((res.headers.get('content-type') ?? '').includes('text/event-stream')) {
+    const stream = new FrameStream(res.body as ReadableStream<Uint8Array>);
+    const found = await stream.until(match);
+    await stream.cancel();
+    return found;
   }
+  return JSON.parse(await stage('response body', res.text())) as Frame;
+}
 
+describe('obsidian_delete_note confirmation over HTTP, 2025-era client', () => {
   it('completes the elicitation round trip and deletes the note', async () => {
-    const { client, vault, sessionId } = await bootstrap();
+    const { client, vault, sessionId } = await bootstrap(CONFIRMING);
     expect(sessionId).toBeTruthy();
 
     const call = await client.callTool(2, 'obsidian_delete_note', {
@@ -485,6 +547,51 @@ describe('obsidian_delete_note confirmation over HTTP, 2025-era client', () => {
 
     expect(vault.calls.filter((call) => call === `DELETE ${NOTE_PATH}`)).toHaveLength(1);
   });
+
+  it('advertises the confirmation in the tool description', async () => {
+    const { client } = await bootstrap(CONFIRMING);
+
+    expect(await deleteToolDescription(client)).toBe(
+      'Permanently delete a note from the vault. Asks the user to confirm before deleting — the call is answered with a confirmation request and retried with the answer. Recovery requires the local trash in Obsidian — there is no API-level undo.',
+    );
+  });
+});
+
+describe('obsidian_delete_note with the confirmation off, stateless HTTP', () => {
+  it('starts, and one tools/call from a client without elicitation deletes the note', async () => {
+    const { client, vault, sessionId } = await bootstrap({ MCP_SESSION_MODE: 'stateless' }, {});
+    expect(sessionId).toBeNull();
+
+    const call = await client.callTool(2, 'obsidian_delete_note', {
+      target: { type: 'path', path: 'Note.md' },
+    });
+    expect(call.status).toBe(200);
+    const first = await firstFrame(
+      call,
+      (frame) => frame.id === 2 || frame.method === 'elicitation/create',
+    );
+
+    expect(first.method).toBeUndefined();
+    expect(first.result?.isError).not.toBe(true);
+    expect(first.result?.structuredContent).toEqual({
+      path: 'Note.md',
+      deleted: true,
+      previousSizeInBytes: 13,
+      currentSizeInBytes: 0,
+    });
+    /** `note+json` for the exact-path check, raw markdown for the bytes, then the DELETE. */
+    expect(
+      vault.calls.filter((c) => c.startsWith('GET /vault/') || c.startsWith('DELETE')),
+    ).toEqual([`GET ${NOTE_PATH}`, `GET ${NOTE_PATH}`, `DELETE ${NOTE_PATH}`]);
+  });
+
+  it('advertises that it deletes without asking', async () => {
+    const { client } = await bootstrap({ MCP_SESSION_MODE: 'stateless' }, {});
+
+    expect(await deleteToolDescription(client)).toBe(
+      'Permanently delete a note from the vault. Deletes on the first call without asking the user to confirm. Recovery requires the local trash in Obsidian — there is no API-level undo.',
+    );
+  });
 });
 
 describe('the stateful-session requirement', () => {
@@ -496,6 +603,7 @@ describe('the stateful-session requirement', () => {
 
   it('refuses to start over HTTP under MCP_SESSION_MODE=stateless', async () => {
     const { child, output } = spawnServer({
+      ...CONFIRMING,
       MCP_TRANSPORT_TYPE: 'http',
       MCP_HTTP_PORT: String(await freePort()),
       MCP_HTTP_HOST: '127.0.0.1',
@@ -511,9 +619,64 @@ describe('the stateful-session requirement', () => {
     expect(output()).toContain('MCP_SESSION_MODE=stateless');
   });
 
+  /**
+   * `OBSIDIAN_READ_ONLY=true` removes `obsidian_delete_note`, so no
+   * confirmation round can run and nothing needs a session.
+   */
+  it('starts over HTTP under MCP_SESSION_MODE=stateless when OBSIDIAN_READ_ONLY=true', async () => {
+    const { client, sessionId } = await bootstrap({
+      ...CONFIRMING,
+      OBSIDIAN_READ_ONLY: 'true',
+      MCP_SESSION_MODE: 'stateless',
+    });
+
+    expect(sessionId).toBeNull();
+    const names = (await listedTools(client)).map((t) => t.name);
+    expect(names).toContain('obsidian_get_note');
+    expect(names).not.toContain('obsidian_delete_note');
+  });
+
+  it('reports deleteElicitation as off in the startup banner when OBSIDIAN_READ_ONLY=true', async () => {
+    const { child, output } = spawnServer(
+      {
+        ...CONFIRMING,
+        OBSIDIAN_READ_ONLY: 'true',
+        MCP_TRANSPORT_TYPE: 'stdio',
+        MCP_LOG_LEVEL: 'info',
+        // The runner's NODE_ENV=test turns the server's stderr log sink off.
+        NODE_ENV: 'production',
+        OBSIDIAN_BASE_URL: 'http://127.0.0.1:1',
+      },
+      'pipe',
+    );
+    children.push(child);
+
+    /**
+     * Closing stdin ends a stdio server; `close` (not `exit`) fires once its
+     * output pipes have drained, so every log line is in `output()`.
+     */
+    child.stdin?.end();
+    await stage(
+      'stdio server close',
+      new Promise<void>((done) => child.on('close', () => done())),
+      20_000,
+    );
+    const banner = output()
+      .split('\n')
+      .find((line) => line.includes('"msg":"Path policy"'));
+
+    expect(banner, output().slice(-800)).toBeDefined();
+    expect(JSON.parse(banner as string)).toMatchObject({
+      readOnly: true,
+      enableCommands: false,
+      deleteElicitation: false,
+    });
+  });
+
   it('starts on stdio under MCP_SESSION_MODE=stateless and answers initialize', async () => {
     const { child, output } = spawnServer(
       {
+        ...CONFIRMING,
         MCP_TRANSPORT_TYPE: 'stdio',
         MCP_SESSION_MODE: 'stateless',
         OBSIDIAN_BASE_URL: 'http://127.0.0.1:1',

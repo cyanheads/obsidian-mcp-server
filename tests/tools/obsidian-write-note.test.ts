@@ -23,6 +23,14 @@ const harness = setupHarness();
 
 const cl = (n: number) => ({ headers: { 'content-length': String(n) } });
 
+/**
+ * Recorded request headers keep the casing the service sent, so lower-case
+ * every key before reading one — an absent-header assertion against a single
+ * spelling would pass whatever casing the header actually went out in.
+ */
+const lowerKeys = (headers: Record<string, string>): Record<string, string> =>
+  Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+
 /** `tree` as ATX heading lines, one level per nesting depth, repeat suffixes dropped. */
 function noteFor(tree: HeadingTree, depth = 1): string {
   return Object.entries(tree)
@@ -69,8 +77,7 @@ describe('obsidian_write_note (whole file)', () => {
     pool.intercept({ path: '/vault/Note.md', method: 'PUT' }).reply((opts) => {
       seenMethod = opts.method as string;
       seenBody = String(opts.body ?? '');
-      const headers = opts.headers as Record<string, string>;
-      seenContentType = headers['content-type'] ?? headers['Content-Type'] ?? '';
+      seenContentType = lowerKeys(opts.headers)['content-type'] ?? '';
       return { statusCode: 200, data: '' };
     });
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(10));
@@ -159,7 +166,7 @@ describe('obsidian_write_note (section)', () => {
 
     let seenHeaders: Record<string, string> = {};
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
-      seenHeaders = (opts.headers as Record<string, string>) ?? {};
+      seenHeaders = lowerKeys(opts.headers);
       return { statusCode: 200, data: '' };
     });
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(312));
@@ -173,14 +180,12 @@ describe('obsidian_write_note (section)', () => {
       createMockContext({ errors: obsidianWriteNote.errors }),
     );
 
-    expect(seenHeaders.operation ?? seenHeaders.Operation).toBe('replace');
-    expect(seenHeaders['target-type'] ?? seenHeaders['Target-Type']).toBe('heading');
-    expect(seenHeaders['target-delimiter'] ?? seenHeaders['Target-Delimiter']).toBe('::');
+    expect(seenHeaders.operation).toBe('replace');
+    expect(seenHeaders['target-type']).toBe('heading');
+    expect(seenHeaders['target-delimiter']).toBe('::');
     // write-note's section replace hardcodes applyIfContentPreexists: true → no Reject header.
     // (Replace is exempt at the plugin layer anyway; this just keeps intent explicit.)
-    expect(
-      seenHeaders['reject-if-content-preexists'] ?? seenHeaders['Reject-If-Content-Preexists'],
-    ).toBeUndefined();
+    expect(seenHeaders).not.toHaveProperty('reject-if-content-preexists');
     expect(out).toEqual({
       path: 'Note.md',
       sectionTargeted: true,
@@ -212,7 +217,7 @@ describe('obsidian_write_note (section)', () => {
       createMockContext({ errors: obsidianWriteNote.errors }),
     );
 
-    expect(seenBody).toBe('body line 1\nbody line 2');
+    expect(seenBody).toBe('body line 1\nbody line 2\n');
   });
 
   it('preserves content unchanged when the leading heading does not match the target', async () => {
@@ -236,10 +241,15 @@ describe('obsidian_write_note (section)', () => {
       createMockContext({ errors: obsidianWriteNote.errors }),
     );
 
-    expect(seenBody).toBe('## Different Heading\n\nbody');
+    expect(seenBody).toBe('## Different Heading\n\nbody\n');
   });
 
-  /** Captures the PATCH body of a heading-section write of `content` to `target`. */
+  /**
+   * Captures the PATCH body of a heading-section write of `content` to `target`
+   * on plugin v4.x, whose markdown-patch 1.x engine splices content in as
+   * given — the service closes it with a line break so it keeps off the next
+   * heading.
+   */
   async function writtenBody(
     target: string,
     headings: HeadingTree,
@@ -272,19 +282,19 @@ describe('obsidian_write_note (section)', () => {
       { Top: { 'Section A': {} } },
       '## Section A\r\n\r\nbody',
     );
-    expect(body).toBe('body');
+    expect(body).toBe('body\n');
   });
 
   it('strips a leading heading written with a closing sequence', async () => {
     const body = await writtenBody('T::Closed', { T: { Closed: {} } }, '## Closed ##\n\nnew body');
-    expect(body).toBe('new body');
+    expect(body).toBe('new body\n');
   });
 
   it.each([
-    ['indented', '   ## Section A\n\nbody', 'body'],
-    ['carrying trailing spaces', '## Section A   \n\nbody', 'body'],
+    ['indented', '   ## Section A\n\nbody', 'body\n'],
+    ['carrying trailing spaces', '## Section A   \n\nbody', 'body\n'],
     ['with no body after it', '## Section A', ''],
-    ['followed by two blank lines, only one of which goes', '## Section A\n\n\nbody', '\nbody'],
+    ['followed by two blank lines, only one of which goes', '## Section A\n\n\nbody', '\nbody\n'],
   ])('strips a leading heading line %s', async (_label, content, expected) => {
     const body = await writtenBody('Top::Section A', { Top: { 'Section A': {} } }, content);
     expect(body).toBe(expected);
@@ -296,7 +306,7 @@ describe('obsidian_write_note (section)', () => {
     ['inside a fence', '```\n## Section A\n```\nbody'],
   ])('leaves a heading line that names the target %s', async (_label, content) => {
     const body = await writtenBody('Top::Section A', { Top: { 'Section A': {} } }, content);
-    expect(body).toBe(content);
+    expect(body).toBe(`${content}\n`);
   });
 
   it('strips a leading setext heading that names the target', async () => {
@@ -305,13 +315,13 @@ describe('obsidian_write_note (section)', () => {
       { Top: { 'Section A': {} } },
       'Section A\n---\n\nbody',
     );
-    expect(body).toBe('body');
+    expect(body).toBe('body\n');
   });
 
   it('keeps a four-space-indented `#` line, which is code rather than a heading', async () => {
     const content = '    ## Section A\nbody';
     const body = await writtenBody('Top::Section A', { Top: { 'Section A': {} } }, content);
-    expect(body).toBe(content);
+    expect(body).toBe(`${content}\n`);
   });
 
   it('rejects a heading path that repeats in the note without writing', async () => {
@@ -341,8 +351,7 @@ describe('obsidian_write_note (section)', () => {
 
     let seenContentType = '';
     pool.intercept({ path: '/vault/Note.md', method: 'PUT' }).reply((opts) => {
-      const headers = opts.headers as Record<string, string>;
-      seenContentType = headers['content-type'] ?? headers['Content-Type'] ?? '';
+      seenContentType = lowerKeys(opts.headers)['content-type'] ?? '';
       return { statusCode: 200, data: '' };
     });
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(7));
@@ -417,7 +426,14 @@ describe('obsidian_write_note (section, plugin v5.x)', () => {
       previousSizeInBytes: 300,
       currentSizeInBytes: 290,
     });
-    expect(textOf(res)).toContain('Top::Section A');
+    expect(textOf(res)).toBe(
+      [
+        '**Wrote Note.md**',
+        '*Size:* 300 → 290 bytes',
+        '*Section targeted:* true → Top::Section A',
+        '*Created:* false',
+      ].join('\n'),
+    );
   });
 
   it('keeps a subsection at the level the caller wrote', async () => {
