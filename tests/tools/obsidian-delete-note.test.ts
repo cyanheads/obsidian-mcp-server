@@ -688,6 +688,30 @@ describe('obsidian_delete_note on a case-folding filesystem', () => {
     },
   );
 
+  it('lists only near matches inside OBSIDIAN_READ_PATHS in suggestions', async () => {
+    /** The scope is the one note; its folder also holds an out-of-scope extension-stripped match. */
+    const vault = installVault(
+      { [REAL]: NOTE_BODY, 'Projects/mcp-delcase.txt': 'private' },
+      { caseFolding: true, config: { readPaths: ['projects/mcp-delcase.md'] } },
+    );
+
+    const err = await rejectionOf(
+      (async () =>
+        defaultDeleteNote.handler(
+          defaultDeleteNote.input.parse({ target: { type: 'path', path: WRONG } }),
+          createMockContext({ errors: defaultDeleteNote.errors }),
+        ))(),
+    );
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'note_missing', suggestions: [REAL] },
+    });
+    expect(err.message).toBe(`Not found: ${WRONG}. Did you mean: "${REAL}"?`);
+    expect(vault.requests).toContain('GET /vault/Projects/');
+    expect(vault.requests.filter((r) => r.startsWith('DELETE'))).toEqual([]);
+  });
+
   it('the exact path still deletes in one call', async () => {
     const vault = installVault({ [REAL]: NOTE_BODY }, { caseFolding: true });
 
