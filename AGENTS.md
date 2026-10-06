@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** obsidian-mcp-server
-**Version:** 3.6.1
+**Version:** 3.7.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.12`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
@@ -34,12 +34,12 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
-- **Confirm destructive ops with `ctx.requestInput`, gated on a consent record.** `obsidian_delete_note` redeems (reads and deletes) the `ctx.state` record named by `ctx.inputs.state()` before anything else, and acts on the `ctx.inputs` answer only when that record deep-equals `{ operation, clientId, subject, target, contentHash }` for this call; otherwise it stores a fresh record (`ttl: 600`) and `return ctx.requestInput(...)` with the record id as `requestState`. An answer alone is never proof the user was asked. Never `await` user input mid-handler.
+- **The delete confirmation is opt-in; when on, it is gated on a consent record.** `OBSIDIAN_DELETE_ELICITATION` (default `false`) decides whether `obsidian_delete_note` confirms through `ctx.requestInput`. Off is the default for two reasons: a client that declares elicitation but cannot render the form declines every round automatically, which the server cannot tell from a real decline (#151), and the round forces a stateful HTTP session, which locks out `MCP_SESSION_MODE=stateless`. Off, `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_READ_ONLY` bound what a delete can reach — the same bound `obsidian_write_note` with `overwrite: true` has — and `destructiveHint` stays for client-side approval. The mode is the operator's choice alone: never derive it from `ctx.clientCapabilities` or from a decline. On, the handler redeems (reads and deletes) the `ctx.state` record named by `ctx.inputs.state()` before anything else, checks write scope on the resolved path before it reads the note or asks, and acts on the `ctx.inputs` answer only when that record deep-equals `{ operation, clientId, subject, target, contentHash }` for this call; otherwise it stores a fresh record (`ttl: 600`) and `return ctx.requestInput(...)` with the record id as `requestState`. An answer alone is never proof the user was asked. Never `await` user input mid-handler.
 - **All Obsidian access goes through `getObsidianService()`.** No direct `fetch()` calls to the Local REST API in tools/resources — the service centralizes auth, TLS, timeouts, and `ctx.signal` propagation.
 - **Secrets in env vars only.** `OBSIDIAN_API_KEY` is required; never hardcoded.
 - **Cut noise.** Add only what earns its place: no speculative generality, no guards for states the framework already prevents (Zod-validated params, classified errors), no abstraction until a third caller proves it, no option nothing sets.
 - **Command-palette tools are opt-in.** `obsidian_list_commands` and `obsidian_execute_command` are callable only when `OBSIDIAN_ENABLE_COMMANDS=true` — Obsidian commands are opaque and can be destructive. When the flag is unset, the entry point wraps both with `disabledTool()` so they're absent from `tools/list` (LLM can't invoke) but visible in the operator-facing manifest with a hint to enable them.
-- **Path-policy gating goes through `PathPolicy`.** Every path-taking method on `ObsidianService` calls `policy.assertReadable` / `assertWritable` before the upstream HTTP call; `obsidian_search_notes` post-filters hits via `svc.policy.filterReadable`. Don't bypass this — `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_READ_ONLY` are the single chokepoint, and `path_forbidden` is declared on every path-taking tool's `errors[]` contract.
+- **Path-policy gating goes through `PathPolicy`.** Every path-taking method on `ObsidianService` calls `policy.assertReadable` / `assertWritable` before the upstream HTTP call; `listFiles` gates with `assertListable` and filters entries with `filterListing` (readable entries plus folders on the way to the scope), so every listing consumer inherits the scope; `obsidian_search_notes` post-filters hits via `svc.policy.filterReadable`, and `listTags` collects per-note tags through it when `policy.restrictsReads`. Don't bypass this — `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_READ_ONLY` are the single chokepoint, and `path_forbidden` is declared on every path-taking tool's `errors[]` contract.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
 ---
@@ -48,7 +48,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool — `obsidian_list_tags`
 
-A small read-only tool that wraps a single upstream endpoint, normalizes the response into the output schema, and renders a markdown twin in `format()`. Reduced for illustration — the live definition also carries `nameRegex` / `minCount` / `limit` inputs, the count-descending sort and cap they feed, an `errors[]` contract, and an `enrichment` block.
+A small read-only tool that wraps a single service call, normalizes the response into the output schema, and renders a markdown twin in `format()`. Reduced for illustration — the live definition also carries `nameRegex` / `minCount` / `limit` inputs, the count-descending sort and cap they feed, an `errors[]` contract, and an `enrichment` block.
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
@@ -64,7 +64,11 @@ export const obsidianListTags = tool('obsidian_list_tags', {
       .array(
         z.object({
           name: z.string().describe('Tag name without the leading `#`.'),
-          count: z.number().describe('Usage count across the vault.'),
+          count: z
+            .number()
+            .describe(
+              'Times the tag, or a tag nested under it, occurs across the vault. When OBSIDIAN_READ_PATHS is set: the number of readable notes carrying the tag or a tag nested under it.',
+            ),
         }).describe('A tag with its usage count.'),
       )
       .describe('Matching tags ordered by `count` descending.'),
@@ -92,7 +96,7 @@ export const obsidianListTags = tool('obsidian_list_tags', {
 });
 ```
 
-For a destructive tool with human-in-the-loop confirmation, see `obsidian-delete-note.tool.ts` — it redeems a single-use consent record from `ctx.state` (bound to the operation, the caller, the resolved path, and a SHA-256 of the note's content), suspends with `ctx.requestInput` for an embedded `elicitation/create` round when no matching record backs the answer, branches on `ctx.inputs.view()` so a declined prompt on a matching round fails instead of re-asking, and carries the `destructiveHint` annotation. Pattern: framework `api-context` § Consent gates.
+For a destructive tool with optional human-in-the-loop confirmation, see `obsidian-delete-note.tool.ts`. `src/index.ts` builds it with `buildDeleteNoteTool({ elicitation })` from `OBSIDIAN_DELETE_ELICITATION`, so the description states the active mode; the exported `obsidianDeleteNote` is the off build, kept as the specimen the definition linter and tests import. Both modes check write scope on the resolved path, then read the note before the DELETE. That read is the folder guard (`path_is_directory`), since the Local REST API's `DELETE` on a folder path removes the folder and everything in it. It is also the exact-case guard, so it goes through `note+json` (`getNoteJson`), never the raw-markdown read. On a case-insensitive filesystem the raw read and the plugin v4.x `DELETE` (`adapter.exists` + `adapter.remove`) case-fold, so a wrong-case path would read and then permanently remove the differently-cased note. `note+json` resolves through Obsidian's case-sensitive vault index on v4.x and v5.x, so a wrong-case path fails `note_missing` before any DELETE, with near matches listed in `suggestions` and never substituted. With the confirmation on, it redeems a single-use consent record from `ctx.state` (bound to the operation, the caller, the resolved path, and a SHA-256 of the note's content), suspends with `ctx.requestInput` for an embedded `elicitation/create` round when no matching record backs the answer, and branches on `ctx.inputs.view()` so a declined prompt on a matching round fails instead of re-asking. Only the confirming build declares `cancelled` in `errors[]`, since the off build never throws it. Both builds carry the `destructiveHint` annotation. Pattern: framework `api-context` § Consent gates.
 
 ### Resource — `obsidian://status`
 
@@ -132,11 +136,8 @@ This server exposes a CRUD/search surface; no recurring multi-turn pattern benef
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
-const envBoolean = z.preprocess((val) => {
-  if (val === undefined || val === null || val === '') return;
-  if (typeof val === 'boolean') return val;
-  return String(val).toLowerCase().trim() === 'true' || val === '1';
-}, z.boolean());
+/** true/false/1/0/yes/no/on/off, case-insensitive; anything else fails startup. */
+const envBoolean = z.union([z.boolean(), z.stringbool()]);
 
 const ServerConfigSchema = z.object({
   apiKey: z.string().min(1).describe('Bearer token for the Obsidian Local REST API plugin.'),
@@ -148,6 +149,9 @@ const ServerConfigSchema = z.object({
   readPaths: envPathList,
   writePaths: envPathList,
   readOnly: envBoolean.default(false),
+  /** Opt-in delete confirmation round; when true and writes are allowed, HTTP requires a stateful session. */
+  deleteElicitation: envBoolean.default(false),
+  omnisearchUrl: z.string().url().optional(),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -161,6 +165,8 @@ export function getServerConfig() {
     readPaths: 'OBSIDIAN_READ_PATHS',
     writePaths: 'OBSIDIAN_WRITE_PATHS',
     readOnly: 'OBSIDIAN_READ_ONLY',
+    deleteElicitation: 'OBSIDIAN_DELETE_ELICITATION',
+    omnisearchUrl: 'OBSIDIAN_OMNISEARCH_URL',
   });
   return _config;
 }
@@ -173,16 +179,20 @@ export function getServerConfig() {
 `src/index.ts` passes two `createApp()` options that shape how the server runs:
 
 ```ts
+const deleteGateActive = config.deleteElicitation && !config.readOnly;
+
 await createApp({
   // ...
-  sessionMode: { default: 'stateful', require: 'stateful' },
+  sessionMode: deleteGateActive
+    ? { default: 'stateful', require: 'stateful' }
+    : { default: 'stateful' },
   teardown: () => obsidian.close(),
 });
 ```
 
-`sessionMode` declares a requirement, not just a default: `obsidian_delete_note` confirms through `ctx.requestInput`, which a 2025-era HTTP client can only answer on a stateful session, so under stateless HTTP the tool would be unusable for those clients. Unset, `MCP_SESSION_MODE` runs `stateful`; when the resolved HTTP mode is `stateless` (an explicit `MCP_SESSION_MODE=stateless`), startup fails with a `ConfigurationError` naming the conflict. stdio is never refused — `MCP_SESSION_MODE` has no effect there. `tests/integration/delete-note-confirmation.test.ts` pins both.
+Unset, `MCP_SESSION_MODE` runs `stateful`. With `OBSIDIAN_DELETE_ELICITATION=true`, `sessionMode` declares a requirement, not just a default: `obsidian_delete_note` then confirms through `ctx.requestInput`, which a 2025-era HTTP client can only answer on a stateful session, so under stateless HTTP the tool would be unusable for those clients. In that mode, when the resolved HTTP mode is `stateless` (an explicit `MCP_SESSION_MODE=stateless`), startup fails with a `ConfigurationError` naming the conflict. With the confirmation off (the default), or with `OBSIDIAN_READ_ONLY=true` (which disables `obsidian_delete_note`, so no round can run), nothing needs a session and stateless HTTP starts. stdio is never refused — `MCP_SESSION_MODE` has no effect there. `tests/integration/delete-note-confirmation.test.ts` pins each case. The startup "Path policy" log line reports `deleteElicitation` as `deleteGateActive` — false under read-only, as `enableCommands` is.
 
-The delete confirmation's consent records live in `ctx.state`, backed by the framework storage provider (`STORAGE_PROVIDER_TYPE`, default `in-memory`, process-local). That holds for stdio and for a single stateful HTTP instance, where every round of a confirmation reaches the process that asked. A multi-instance deployment, where a retry can land on another instance, needs a shared provider — `filesystem`, `supabase`, or `cloudflare-d1`, never `cloudflare-kv` (eventually consistent, so a record may be unseen or outlive its redemption). Redemption is single-use against a sequential replay but not against concurrent retries until the framework has an atomic `ctx.state.take` (cyanheads/mcp-ts-core#593).
+The delete confirmation's consent records (on mode only) live in `ctx.state`, backed by the framework storage provider (`STORAGE_PROVIDER_TYPE`, default `in-memory`, process-local). That holds for stdio and for a single stateful HTTP instance, where every round of a confirmation reaches the process that asked. A multi-instance deployment, where a retry can land on another instance, needs a shared provider — `filesystem`, `supabase`, or `cloudflare-d1`, never `cloudflare-kv` (eventually consistent, so a record may be unseen or outlive its redemption). Redemption is single-use against a sequential replay but not against concurrent retries until the framework has an atomic `ctx.state.take` (cyanheads/mcp-ts-core#593).
 
 `teardown` closes the undici `Agent` dispatcher `ObsidianService` holds for the Local REST API and Omnisearch, releasing its keep-alive sockets. It runs after the transport stops accepting requests, on every shutdown path.
 
@@ -195,8 +205,8 @@ Handlers receive a unified `ctx` object. Properties this server actually uses:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
-| `ctx.requestInput` / `ctx.inputs` | Multi-round-trip human-in-the-loop confirmation. Always present, both protocol eras — `obsidian_delete_note` requests a confirmation round before the DELETE. `requestInput` returns `never`, so write it in return position. |
-| `ctx.state` | Tenant-scoped KV. Used only for `obsidian_delete_note`'s consent records (`consent/<uuid>`, 600 s TTL) — see Session posture above for provider requirements. |
+| `ctx.requestInput` / `ctx.inputs` | Multi-round-trip human-in-the-loop confirmation. Always present, both protocol eras — with `OBSIDIAN_DELETE_ELICITATION=true`, `obsidian_delete_note` requests a confirmation round before the DELETE; off, it reads neither. `requestInput` returns `never`, so write it in return position. |
+| `ctx.state` | Tenant-scoped KV. Used only for `obsidian_delete_note`'s consent records (`consent/<uuid>`, 600 s TTL), written only with `OBSIDIAN_DELETE_ELICITATION=true` — see Session posture above for provider requirements. |
 | `ctx.auth` | Caller identity (`clientId`, `sub`) bound into each consent record; absent on stdio and `MCP_AUTH_MODE=none`, where the record carries empty strings. |
 | `ctx.signal` | `AbortSignal` propagated to the Local REST API client so per-request timeouts and client cancellations cut off in-flight HTTP. |
 | `ctx.requestId` | Unique request ID — surfaces in log lines for correlation. |
@@ -277,7 +287,7 @@ src/
   mcp-server/
     tools/definitions/
       _shared/schemas.ts                # Shared TargetSchema + SectionSchema reused across tools
-      index.ts                          # read/write/command tool sets + buildSearchNotesTool factory (Omnisearch-aware)
+      index.ts                          # read/write/command tool sets + buildSearchNotesTool (Omnisearch-aware) and buildDeleteNoteTool (elicitation mode) factories
       obsidian-*.tool.ts                # 14 tool definitions (12 base + 2 opt-in command-palette pair)
     resources/definitions/
       index.ts                          # allResourceDefinitions[]

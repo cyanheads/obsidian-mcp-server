@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.7.0](changelog/3.7.x/3.7.0.md) — 2026-10-05 · 🛡️ Security
+
+obsidian_delete_note now deletes on the first call unless OBSIDIAN_DELETE_ELICITATION=true, and obsidian_list_tags and obsidian_list_notes no longer expose tag names or folder and note names outside OBSIDIAN_READ_PATHS.
+
 ## [3.6.1](changelog/3.6.x/3.6.1.md) — 2026-10-05 · ⚠️ Breaking · 🛡️ Security
 
 obsidian_delete_note now deletes only on a round that redeems a server-stored consent record, HTTP startup requires a stateful session, and the server moves to mcp-ts-core 0.13.12, whose tool errors carry a request ID and whose argument hints lead with the field path.

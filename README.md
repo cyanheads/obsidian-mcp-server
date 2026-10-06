@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-3.6.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-3.7.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -39,7 +39,7 @@ Obsidian vault notes over the Local REST API plugin. Read, search, and write not
 | `obsidian_replace_in_note` | Literal or regex search-replace inside one note, body-only by default |
 | `obsidian_manage_frontmatter` | Get, set, or delete one frontmatter key |
 | `obsidian_manage_tags` | Add, remove, or list a note's tags in frontmatter, inline, or both |
-| `obsidian_delete_note` | Permanently delete a note after the user confirms |
+| `obsidian_delete_note` | Permanently delete a note, optionally after the user confirms (`OBSIDIAN_DELETE_ELICITATION`) |
 | `obsidian_open_in_ui` | Open a file in the Obsidian app, optionally in a new pane |
 | `obsidian_list_commands` | List command-palette commands (opt-in via `OBSIDIAN_ENABLE_COMMANDS`) |
 | `obsidian_execute_command` | Run a command-palette command by ID (opt-in via `OBSIDIAN_ENABLE_COMMANDS`) |
@@ -60,13 +60,15 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 
 - `target` is a vault `path`, the `active` file, or a `periodic` note (`daily` through `yearly`, optional `date`); `format` is `content`, `full`, `document-map`, or `section`, and `full` takes `includeLinks: true` for vault-internal outgoing links
 - `result.format` discriminates the payload; a `section` read that matches several headings returns the first and lists every full path in `candidates`
+- A `path` with no exact match but one case-insensitive match in its folder reads that file: `result.path` is the real name, `requestedPath` the one sent, and a `notice` names both
 
 ---
 
 ### `obsidian_list_notes` <sub>tool</sub>
 
 - Walks from `path` (default vault root) to `depth` 1–20 (default 2), filtered by `extension` and `nameRegex` (≤256 chars); a folder that fails `nameRegex` is not walked
-- Returns `entries[]` (`file` / `directory`), `totals`, and `appliedFilters`; the walk stops at 1,000 entries with `excluded.reason: "entry_cap"`, and a folder the depth limit or path policy kept out carries `truncated: true`
+- Returns `entries[]` (`file` / `directory`), `totals`, and `appliedFilters`; the walk stops at 1,000 entries with `excluded.reason: "entry_cap"`, and a folder the depth limit stopped carries `truncated: true`
+- With `OBSIDIAN_READ_PATHS` set, a listing holds only readable entries and the folders leading to the scope; those folders are walked and accepted as `path`
 
 ---
 
@@ -74,6 +76,7 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 
 - `nameRegex` (≤256 chars) and `minCount` narrow the set, then tags are ranked by count and capped at `limit` (default 200, max 10000); hierarchical parents count (`work/tasks` adds to `work`)
 - When the cap withholds tags, the response carries `truncated`, `shown`, and `cap`
+- With `OBSIDIAN_READ_PATHS` set, only tags from readable notes are listed, and `count` is the number of readable notes carrying the tag or a tag nested under it
 
 ---
 
@@ -131,9 +134,11 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 
 ### `obsidian_delete_note` <sub>tool</sub>
 
-- Takes a `target`; the first call answers with a confirmation request naming the path and byte size, and the note is deleted only after the user accepts
-- Declining fails with `cancelled`, and a client without elicitation support cannot delete; there is no API-level undo, only Obsidian's local trash
-- An answer counts only against the single-use consent record stored when the prompt was shown, bound to the caller, the path, and the note's content then. A pre-supplied or replayed answer, or one given after the note changed, gets a fresh prompt instead
+- Takes a `target` (path, active file, or periodic note) and checks it against the write scope first; a folder path fails with `path_is_directory`. There is no API-level undo, only Obsidian's local trash
+- The path must match exactly, letter case included, even on a case-insensitive filesystem. A different-case or extension-less spelling fails `note_missing` before anything is deleted, naming the near matches in `suggestions`
+- By default the note is deleted on the first call, with no confirmation; `OBSIDIAN_WRITE_PATHS` and `OBSIDIAN_READ_ONLY` bound what it can reach
+- With `OBSIDIAN_DELETE_ELICITATION=true`, the first call answers with a confirmation request naming the path and byte size, and the note is deleted only after the user accepts. Declining fails with `cancelled`, and a client without elicitation support cannot delete
+- In that mode an answer counts only against the single-use consent record stored when the prompt was shown, bound to the caller, the path, and the note's content then. A pre-supplied or replayed answer, or one given after the note changed, gets a fresh prompt instead
 - Consent records live in the server's storage provider (`STORAGE_PROVIDER_TYPE`, default `in-memory`, process-local). That works for stdio or a single HTTP instance; several instances behind one endpoint need a shared provider (`filesystem`, `supabase`, or `cloudflare-d1`, never `cloudflare-kv`)
 
 ---
@@ -142,6 +147,7 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 
 - `path`, `failIfMissing` (default `true`), and `newLeaf` (open in a split pane); with `failIfMissing: false` a missing file is created, which needs write access
 - `createdIfMissing` reports which branch ran
+- A case-mismatched `path` with one case-insensitive match opens that file instead of creating another, reporting the path sent as `requestedPath` with a `notice`
 
 ---
 
@@ -169,7 +175,8 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 
 ### `obsidian://tags` <sub>resource</sub>
 
-- Every tag with its `count`, uncapped and in upstream order, hierarchical parents included
+- Every tag with its `count`, uncapped and unsorted, hierarchical parents included
+- With `OBSIDIAN_READ_PATHS` set, only tags from readable notes, counted the same way as `obsidian_list_tags`
 - No ranking or filters; `obsidian_list_tags` gives the count-ranked, capped view
 
 ---
@@ -188,9 +195,9 @@ Obsidian-specific:
 - Typed client for the [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin; section writes speak markdown-patch 2.0 to plugin v5.0 and later and 1.x to v4.x, chosen from the reported plugin version
 - Heading targets take a full `Parent::Child` path or a bare leaf name; writes reject an ambiguous one with `ambiguous_section` and its `candidates`, unless exactly one match is a top-level heading. On plugin v5.0 and later, content added to a heading is set off by a blank line (a list item continues an adjacent list), and a heading inside it must sit below the section's level (`heading_outside_section`)
 - Folder-scoped read/write permissions, a read-only switch, and an opt-in command-palette pair (see [Path policy](#path-policy)); server-level `instructions` on `initialize` report the active policy
-- `obsidian_get_note` and `obsidian_open_in_ui` retry a case-mismatched path against the real filename and add `Did you mean` suggestions to a miss; writes and deletes match the exact path
+- `obsidian_get_note` and `obsidian_open_in_ui` retry a case-mismatched path against the real filename, disclosed as `requestedPath` plus a `notice`, and add `Did you mean` suggestions to a miss; writes and deletes match the exact path
 - Regex inputs are capped (`nameRegex` at 256 chars, `useRegex` at 1024) and rejected with `regex_unsafe` when they nest quantifiers
-- Backlinks have no dedicated tool; `obsidian_search_notes` in `jsonlogic` mode finds them with `{"regexp": ["\\[\\[Target Note(\\||#|\\]\\])", {"var": "content"}]}`
+- Backlinks have no dedicated tool; `obsidian_search_notes` in `jsonlogic` mode finds them with `{"regexp": ["\\[\\[Target Note(\\\\?\\||#|\\]\\])", {"var": "content"}]}`, which also matches the table-safe `[[Target Note\|Alias]]`
 
 Agent-friendly output:
 
@@ -274,8 +281,9 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 - The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin, v4.0.0 or later, enabled in your vault. Generate an API key under **Settings → Community Plugins → Local REST API** and set it as `OBSIDIAN_API_KEY`.
 - The server defaults to `http://127.0.0.1:27123`, so enable **"Non-encrypted (HTTP) Server"** in the plugin settings, or set `OBSIDIAN_BASE_URL=https://127.0.0.1:27124` for the always-on HTTPS port (its self-signed cert is accepted while `OBSIDIAN_VERIFY_SSL=false`, the default).
 - Periodic-note targets work natively on plugin v5.0.1 and earlier. From v5.0.2 they need the [periodic-notes API extension](https://github.com/coddingtonbear/obsidian-local-rest-api-periodic-notes); without it they fail with `periodic_unsupported`.
+- On plugin v4.x, heading section writes to a note with CRLF (Windows) line endings land mid-line: the plugin's markdown-patch 1.x engine misplaces them, and the server can't correct it. Plugin v5.0 and later handle CRLF notes.
 - Plugin v6.0 drops markdown-patch 1.x, which two table-row writes (`contentType: "json"`) still use: rows under a heading, and rows through a block ID on its own line below the table. On v6.0, target the table by an ID on its last row.
-- An MCP client that supports elicitation, to use `obsidian_delete_note`. Every other tool works without it.
+- With `OBSIDIAN_DELETE_ELICITATION=true`, an MCP client that supports elicitation and renders its form, to use `obsidian_delete_note`. Every other tool, and the default delete, works without it.
 
 ### Installation
 
@@ -316,10 +324,11 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | `OBSIDIAN_READ_PATHS` | Comma-separated folder allowlist for reads. See [Path policy](#path-policy). | unset (full vault) |
 | `OBSIDIAN_WRITE_PATHS` | Comma-separated folder allowlist for writes. See [Path policy](#path-policy). | unset (full vault) |
 | `OBSIDIAN_READ_ONLY` | Deny every write and disable the command-palette pair. | `false` |
+| `OBSIDIAN_DELETE_ELICITATION` | Ask the user to confirm each `obsidian_delete_note` call through an elicitation form before deleting. Needs a client that renders elicitation, and a stateful session over HTTP (not required when `OBSIDIAN_READ_ONLY=true` disables the tool). Off, the delete runs on the first call. | `false` |
 | `OBSIDIAN_OMNISEARCH_URL` | [Omnisearch](https://github.com/scambier/obsidian-omnisearch) HTTP server URL. Unset derives from the `OBSIDIAN_BASE_URL` host on port `51361`. Probed once at startup; the `omnisearch` search mode appears only if it answers. | derived |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
-| `MCP_SESSION_MODE` | HTTP session mode: `stateful` or `auto`. The server requires a stateful session because the `obsidian_delete_note` confirmation needs one on 2025-era clients, so `stateless` fails startup over HTTP. No effect on stdio. | `stateful` |
+| `MCP_SESSION_MODE` | HTTP session mode: `stateful`, `stateless`, or `auto`. With `OBSIDIAN_DELETE_ELICITATION=true` and `OBSIDIAN_READ_ONLY` off, the server requires a stateful session, because the confirmation needs one on 2025-era clients, so `stateless` fails startup over HTTP. No effect on stdio. | `stateful` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
@@ -339,8 +348,8 @@ Three optional env vars limit which vault paths the tools can touch. Unset, read
 
 - Matching is by prefix, recursive, and case-insensitive; trailing slashes are normalized. Write paths are also readable.
 - `OBSIDIAN_READ_ONLY=true` removes every write tool and the command-palette pair from `tools/list`, including `obsidian_manage_frontmatter` and `obsidian_manage_tags` (so their `get` / `list` go too). `obsidian_open_in_ui` still opens existing files but won't create one.
-- A denial fails with `path_forbidden`, echoing the active scope in `data.activeScope` and the recovery hint. Search hits outside the read scope are dropped silently, and `obsidian_list_notes` shows an out-of-scope folder without walking it.
-- Tag listings (`obsidian_list_tags`, `obsidian://tags`) are vault-wide, so tag names (never note contents) from outside the read scope can appear.
+- A denial fails with `path_forbidden`, echoing the active scope in `data.activeScope` and the recovery hint. Search hits outside the read scope are dropped silently, and `obsidian_list_notes` lists only readable entries plus the folders leading to the scope, so a nested scope can be browsed to from the root.
+- Tag listings (`obsidian_list_tags`, `obsidian://tags`) under `OBSIDIAN_READ_PATHS` cover readable notes only, counting notes rather than occurrences. Write paths and read-only alone leave them vault-wide.
 - The startup log prints the active scope.
 
 ## Running the server
