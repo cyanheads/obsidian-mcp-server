@@ -102,28 +102,31 @@ describe('PathPolicy writes — truth table', () => {
 });
 
 describe('PathPolicy.assertReadable', () => {
-  it('throws Forbidden with subreason outside_read_paths', () => {
+  it('throws Forbidden with subreason outside_read_paths, echoing the caller path', () => {
     const p = new PathPolicy(cfg({ readPaths: ['public'] }));
     const err = thrownBy(() => p.assertReadable('secret/foo.md'));
     expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
-    expect(err.data?.reason).toBe('path_forbidden');
-    expect(err.data?.subreason).toBe('outside_read_paths');
-    expect(err.data?.op).toBe('read');
-    expect(err.data?.path).toBe('secret/foo.md');
-    expect(err.data?.activeScope).toEqual(['public']);
-    expect(err.message).toMatch(/OBSIDIAN_READ_PATHS/);
-    expect(err.message).toMatch(/not readable/);
-    expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/Allowed prefixes/);
-    expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/'public'/);
+    expect(err.message).toBe("Path 'secret/foo.md' is not readable: outside OBSIDIAN_READ_PATHS.");
+    expect(err.data).toEqual({
+      reason: 'path_forbidden',
+      path: 'secret/foo.md',
+      op: 'read',
+      subreason: 'outside_read_paths',
+      activeScope: ['public'],
+      recovery: {
+        hint: "Allowed prefixes: ['public']. Use a path within scope, or update OBSIDIAN_READ_PATHS to include this path.",
+      },
+    });
   });
 });
 
 describe('PathPolicy.assertWritable', () => {
-  it('routes outside_write_paths when path is not in writePaths', () => {
+  it('routes outside_write_paths when path is not in writePaths, echoing the caller path', () => {
     const p = new PathPolicy(cfg({ writePaths: ['projects'] }));
     const err = thrownBy(() => p.assertWritable('public/foo.md'));
+    expect(err.message).toBe("Path 'public/foo.md' is not writable: outside OBSIDIAN_WRITE_PATHS.");
     expect(err.data?.subreason).toBe('outside_write_paths');
-    expect(err.message).toMatch(/OBSIDIAN_WRITE_PATHS/);
+    expect(err.data?.path).toBe('public/foo.md');
     expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/Allowed prefixes/);
   });
 
@@ -135,6 +138,67 @@ describe('PathPolicy.assertWritable', () => {
     expect(err.message).toMatch(/OBSIDIAN_READ_ONLY=true/);
     expect((err.data?.recovery as { hint?: string })?.hint).toMatch(/Unset OBSIDIAN_READ_ONLY/);
     expect(err.data?.activeScope).toEqual([]);
+  });
+});
+
+/**
+ * A path resolved from an `active` or `periodic` target is never echoed: the
+ * denial names the target by the label passed as `resolvedFrom` instead.
+ */
+describe('PathPolicy denials — a resolved target', () => {
+  const RESOLVED = 'Private/secret.md';
+
+  it.each([
+    ['(active file)'],
+    ['daily note for the current period'],
+    ['weekly note for 2026-10-01'],
+  ])('names a resolved note by its target label: %s', (label) => {
+    const read = thrownBy(() =>
+      new PathPolicy(cfg({ readPaths: ['work'] })).assertReadable(RESOLVED, label),
+    );
+    expect(read.message).toBe(
+      `Target '${label}' resolves to a note that is not readable: outside OBSIDIAN_READ_PATHS.`,
+    );
+    expect(read.data).toEqual({
+      reason: 'path_forbidden',
+      path: label,
+      op: 'read',
+      subreason: 'outside_read_paths',
+      activeScope: ['work'],
+      recovery: {
+        hint: "Allowed prefixes: ['work']. Pass a path target within scope, or update OBSIDIAN_READ_PATHS to cover the note this target resolves to.",
+      },
+    });
+
+    const write = thrownBy(() =>
+      new PathPolicy(cfg({ writePaths: ['work'] })).assertWritable(RESOLVED, label),
+    );
+    expect(write.message).toBe(
+      `Target '${label}' resolves to a note that is not writable: outside OBSIDIAN_WRITE_PATHS.`,
+    );
+    expect(write.data).toMatchObject({
+      path: label,
+      op: 'write',
+      subreason: 'outside_write_paths',
+    });
+
+    const readOnly = thrownBy(() =>
+      new PathPolicy(cfg({ readOnly: true })).assertWritable(RESOLVED, label),
+    );
+    expect(readOnly.message).toBe(
+      `Target '${label}' resolves to a note that is not writable: server is in read-only mode (OBSIDIAN_READ_ONLY=true).`,
+    );
+    expect(readOnly.data).toMatchObject({ path: label, subreason: 'read_only_mode' });
+
+    for (const err of [read, write, readOnly]) {
+      expect(JSON.stringify({ message: err.message, data: err.data })).not.toContain('secret');
+    }
+  });
+
+  it('passes a resolved note that is in scope', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['work'], writePaths: ['work'] }));
+    expect(() => p.assertReadable('Work/a.md', '(active file)')).not.toThrow();
+    expect(() => p.assertWritable('Work/a.md', '(active file)')).not.toThrow();
   });
 });
 
@@ -418,6 +482,163 @@ describe('PathPolicy.describe (banner data)', () => {
   it('renders writePaths as "denied (read-only)" when READ_ONLY=true', () => {
     const p = new PathPolicy(cfg({ writePaths: ['projects'], readOnly: true }));
     expect(p.describe().writePaths).toBe('denied (read-only)');
+  });
+
+  it('renders the configured lists, not the effective scope', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['work'], writePaths: ['inbox'] }));
+    expect(p.describe()).toEqual({ readPaths: ['work'], writePaths: ['inbox'], readOnly: false });
+  });
+});
+
+describe('PathPolicy.effectiveScope (what path_forbidden enforces)', () => {
+  it.each([
+    ['no policy', {}, undefined, undefined],
+    ['write paths alone', { writePaths: ['work'] }, undefined, ['work']],
+    ['read paths alone', { readPaths: ['work'] }, ['work'], ['work']],
+    [
+      'read and write paths',
+      { readPaths: ['work'], writePaths: ['inbox'] },
+      ['work', 'inbox'],
+      ['inbox'],
+    ],
+    ['read-only alone', { readOnly: true }, undefined, []],
+    ['read-only with read paths', { readOnly: true, readPaths: ['work'] }, ['work'], []],
+    [
+      'read-only with read and write paths',
+      { readOnly: true, readPaths: ['work'], writePaths: ['inbox'] },
+      ['work'],
+      [],
+    ],
+  ] as Array<[string, Partial<ServerConfig>, string[] | undefined, string[] | undefined]>)(
+    '%s',
+    (_label, config, readable, writable) => {
+      expect(new PathPolicy(cfg(config)).effectiveScope()).toEqual({ readable, writable });
+    },
+  );
+
+  it('names the read scope as writable when only reads are restricted', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['work'] }));
+    // isWritable alone passes a write outside the read scope; the read check
+    // every write tool makes first does not.
+    expect(p.isWritable('Other/x.md')).toBe(true);
+    expect(p.isReadable('Other/x.md')).toBe(false);
+    expect(p.effectiveScope().writable).toEqual(['work']);
+  });
+});
+
+describe('PathPolicy.keepReadable (link entries)', () => {
+  it('keeps readable link targets and link text, write paths included', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['work'], writePaths: ['drafts'] }));
+    expect(
+      p.keepReadable(['Work/a.md', 'Private/x.md', 'drafts/new', 'workshop/b.md', 'x', 'WORK']),
+    ).toEqual(['Work/a.md', 'drafts/new', 'WORK']);
+  });
+});
+
+/**
+ * The guard only narrows what the plugin returns, so it must match every
+ * readable path — a readable note it rejects would silently vanish from a
+ * scoped search. Checked against `isReadable` over random paths drawn from an
+ * alphabet built to trip case folding: both ASCII cases, U+212A (lower-cases
+ * to `k`), U+0130 (lower-cases to `i` + U+0307), a non-ASCII letter pair, both
+ * slashes, and regex metacharacters.
+ */
+describe('PathPolicy.readScopePattern (scoped-search guard)', () => {
+  const ALPHABET = [
+    'w',
+    'W',
+    'k',
+    'K',
+    'K',
+    'i',
+    'I',
+    'İ',
+    'ŝ',
+    'Ŝ',
+    '/',
+    '\\',
+    '.',
+    '(',
+    '-',
+    'x',
+  ];
+
+  /** Deterministic PRNG (mulberry32), so a failure reproduces. */
+  function prng(seed: number): () => number {
+    let s = seed;
+    return () => {
+      s = (s + 0x6d2b79f5) | 0;
+      let t = Math.imul(s ^ (s >>> 15), 1 | s);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function randomString(next: () => number, maxLength: number): string {
+    const length = 1 + Math.floor(next() * maxLength);
+    return Array.from({ length }, () => ALPHABET[Math.floor(next() * ALPHABET.length)]).join('');
+  }
+
+  /** A prefix as the config parser stores one: lower case, forward slashes, no edge slashes. */
+  function configPrefix(raw: string): string {
+    return raw
+      .replace(/\\/g, '/')
+      .replace(/^\/+|\/+$/g, '')
+      .toLowerCase();
+  }
+
+  /** `text` with characters swapped, at random, for others that lower-case to them. */
+  function caseScrambled(text: string, next: () => number): string {
+    return [...text]
+      .map((c) => {
+        const variants = ALPHABET.filter((v) => v.toLowerCase() === c);
+        return next() < 0.5 ? c : (variants[Math.floor(next() * variants.length)] ?? c);
+      })
+      .join('');
+  }
+
+  it('matches every readable path', () => {
+    const next = prng(156);
+    let readable = 0;
+    for (let round = 0; round < 300; round++) {
+      const prefixes = [configPrefix(randomString(next, 4)), configPrefix(randomString(next, 4))];
+      const policy = new PathPolicy(cfg({ readPaths: prefixes }));
+      const guard = new RegExp(policy.readScopePattern());
+      for (let i = 0; i < 100; i++) {
+        // Half the candidates start from a scrambled prefix, so readable paths are common.
+        const path =
+          next() < 0.5
+            ? `${next() < 0.3 ? '/' : ''}${caseScrambled(prefixes[0] ?? '', next)}${randomString(next, 4)}`
+            : randomString(next, 10);
+        if (!policy.isReadable(path)) continue;
+        readable++;
+        expect(guard.test(path), `${JSON.stringify(path)} under ${JSON.stringify(prefixes)}`).toBe(
+          true,
+        );
+      }
+    }
+    expect(readable).toBeGreaterThan(1_000);
+  });
+
+  it('narrows: paths outside the scope do not match, at segment boundaries too', () => {
+    const guard = new RegExp(
+      new PathPolicy(cfg({ readPaths: ['work', 'a.b(c)'] })).readScopePattern(),
+    );
+    for (const path of ['Work/a.md', 'WORK\\a.md', '/work/a.md', 'worK/a.md', 'A.B(C)/x.md']) {
+      expect(guard.test(path), path).toBe(true);
+    }
+    for (const path of ['Private/a.md', 'workshop/a.md', 'axb(c)/x.md', 'x/work/a.md']) {
+      expect(guard.test(path), path).toBe(false);
+    }
+  });
+
+  it('includes write paths in the readable scope, and leaves them out under read-only', () => {
+    const scoped = (config: Partial<ServerConfig>) =>
+      new RegExp(new PathPolicy(cfg(config)).readScopePattern());
+    expect(scoped({ readPaths: ['work'], writePaths: ['drafts'] }).test('Drafts/d.md')).toBe(true);
+    expect(
+      scoped({ readPaths: ['work'], writePaths: ['drafts'], readOnly: true }).test('Drafts/d.md'),
+    ).toBe(false);
   });
 });
 

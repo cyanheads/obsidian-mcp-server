@@ -10,6 +10,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { encodeVaultPath, ObsidianService } from '@/services/obsidian/obsidian-service.js';
+import type { NoteTarget } from '@/services/obsidian/types.js';
 import {
   loadCapture,
   PROBE_BODY,
@@ -20,9 +21,12 @@ import {
 import {
   documentMapV2,
   type HeadingTree,
+  installMovingTargetVault,
   instructionOf,
+  MOVING_TARGET_NOTES,
   makeTestConfig,
   mockResponse,
+  NON_PATH_TARGETS,
   noteJson,
   type PathMatcher,
   type ReplyFn,
@@ -774,6 +778,99 @@ describe('ObsidianService error classification', () => {
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('Section target not found'),
       data: { reason: 'section_target_missing' },
+    });
+  });
+
+  /**
+   * On a case-insensitive filesystem, Obsidian's `Vault.create` refuses a
+   * whole-file write to a path its case-sensitive index does not hold when the
+   * disk already has the file under another spelling — Local REST API 5.2.0
+   * answers HTTP 500 with this body. Queued four deep so a retry would be
+   * counted rather than surfacing as a missing intercept.
+   */
+  describe('500 "File already exists" on a whole-file write', () => {
+    const fileExistsBody = {
+      message: 'Internal Server Error\nFile already exists.',
+      errorCode: 50000,
+    };
+
+    /** Queue the same 500 reply four deep; the returned function counts the requests that reached it. */
+    function queue500(method: 'GET' | 'POST' | 'PUT', path: string, data: object): () => number {
+      let attempts = 0;
+      for (let i = 0; i < 4; i++) {
+        pool.intercept({ path, method }).reply(() => {
+          attempts++;
+          return { statusCode: 500, data };
+        });
+      }
+      return () => attempts;
+    }
+
+    it.each([
+      ['a PUT', 'PUT', () => service.writeNote(ctx, { type: 'path', path: 'Notes/Case.md' }, 'x')],
+      [
+        'a POST append',
+        'POST',
+        () => service.appendToNote(ctx, { type: 'path', path: 'Notes/Case.md' }, 'y'),
+      ],
+    ] as const)(
+      'classifies %s as Conflict case_variant_exists and sends it once',
+      async (_label, method, call) => {
+        const attempts = queue500(method, '/vault/Notes/Case.md', fileExistsBody);
+
+        const err = await rejectionOf(call());
+
+        expect(attempts()).toBe(1);
+        expect(err.code).toBe(JsonRpcErrorCode.Conflict);
+        // The caller's path and the reason, nothing derived from the upstream body.
+        expect(err.data).toEqual({ path: 'Notes/Case.md', reason: 'case_variant_exists' });
+        expect(err.message).toContain('Notes/Case.md');
+        expect(err.message).not.toContain('Internal Server Error');
+      },
+    );
+
+    it.each([
+      [
+        'any other 500 on a PUT',
+        'PUT',
+        { message: 'Internal Server Error\nEBUSY' },
+        () => service.writeNote(ctx, { type: 'path', path: 'N.md' }, 'x'),
+      ],
+      [
+        'the phrase inside other text on a PUT',
+        'PUT',
+        {
+          message: "Internal Server Error\nEEXIST: file already exists, mkdir '/v/Notes/a.md'",
+          errorCode: 50000,
+        },
+        () => service.writeNote(ctx, { type: 'path', path: 'N.md' }, 'x'),
+      ],
+      [
+        'the same body on a note read',
+        'GET',
+        fileExistsBody,
+        () => service.getNoteContent(ctx, { type: 'path', path: 'N.md' }),
+      ],
+    ] as const)('leaves %s as ServiceUnavailable, retried', async (_label, method, data, call) => {
+      const attempts = queue500(method, '/vault/N.md', data);
+
+      const err = await rejectionOf(call());
+
+      expect(attempts()).toBe(4);
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data).toMatchObject({ status: 500 });
+      expect(err.data?.reason).toBeUndefined();
+    });
+
+    it('leaves the same 500 on a command POST as ServiceUnavailable', async () => {
+      pool
+        .intercept({ path: '/commands/file-explorer%3Anew-file/', method: 'POST' })
+        .reply(500, fileExistsBody);
+
+      const err = await rejectionOf(service.executeCommand(ctx, 'file-explorer:new-file'));
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data?.reason).toBeUndefined();
     });
   });
 
@@ -1904,5 +2001,69 @@ describe('ObsidianService retry policy', () => {
       });
       expect(attempts).toBe(1);
     });
+  });
+});
+
+/**
+ * A pinned target — `resolveTarget`'s result, or `pinTarget` over the path a
+ * read returned — addresses the resolved note by vault path, so later calls
+ * reach that note even after the `active` / `periodic` route has moved on.
+ */
+describe('ObsidianService — a pinned target addresses the resolved note', () => {
+  it.each(NON_PATH_TARGETS.map(([target]) => target))('%j', async (target) => {
+    const { first, second, body } = MOVING_TARGET_NOTES;
+
+    // resolveTarget, then a write.
+    const resolved = installMovingTargetVault({ readPaths: ['work'] });
+    const pinned = await resolved.service.resolveTarget(ctx, target);
+    await resolved.service.writeNote(ctx, pinned, 'new');
+    expect(pinned).toMatchObject({ type: 'path', path: first });
+    expect(resolved.requests.slice(1)).toEqual([`PUT /vault/${first}`]);
+    expect(resolved.notes[first]).toBe('new');
+    expect(resolved.notes[second]).toBe(body(second));
+
+    // pinTarget over a read, then a write and a read.
+    const read = installMovingTargetVault();
+    const note = await read.service.getNoteJson(ctx, target);
+    const repinned = read.service.pinTarget(target, note.path);
+    await read.service.writeNote(ctx, repinned, 'new');
+    await read.service.getNoteJson(ctx, repinned);
+    expect(read.requests.slice(1)).toEqual([`PUT /vault/${first}`, `GET /vault/${first}`]);
+    expect(read.notes[second]).toBe(body(second));
+  });
+
+  it('pinTarget leaves a path target as the caller sent it', () => {
+    const target = { type: 'path', path: 'Work/a.md' } as const;
+    expect(service.pinTarget(target, 'Work/a.md')).toBe(target);
+  });
+});
+
+/**
+ * `getDocumentMap` on an `active` or `periodic` target resolves it once
+ * (read-gated) and reads the map from the resolved `/vault/` path, so the map
+ * is the resolved note's even after the target has moved on.
+ */
+describe('ObsidianService.getDocumentMap — an active or periodic target is resolved once', () => {
+  it.each<[string, string, Parameters<typeof installMovingTargetVault>[0], NoteTarget]>([
+    ['no path policy', '/active/', {}, { type: 'active' }],
+    ['OBSIDIAN_READ_PATHS', '/active/', { readPaths: ['work'] }, { type: 'active' }],
+    [
+      'OBSIDIAN_READ_PATHS',
+      '/periodic/monthly/2026/10/01/',
+      { readPaths: ['work'] },
+      { type: 'periodic', period: 'monthly', date: '2026-10-01' },
+    ],
+  ])('%s, %s', async (_label, route, config, target) => {
+    const { first, second } = MOVING_TARGET_NOTES;
+    const vault = installMovingTargetVault(config);
+    vault.notes[first] = '# Work heading\n';
+    vault.notes[second] = '# Private heading\n';
+
+    await expect(vault.service.getDocumentMap(ctx, target)).resolves.toEqual({
+      headings: ['Work heading'],
+      blocks: [],
+      frontmatterFields: ['status'],
+    });
+    expect(vault.requests).toEqual([`GET ${route}`, 'GET /', `GET /vault/${first}`]);
   });
 });

@@ -3,11 +3,13 @@
  * @module tests/tools/obsidian-manage-tags.test
  */
 
+import type { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianManageTags } from '@/mcp-server/tools/definitions/obsidian-manage-tags.tool.js';
-import { setupHarness } from '../helpers.js';
+import type { NoteTarget } from '@/services/obsidian/types.js';
+import { installMovingTargetVault, MOVING_TARGET_NOTES, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -561,6 +563,83 @@ describe('obsidian_manage_tags / link spans are not inline tags', () => {
 });
 
 /**
+ * A wikilink runs from `[[` to the first `]]` on its line, single brackets
+ * included, so a `#` in an alias or heading holding `[` or `]` is link text,
+ * while a tag after the link's `]]` is still read. Issue #160.
+ */
+describe('obsidian_manage_tags / a wikilink holding single brackets', () => {
+  const BODY = [
+    'x [[Note|a #b [1]]] and ![[Note#Sec [x]|A #c]] y',
+    'z [[Note|a ]#d]]] #e',
+    '',
+  ].join('\n');
+
+  const AFTER_ADD = `${BODY}#b #c #d\n`;
+
+  /**
+   * Serve `BODY`, record every PUT body, and serve `AFTER_ADD` on a read-back;
+   * run `input` on `N.md` and hand back both surfaces.
+   */
+  async function run(input: Omit<z.input<typeof obsidianManageTags.input>, 'target'>) {
+    const pool = harness.current().pool;
+    const json = { headers: { 'content-type': 'application/json' } };
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(BODY, {}, ['e']), json);
+    const puts: string[] = [];
+    pool.intercept({ path: '/vault/N.md', method: 'PUT' }).reply((opts) => {
+      puts.push(String(opts.body ?? ''));
+      return { statusCode: 200, data: '' };
+    });
+    pool
+      .intercept({ path: '/vault/N.md', method: 'GET' })
+      .reply(200, noteJson(AFTER_ADD, {}, ['e', 'b', 'c', 'd']), json);
+
+    const res = await runToolContract(obsidianManageTags, {
+      target: { type: 'path', path: 'N.md' },
+      ...input,
+    });
+    expect(res.isError).toBeFalsy();
+    const { result } = obsidianManageTags.output.parse(res.structuredContent);
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    return { puts, result, text };
+  }
+
+  it('lists only the tag after the link, on both surfaces', async () => {
+    const { result, text } = await run({ operation: 'list' });
+    if (result.operation !== 'list') throw new Error('expected list branch');
+    expect(result.tags.inline).toEqual(['e']);
+    expect(text).toContain('*Inline (1):* `#e`');
+  });
+
+  it('skips the link texts on remove and issues no write', async () => {
+    const { puts, result, text } = await run({
+      operation: 'remove',
+      location: 'inline',
+      tags: ['b', 'c', 'd'],
+    });
+    expect(puts).toEqual([]);
+    if (result.operation !== 'remove') throw new Error('expected remove branch');
+    expect(result.applied).toEqual([]);
+    expect(result.skipped).toEqual(['b', 'c', 'd']);
+    expect(text).toContain('*Skipped (3):* `#b` `#c` `#d`');
+  });
+
+  it('applies an inline add of the tags found only in link text', async () => {
+    const { puts, result, text } = await run({
+      operation: 'add',
+      location: 'inline',
+      tags: ['b', 'c', 'd'],
+    });
+    expect(puts).toEqual([AFTER_ADD]);
+    if (result.operation !== 'add') throw new Error('expected add branch');
+    expect(result.applied).toEqual(['b', 'c', 'd']);
+    expect(result.skipped).toEqual([]);
+    expect(text).toContain('*Applied (3):* `#b` `#c` `#d`');
+  });
+});
+
+/**
  * Obsidian's tag grammar at the handler: a leading digit and non-ASCII
  * characters are tags, an all-digit run and a hash glued to a preceding letter
  * are not. Issue #127.
@@ -788,5 +867,44 @@ describe('obsidian_manage_tags / tags Obsidian hides in blocks and reads in mark
     expect(result.tags).toEqual(['tm']);
     const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
     expect(text).toContain('*Applied (5):* `#tv` `#tf` `#uc` `#tl` `#uo`');
+  });
+});
+
+/**
+ * An `active` or `periodic` target is resolved by the read; the write and the
+ * read-back after it address the note that read returned even when the target
+ * has moved to another note since.
+ */
+describe('obsidian_manage_tags writes to the note its read resolved', () => {
+  it.each<[string, NoteTarget, string, Parameters<typeof installMovingTargetVault>[0]]>([
+    ['active, no path policy', { type: 'active' }, '/active/', {}],
+    ['active, OBSIDIAN_READ_PATHS', { type: 'active' }, '/active/', { readPaths: ['work'] }],
+    ['daily, no path policy', { type: 'periodic', period: 'daily' }, '/periodic/daily/', {}],
+    [
+      'weekly for 2026-10-01, OBSIDIAN_READ_PATHS',
+      { type: 'periodic', period: 'weekly', date: '2026-10-01' },
+      '/periodic/weekly/2026/10/01/',
+      { readPaths: ['work'] },
+    ],
+  ])('%s', async (_label, target, route, config) => {
+    const { first, second, body } = MOVING_TARGET_NOTES;
+    const vault = installMovingTargetVault(config);
+
+    const res = await runToolContract(obsidianManageTags, {
+      target,
+      operation: 'add',
+      tags: ['moved'],
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(obsidianManageTags.output.parse(res.structuredContent).result.path).toBe(first);
+    expect(vault.requests.filter((r) => !r.startsWith('GET /'))).toEqual([`PUT /vault/${first}`]);
+    // The target route is resolved once; every other request names the pinned path.
+    expect(vault.requests.filter((r) => r !== 'GET /' && !r.includes(' /vault/'))).toEqual([
+      `GET ${route}`,
+    ]);
+    expect(vault.requests.at(-1)).toBe(`GET /vault/${first}`);
+    expect(vault.notes[first]).toContain('moved');
+    expect(vault.notes[second]).toBe(body(second));
   });
 });

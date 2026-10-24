@@ -449,11 +449,15 @@ describe('obsidian_delete_note path guards', () => {
 const NOTE_PATH = 'Projects/N.md';
 const NOTE_BODY = '# Note\n\nbody\n';
 
-/** Every target form, each resolving to `NOTE_PATH` in the vault `installTargets` builds. */
+/**
+ * Every target form, each resolving to `NOTE_PATH` in the vault `installTargets`
+ * builds, with what a `path_forbidden` denial names it by: the path as sent, or
+ * the target's label for one resolved upstream.
+ */
 const TARGETS = [
-  ['path', { type: 'path', path: NOTE_PATH }],
-  ['active', { type: 'active' }],
-  ['periodic', { type: 'periodic', period: 'daily' }],
+  ['path', { type: 'path', path: NOTE_PATH }, NOTE_PATH],
+  ['active', { type: 'active' }, '(active file)'],
+  ['periodic', { type: 'periodic', period: 'daily' }, 'daily note for the current period'],
 ] as const;
 
 /** One note, open in Obsidian and serving as today's daily note. */
@@ -493,7 +497,7 @@ describe('obsidian_delete_note with the confirmation on, other target types', ()
 describe('obsidian_delete_note with the confirmation on checks write scope before asking', () => {
   it.each(TARGETS)(
     'a readable %s target outside OBSIDIAN_WRITE_PATHS fails path_forbidden on the first call',
-    async (label, target) => {
+    async (label, target, denied) => {
       const vault = installTargets({ writePaths: ['inbox'] });
       const ctx = createMockContext({ errors });
 
@@ -503,7 +507,7 @@ describe('obsidian_delete_note with the confirmation on checks write scope befor
         code: JsonRpcErrorCode.Forbidden,
         data: {
           reason: 'path_forbidden',
-          path: NOTE_PATH,
+          path: denied,
           op: 'write',
           subreason: 'outside_write_paths',
         },
@@ -595,7 +599,7 @@ describe('obsidian_delete_note with the confirmation off (the default build)', (
 
   it.each(TARGETS)(
     'a %s target outside OBSIDIAN_WRITE_PATHS fails path_forbidden and sends no DELETE',
-    async (_label, target) => {
+    async (_label, target, denied) => {
       const vault = installTargets({ writePaths: ['inbox'] });
 
       await expect(
@@ -605,7 +609,7 @@ describe('obsidian_delete_note with the confirmation off (the default build)', (
         ),
       ).rejects.toMatchObject({
         code: JsonRpcErrorCode.Forbidden,
-        data: { reason: 'path_forbidden', path: NOTE_PATH, subreason: 'outside_write_paths' },
+        data: { reason: 'path_forbidden', path: denied, subreason: 'outside_write_paths' },
       });
       expect(vault.requests.filter((r) => r.startsWith('DELETE'))).toEqual([]);
       expect(vault.notes[NOTE_PATH]).toBe(NOTE_BODY);

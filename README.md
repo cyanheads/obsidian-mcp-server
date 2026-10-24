@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-3.7.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-3.7.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -23,7 +23,7 @@
 
 ## Overview
 
-Obsidian vault notes over the Local REST API plugin. Read, search, and write notes, edit single headings, blocks, and frontmatter fields in place, and manage tags, with folder-scoped read/write permissions built in. Runs as a stdio process or a local Streamable HTTP server.
+Your Obsidian vault, through the Local REST API plugin. Read, search, and write notes, edit a single heading, block, or frontmatter field in place, and manage tags, with folder-scoped read/write permissions built in.
 
 ### Tools
 
@@ -82,7 +82,7 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 
 ### `obsidian_search_notes` <sub>tool</sub>
 
-- `mode: "text"` requires every whitespace-split token of `query` as a case-insensitive substring of the filename or body (quotes are literal), shaped by `contextLength` (default 100), `pathPrefix`, and `maxMatchesPerHit` (default 10); `mode: "jsonlogic"` evaluates a `logic` tree over `path`, `content`, `frontmatter.<key>`, `tags`, and `stat`, with `glob` / `regexp` taking `[PATTERN, VALUE]`
+- `mode: "text"` requires every whitespace-split token of `query` as a case-insensitive substring of the filename or body (quotes are literal), shaped by `contextLength` (default 100), `pathPrefix`, and `maxMatchesPerHit` (default 10); `mode: "jsonlogic"` evaluates a `logic` tree over `path`, `content`, `frontmatter.<key>`, `tags`, and `stat` (plus `links`, `backlinks`, and `unresolvedLinks` on plugin versions that provide them), with `glob` / `regexp` taking `[PATTERN, VALUE]`
 - `result.mode` discriminates the payload; every mode reports `totalCount` and pages via `nextCursor`, and a text hit clipped to `maxMatchesPerHit` carries `truncated` and `totalMatches`
 - `mode: "omnisearch"` (BM25 ranking, quoted phrases, `-exclusion`, `path:` / `ext:` filters) is offered only when the Omnisearch plugin answered at startup; its 50-hit upstream cap sets `truncated: true`
 
@@ -91,6 +91,7 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 ### `obsidian_write_note` <sub>tool</sub>
 
 - `target` and `content`, with optional `section` and `contentType` (`markdown` / `json`); a whole-file write to an existing note fails with `file_exists` unless `overwrite: true`
+- On a case-insensitive filesystem (macOS, Windows), a whole-file write to a path that differs from an existing note only in letter case fails with `case_variant_exists` and writes nothing; `existingPath` names that note when the parent folder's listing shows exactly one case match, and is omitted when several match or when a file Obsidian does not index (a dot-file) sits at the path
 - With `section`, replaces only that heading, block, or frontmatter field and keeps the heading line; output reports `created`, `sectionTargeted`, and the resolved `sectionTarget`
 
 ---
@@ -99,6 +100,7 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 
 - Without `section`, appends to the file or creates it (`created: true`); with `section`, appends to that heading, block, or frontmatter field of an existing note, and `createTargetIfMissing: true` creates the section
 - A section append whose content is already at the target fails with `content_preexists`; block targets add no separator, so start `content` with a newline if you want one
+- A whole-file append to a path that differs from an existing note only in letter case fails with `case_variant_exists` on a case-insensitive filesystem, with `existingPath` naming that note when the parent folder's listing shows exactly one case match
 
 ---
 
@@ -322,7 +324,7 @@ MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
 | `OBSIDIAN_REQUEST_TIMEOUT_MS` | Per-request timeout in milliseconds. | `30000` |
 | `OBSIDIAN_ENABLE_COMMANDS` | Enable `obsidian_list_commands` and `obsidian_execute_command`. Commands are opaque and can be destructive. | `false` |
 | `OBSIDIAN_READ_PATHS` | Comma-separated folder allowlist for reads. See [Path policy](#path-policy). | unset (full vault) |
-| `OBSIDIAN_WRITE_PATHS` | Comma-separated folder allowlist for writes. See [Path policy](#path-policy). | unset (full vault) |
+| `OBSIDIAN_WRITE_PATHS` | Comma-separated folder allowlist for writes. See [Path policy](#path-policy). | unset (the read scope, or the full vault without one) |
 | `OBSIDIAN_READ_ONLY` | Deny every write and disable the command-palette pair. | `false` |
 | `OBSIDIAN_DELETE_ELICITATION` | Ask the user to confirm each `obsidian_delete_note` call through an elicitation form before deleting. Needs a client that renders elicitation, and a stateful session over HTTP (not required when `OBSIDIAN_READ_ONLY=true` disables the tool). Off, the delete runs on the first call. | `false` |
 | `OBSIDIAN_OMNISEARCH_URL` | [Omnisearch](https://github.com/scambier/obsidian-omnisearch) HTTP server URL. Unset derives from the `OBSIDIAN_BASE_URL` host on port `51361`. Probed once at startup; the `omnisearch` search mode appears only if it answers. | derived |
@@ -348,9 +350,10 @@ Three optional env vars limit which vault paths the tools can touch. Unset, read
 
 - Matching is by prefix, recursive, and case-insensitive; trailing slashes are normalized. Write paths are also readable.
 - `OBSIDIAN_READ_ONLY=true` removes every write tool and the command-palette pair from `tools/list`, including `obsidian_manage_frontmatter` and `obsidian_manage_tags` (so their `get` / `list` go too). `obsidian_open_in_ui` still opens existing files but won't create one.
-- A denial fails with `path_forbidden`, echoing the active scope in `data.activeScope` and the recovery hint. Search hits outside the read scope are dropped silently, and `obsidian_list_notes` lists only readable entries plus the folders leading to the scope, so a nested scope can be browsed to from the root.
+- A denial fails with `path_forbidden`, echoing the active scope in `data.activeScope` and the recovery hint. A denial on an `active` or `periodic` target names the target (`(active file)`, `daily note for 2026-10-01`), not the note it resolved to. `obsidian_list_notes` lists only readable entries plus the folders leading to the scope, so a nested scope can be browsed to from the root.
+- Under `OBSIDIAN_READ_PATHS`, searches return readable notes only, and a JSONLogic tree never reads a note outside the scope: the server evaluates it over the readable notes, with `links`, `backlinks`, and `unresolvedLinks` holding readable entries only. Which note a link points to is still Obsidian's resolution across the whole vault, so those three fields can change when a note outside the scope is created or removed; match link text in `content` when that matters. That evaluation is bounded — 1,000 levels of nesting, a work budget per note for the values a tree builds and one per search for the results it keeps, 10 s — and a tree past a bound fails with `logic_too_costly`. A readable note whose data is nested too deep to hand to the evaluator (about 3,500 levels under Node) fails the search with `note_too_deep`. Without a read scope the tree goes to the plugin unchanged.
 - Tag listings (`obsidian_list_tags`, `obsidian://tags`) under `OBSIDIAN_READ_PATHS` cover readable notes only, counting notes rather than occurrences. Write paths and read-only alone leave them vault-wide.
-- The startup log prints the active scope.
+- The server `instructions` state the effective scope: readable is the read paths plus the write paths, and writable is the write paths, or the read scope when only reads are restricted. The startup log prints the configured lists.
 
 ## Running the server
 

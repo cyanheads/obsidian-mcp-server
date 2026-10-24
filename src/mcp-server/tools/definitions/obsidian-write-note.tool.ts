@@ -9,10 +9,15 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { scanHeadings } from '@/services/obsidian/section-extractor.js';
 import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schemas.js';
+import {
+  caseVariantError,
+  findCaseVariants,
+  withCaseVariantNamed,
+} from './_shared/suggest-paths.js';
 
 export const obsidianWriteNote = tool('obsidian_write_note', {
   description:
-    'Create or overwrite a note. With `section`, replaces just that heading/block/frontmatter section in place — use `obsidian_get_note` with `format: "document-map"` to discover available targets. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too. Whole-file writes fail with `file_exists` against an existing note unless `overwrite: true` — for in-place edits, prefer `obsidian_patch_note` (sections), `obsidian_append_to_note` (append), or `obsidian_replace_in_note` (find-and-replace). For heading sections, `content` is the new body; the heading line is preserved automatically.',
+    'Create or overwrite a note. With `section`, replaces just that heading/block/frontmatter section in place — use `obsidian_get_note` with `format: "document-map"` to discover available targets. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too. Whole-file writes fail with `file_exists` against an existing note unless `overwrite: true`, and with `case_variant_exists` when the path differs from an existing note only in letter case on a case-insensitive filesystem (`existingPath` names the note when the folder listing shows exactly one case match) — for in-place edits, prefer `obsidian_patch_note` (sections), `obsidian_append_to_note` (append), or `obsidian_replace_in_note` (find-and-replace). For heading sections, `content` is the new body; the heading line is preserved automatically.',
   annotations: { idempotentHint: true, destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -66,6 +71,13 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       code: JsonRpcErrorCode.Conflict,
       when: 'Whole-file write was attempted against an existing note and `overwrite` was not set to `true`.',
       recovery: 'Retry with overwrite true or use obsidian_patch_note for in-place edits.',
+    },
+    {
+      reason: 'case_variant_exists',
+      code: JsonRpcErrorCode.Conflict,
+      when: 'Whole-file write to a path that differs from an existing note only in letter case, on a case-insensitive filesystem (macOS, Windows) where both name one file. `existingPath` names that note when the parent folder listing shows exactly one case match; it is omitted when several match, and when a file Obsidian does not index, such as a dot-file, already sits at the path.',
+      recovery:
+        'Retry with the path in `existingPath` on the error data, which names the same file. Without `existingPath`, list the folder with obsidian_list_notes and use the spelling it shows, or choose another path.',
     },
     {
       reason: 'path_forbidden',
@@ -171,8 +183,8 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
      * presence probe and the write act on the same concrete file — avoids
      * re-resolving `active` / `periodic` targets across calls.
      */
-    const path = await svc.resolvePath(ctx, input.target);
-    const pathTarget = { type: 'path' as const, path };
+    const pathTarget = await svc.resolveTarget(ctx, input.target);
+    const { path } = pathTarget;
 
     if (input.section) {
       const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
@@ -200,6 +212,16 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
 
     const previousSizeInBytes = await svc.tryGetSize(ctx, pathTarget);
     if (previousSizeInBytes !== null && !input.overwrite) {
+      /**
+       * On a case-insensitive filesystem the HEAD answers 200 for a note whose
+       * name differs only in letter case; the folder listing tells that apart
+       * from the exact note. Anything else HEAD found stays `file_exists`.
+       */
+      const { exact, variants } = await findCaseVariants(ctx, svc, path);
+      if (!exact && variants.length > 0) {
+        const { message, data } = caseVariantError(path, variants);
+        throw ctx.fail('case_variant_exists', message, data);
+      }
       throw ctx.fail('file_exists', `Note '${path}' already exists.`, {
         path,
         recovery: {
@@ -208,7 +230,9 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
       });
     }
 
-    await svc.writeNote(ctx, pathTarget, input.content, input.contentType);
+    await withCaseVariantNamed(ctx, svc, path, () =>
+      svc.writeNote(ctx, pathTarget, input.content, input.contentType),
+    );
     const currentSizeInBytes = await svc.getSize(ctx, pathTarget);
     return {
       path,

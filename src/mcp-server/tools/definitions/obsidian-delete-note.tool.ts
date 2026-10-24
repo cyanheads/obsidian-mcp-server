@@ -209,9 +209,9 @@ export function buildDeleteNoteTool({ elicitation }: { elicitation: boolean }) {
        * a prompt or a stored record.
        */
       const svc = getObsidianService();
-      const path = await svc.resolvePath(ctx, input.target);
-      svc.policy.assertWritable(path);
-      const pathTarget = { type: 'path' as const, path };
+      const pathTarget = await svc.resolveTarget(ctx, input.target);
+      const { path } = pathTarget;
+      svc.policy.assertWritable(path, pathTarget.resolvedFrom);
 
       /**
        * The read runs in both modes: it throws `path_is_directory` for a folder,

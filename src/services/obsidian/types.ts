@@ -6,8 +6,21 @@
 
 export type PeriodicPeriod = 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly';
 
+/** A note addressed by its vault-relative path. */
+export interface PathTarget {
+  path: string;
+  /**
+   * Set when `path` was resolved from an `active` or `periodic` target: that
+   * target's label (`(active file)`, `daily note for 2026-10-01`), which a
+   * `path_forbidden` denial names in place of `path`. Absent on a path the
+   * caller sent, which a denial echoes as sent.
+   */
+  resolvedFrom?: string;
+  type: 'path';
+}
+
 export type NoteTarget =
-  | { type: 'path'; path: string }
+  | PathTarget
   | { type: 'active' }
   | { type: 'periodic'; period: PeriodicPeriod; date?: string | undefined };
 

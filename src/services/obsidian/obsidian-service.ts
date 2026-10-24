@@ -20,6 +20,8 @@ import {
 import { httpStatusToErrorCode, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Agent, type Dispatcher, type RequestInit, fetch as undiciFetch } from 'undici';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
+import { assertTreeDepth, createJsonLogicEvaluation, readsContent } from './jsonlogic-evaluator.js';
+import type { NoteContext } from './jsonlogic-worker.js';
 import {
   canonicalContent,
   flattenDocumentMap,
@@ -55,6 +57,7 @@ import type {
   ObsidianTag,
   OmnisearchHit,
   PatchInstruction,
+  PathTarget,
   StructuredSearchHit,
   TextSearchHit,
   VaultStatus,
@@ -142,6 +145,84 @@ interface ResolvedSpan {
 interface RawStructuredSearchHit {
   filename: string;
   result: unknown;
+}
+
+/**
+ * A hit of the scoped context fetch: the plugin's per-note JSONLogic context
+ * (`getFileMetadataObject`, plugin 5.x). `path` is not read — the gated
+ * `filename` stands in for it. The link fields are absent on plugins that
+ * predate them; a malformed one fails the path-policy filter that reads it.
+ */
+interface RawNoteContextHit {
+  filename: string;
+  result: {
+    backlinks?: string[];
+    content: string;
+    frontmatter: Record<string, unknown>;
+    links?: string[];
+    stat: { ctime: number; mtime: number; size: number };
+    tags: string[];
+    unresolvedLinks?: string[];
+  };
+}
+
+/** A readable note's context, as a scoped JSONLogic search evaluates it. */
+type ScopedNote = NoteContext & Pick<RawNoteContextHit['result'], 'stat' | 'tags'>;
+
+/**
+ * Most note-body bytes (by `stat.size`) a scoped JSONLogic search fetches and
+ * evaluates at once. Each batch costs one upstream search, during which the
+ * plugin reads every vault note's body, since the body-fetch tree names
+ * `content`; so this trades those vault-wide reads against how much of the
+ * readable vault sits in memory.
+ */
+const CONTENT_BATCH_BYTES = 32 * 1024 * 1024;
+
+/** Split `notes`, in order, into runs whose bodies total at most {@link CONTENT_BATCH_BYTES}; a larger note gets a run of its own. */
+function contentBatches(notes: readonly ScopedNote[]): ScopedNote[][] {
+  const batches: ScopedNote[][] = [];
+  let current: ScopedNote[] = [];
+  let bytes = 0;
+  for (const note of notes) {
+    if (current.length > 0 && bytes + note.stat.size > CONTENT_BATCH_BYTES) {
+      batches.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(note);
+    bytes += note.stat.size;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+/**
+ * How long a stored scoped JSONLogic walk outlives its last read. A scoped
+ * evaluation reads every readable note, so a walk's later pages are served
+ * from the hit list its first page stored rather than evaluated again.
+ */
+const WALK_TTL_MS = 5 * 60_000;
+
+/** Most characters all stored walks hold together, each its tree plus its serialized hits; the least recently read goes first. */
+const WALK_STORE_CHARS = 32 * 1024 * 1024;
+
+/** A scoped JSONLogic walk's full hit list, kept for the pages after its first. */
+interface StoredWalk {
+  chars: number;
+  expiresAt: number;
+  hits: StructuredSearchHit[];
+  /** The serialized tree that produced `hits`; a later page must send the same one. */
+  tree: string;
+}
+
+/** Size of a stored walk: its serialized tree plus its serialized hits, counted until it passes `limit`. */
+function walkChars(tree: string, hits: readonly StructuredSearchHit[], limit: number): number {
+  let total = tree.length;
+  for (const hit of hits) {
+    if (total > limit) break;
+    total += hit.filename.length + JSON.stringify(hit.result).length;
+  }
+  return total;
 }
 
 /**
@@ -268,6 +349,10 @@ export class ObsidianService {
    */
   #patchFormat: Promise<PatchFormat> | undefined;
 
+  /** Stored scoped JSONLogic walks by id, least recently read first (`pageJsonLogic`). */
+  readonly #walks = new Map<string, StoredWalk>();
+  #walkChars = 0;
+
   /**
    * @param config - Validated server config (api key, base URL, TLS, timeouts).
    * @param fetchImpl - Optional fetch override for tests. Defaults to undici's
@@ -290,7 +375,7 @@ export class ObsidianService {
     this.#fetch = fetchImpl ?? (undiciFetch as ObsidianFetch);
   }
 
-  /** Path-policy accessor — used by `obsidian_search_notes` to filter hits. */
+  /** Path-policy accessor for tools that filter results or check scope themselves. */
   get policy(): PathPolicy {
     return this.#policy;
   }
@@ -336,7 +421,7 @@ export class ObsidianService {
 
   async getNoteContent(ctx: Context, target: NoteTarget): Promise<string> {
     if (target.type === 'path') {
-      this.#policy.assertReadable(target.path);
+      this.#policy.assertReadable(target.path, target.resolvedFrom);
       const url = this.#targetToPath(target);
       const res = await this.#request(ctx, url, {
         method: 'GET',
@@ -365,44 +450,52 @@ export class ObsidianService {
 
   async getNoteJson(ctx: Context, target: NoteTarget): Promise<NoteJson> {
     if (target.type === 'path') {
-      this.#policy.assertReadable(target.path);
+      this.#policy.assertReadable(target.path, target.resolvedFrom);
     }
     const note = await this.#rawGetNoteJson(ctx, target);
     if (target.type !== 'path') {
-      this.#policy.assertReadable(note.path);
+      const pinned = this.pinTarget(target, note.path);
+      this.#policy.assertReadable(pinned.path, pinned.resolvedFrom);
     }
     return note;
   }
 
   /**
-   * Resolve `target` to a vault-relative path. For path targets this is a
-   * no-op; for `active` and `periodic` targets we have to ask upstream which
-   * concrete file is currently in play.
+   * Pin `target` to the note it names right now. A path target comes back as
+   * sent; an `active` or `periodic` target is resolved upstream (read-gated)
+   * and comes back as a path target for that note, so every later call acts on
+   * the same file however the target moves in between.
    */
-  async resolvePath(ctx: Context, target: NoteTarget): Promise<string> {
-    if (target.type === 'path') return target.path;
-    return (await this.getNoteJson(ctx, target)).path;
+  async resolveTarget(ctx: Context, target: NoteTarget): Promise<PathTarget> {
+    if (target.type === 'path') return target;
+    return this.pinTarget(target, (await this.getNoteJson(ctx, target)).path);
   }
 
+  /**
+   * `target` as a path target for `path`, the note a read of `target` returned.
+   * A path target already names its note and comes back as sent. A pinned
+   * `active` / `periodic` target carries the target's label as `resolvedFrom`,
+   * the identifier `no_active_file` and `periodic_not_found` use, so a
+   * `path_forbidden` denial on it names the target rather than the note.
+   */
+  pinTarget(target: NoteTarget, path: string): PathTarget {
+    if (target.type === 'path') return target;
+    return { type: 'path', path, resolvedFrom: displayPath(this.#targetToPath(target)) };
+  }
+
+  /**
+   * The note's headings, block ids, and frontmatter field names. An `active` /
+   * `periodic` target is resolved once (read-gated, a denial named by the
+   * target's label) and the map read from the resolved `/vault/` path, which
+   * the plugin's `/active/` and `/periodic/…` routes delegate to anyway, so the
+   * map describes the note the resolution returned even if the target moves.
+   */
   async getDocumentMap(ctx: Context, target: NoteTarget): Promise<DocumentMap> {
-    if (target.type === 'path') {
-      this.#policy.assertReadable(target.path);
-      return this.#rawGetDocumentMap(ctx, target);
+    if (target.type !== 'path') {
+      return this.#rawGetDocumentMap(ctx, await this.resolveTarget(ctx, target));
     }
-    if (this.#policy.isUnrestricted) {
-      return this.#rawGetDocumentMap(ctx, target);
-    }
-    /**
-     * Restricted + non-path: parallel-fetch the document map and resolve the
-     * path so we can gate. If the gate denies, the parallel fetch result is
-     * discarded — acceptable cost given the rarity of this configuration.
-     */
-    const [path, map] = await Promise.all([
-      this.resolvePath(ctx, target),
-      this.#rawGetDocumentMap(ctx, target),
-    ]);
-    this.#policy.assertReadable(path);
-    return map;
+    this.#policy.assertReadable(target.path, target.resolvedFrom);
+    return this.#rawGetDocumentMap(ctx, target);
   }
 
   async writeNote(
@@ -507,7 +600,7 @@ export class ObsidianService {
    */
   async tryGetSize(ctx: Context, target: NoteTarget): Promise<number | null> {
     if (target.type === 'path') {
-      this.#policy.assertReadable(target.path);
+      this.#policy.assertReadable(target.path, target.resolvedFrom);
     }
     const url = this.#targetToPath(target);
     const requestUrl = `${this.#config.baseUrl}${url}`;
@@ -516,7 +609,9 @@ export class ObsidianService {
       headers: { Authorization: `Bearer ${this.#config.apiKey}` },
     });
     if (res.status === 404) return null;
-    if (!res.ok) await this.#throwForStatus(res, url, ctx, { requestedUrl: requestUrl });
+    if (!res.ok) {
+      await this.#throwForStatus(res, url, ctx, { method: 'HEAD', requestedUrl: requestUrl });
+    }
     this.#assertNotDirectory(res, url);
     return parseContentLength(res, url);
   }
@@ -565,14 +660,13 @@ export class ObsidianService {
   /**
    * Vault tags with usage counts, hierarchical parents included. Unscoped, the
    * plugin's `/tags/` with its occurrence counts. That payload carries no
-   * per-note attribution, so under OBSIDIAN_READ_PATHS the tags are collected
-   * per note with one JsonLogic search instead, kept to readable notes, and
+   * per-note attribution, so under OBSIDIAN_READ_PATHS the tags are read from
+   * the readable notes' contexts instead (one upstream search, no bodies), and
    * each one counts the readable notes carrying it or a tag nested under it.
    */
   async listTags(ctx: Context): Promise<ObsidianTag[]> {
     if (this.#policy.restrictsReads) {
-      const notes = await this.searchJsonLogic(ctx, { var: 'tags' });
-      return countTagsPerNote(this.#policy.filterReadable(notes));
+      return countTagsPerNote(await this.#readableNoteContexts(ctx));
     }
     const res = await this.#request(ctx, '/tags/', { method: 'GET' });
     const body = (await res.json()) as RawTagsListing;
@@ -635,16 +729,149 @@ export class ObsidianService {
     }));
   }
 
+  /**
+   * JSONLogic search. Unscoped, the tree goes to the plugin unchanged. Under
+   * OBSIDIAN_READ_PATHS the plugin would evaluate it against every note in
+   * the vault, so the tree stays here instead: the readable notes' contexts
+   * are fetched and the tree is evaluated over those alone
+   * (`createJsonLogicEvaluation`), the way the plugin evaluates it. No hit,
+   * result, or error then reads a note outside the read scope; which note a
+   * link resolves to is still Obsidian's vault-wide resolution, so `links`,
+   * `backlinks`, and `unresolvedLinks` can change when a note outside the
+   * scope is created or removed.
+   *
+   * The plugin hands a tree note bodies only when its JSON holds the string
+   * `"content"` (`readsContent`); such a tree gets them here too, fetched
+   * and evaluated in batches of at most `CONTENT_BATCH_BYTES` so a broad
+   * scope never holds every readable body at once.
+   */
   async searchJsonLogic(
     ctx: Context,
     logic: Record<string, unknown>,
   ): Promise<StructuredSearchHit[]> {
-    const res = await this.#request(ctx, '/search/', {
+    if (this.#policy.restrictsReads) {
+      assertTreeDepth(logic);
+      const evaluation = createJsonLogicEvaluation(logic, { signal: ctx.signal });
+      const notes = await this.#readableNoteContexts(ctx);
+      if (!readsContent(logic)) return evaluation.evaluate(notes);
+      const hits: StructuredSearchHit[] = [];
+      for (const batch of contentBatches(notes)) {
+        const bodies = await this.#noteBodies(ctx, batch);
+        const withBodies = batch.map((note) => ({ ...note, content: bodies.get(note.path) ?? '' }));
+        hits.push(...(await evaluation.evaluate(withBodies)));
+      }
+      return hits;
+    }
+    const res = await this.#postJsonLogic(ctx, logic);
+    return (await res.json()) as RawStructuredSearchHit[];
+  }
+
+  /**
+   * A JSONLogic search for a caller paging through its hits `pageSize` at a
+   * time. Unscoped, it is `searchJsonLogic`. Under OBSIDIAN_READ_PATHS a call
+   * without `walk` evaluates fresh and, when the hits run past one page,
+   * stores the full ordered hit list under a new walk id, returned as `walk`;
+   * a call naming that id with the same tree is served from the stored list
+   * without evaluating. The store belongs to this service, whose read scope
+   * is fixed at construction, so a list is only read under the scope that
+   * produced it. Anything else — an expired, evicted, or unknown id, or a
+   * different tree — evaluates fresh, and a call cancelled before it answers
+   * stores nothing.
+   */
+  async pageJsonLogic(
+    ctx: Context,
+    logic: Record<string, unknown>,
+    walk: string | undefined,
+    pageSize: number,
+  ): Promise<{ hits: StructuredSearchHit[]; walk?: string }> {
+    if (!this.#policy.restrictsReads) return { hits: await this.searchJsonLogic(ctx, logic) };
+    // Before serializing it: a tree deep enough overflows `JSON.stringify`'s stack under Bun.
+    assertTreeDepth(logic);
+    const tree = JSON.stringify(logic);
+    const stored = walk === undefined ? undefined : this.#walks.get(walk);
+    if (walk !== undefined && stored?.tree === tree && stored.expiresAt > Date.now()) {
+      // Re-inserted so the map stays in last-read order.
+      this.#walks.delete(walk);
+      this.#walks.set(walk, { ...stored, expiresAt: Date.now() + WALK_TTL_MS });
+      return { hits: stored.hits, walk };
+    }
+    const hits = await this.searchJsonLogic(ctx, logic);
+    const id =
+      hits.length > pageSize && !ctx.signal.aborted ? this.#storeWalk(tree, hits) : undefined;
+    return id === undefined ? { hits } : { hits, walk: id };
+  }
+
+  /**
+   * Store a walk's hits under a fresh id, first dropping expired walks and,
+   * while the store would pass {@link WALK_STORE_CHARS}, the least recently
+   * read. A walk larger than the whole store is not kept.
+   */
+  #storeWalk(tree: string, hits: StructuredSearchHit[]): string | undefined {
+    const chars = walkChars(tree, hits, WALK_STORE_CHARS);
+    if (chars > WALK_STORE_CHARS) return;
+    const now = Date.now();
+    // Every walk lives WALK_TTL_MS past its last read, so expired walks lead the last-read order.
+    for (const [id, old] of this.#walks) {
+      if (old.expiresAt > now && this.#walkChars + chars <= WALK_STORE_CHARS) break;
+      this.#walks.delete(id);
+      this.#walkChars -= old.chars;
+    }
+    const id = crypto.randomUUID();
+    this.#walks.set(id, { tree, hits, chars, expiresAt: now + WALK_TTL_MS });
+    this.#walkChars += chars;
+    return id;
+  }
+
+  /** One upstream JSONLogic search: `tree` posted to `/search/`. */
+  #postJsonLogic(ctx: Context, tree: unknown): Promise<UndiciResponse> {
+    return this.#request(ctx, '/search/', {
       method: 'POST',
       headers: { 'Content-Type': JSONLOGIC_CT },
-      body: JSON.stringify(logic),
+      body: JSON.stringify(tree),
     });
-    return (await res.json()) as RawStructuredSearchHit[];
+  }
+
+  /**
+   * The readable notes' JSONLogic contexts, bodies left empty as the plugin
+   * leaves them, in vault order, from one upstream search whose tree is the
+   * server's own: a `regexp` guard on the path (`PathPolicy.readScopePattern`)
+   * narrows what the plugin returns, and `filterReadable` decides what is
+   * kept. Each context carries only the fields the plugin documents, its link
+   * fields reduced to readable entries.
+   */
+  async #readableNoteContexts(ctx: Context): Promise<ScopedNote[]> {
+    const guard = {
+      if: [{ regexp: [this.#policy.readScopePattern(), { var: 'path' }] }, { var: '' }, null],
+    };
+    const res = await this.#postJsonLogic(ctx, guard);
+    const hits = (await res.json()) as RawNoteContextHit[];
+    return this.#policy.filterReadable(hits).map(({ filename, result }) => ({
+      tags: result.tags,
+      frontmatter: result.frontmatter,
+      stat: result.stat,
+      path: filename,
+      content: result.content,
+      links: result.links && this.#policy.keepReadable(result.links),
+      backlinks: result.backlinks && this.#policy.keepReadable(result.backlinks),
+      unresolvedLinks: result.unresolvedLinks && this.#policy.keepReadable(result.unresolvedLinks),
+    }));
+  }
+
+  /**
+   * Bodies of `notes`, already-gated contexts, by path, from one upstream
+   * search for exactly those paths. A body for any other path is dropped; an
+   * empty body is absent, as the plugin's search drops a falsy result.
+   */
+  async #noteBodies(ctx: Context, notes: readonly ScopedNote[]): Promise<Map<string, string>> {
+    const paths = notes.map((note) => note.path);
+    const guard = { if: [{ in: [{ var: 'path' }, paths] }, { var: 'content' }, null] };
+    const res = await this.#postJsonLogic(ctx, guard);
+    const wanted = new Set(paths);
+    const bodies = new Map<string, string>();
+    for (const hit of (await res.json()) as Array<{ filename: string; result: string }>) {
+      if (wanted.has(hit.filename)) bodies.set(hit.filename, hit.result);
+    }
+    return bodies;
   }
 
   /**
@@ -764,15 +991,15 @@ export class ObsidianService {
    */
   async #gateAsWrite(ctx: Context, target: NoteTarget): Promise<NoteTarget> {
     if (target.type === 'path') {
-      this.#policy.assertWritable(target.path);
+      this.#policy.assertWritable(target.path, target.resolvedFrom);
       return target;
     }
     if (this.#policy.isUnrestricted) {
       return target;
     }
-    const note = await this.#rawGetNoteJson(ctx, target);
-    this.#policy.assertWritable(note.path);
-    return { type: 'path', path: note.path };
+    const pinned = this.pinTarget(target, (await this.#rawGetNoteJson(ctx, target)).path);
+    this.#policy.assertWritable(pinned.path, pinned.resolvedFrom);
+    return pinned;
   }
 
   /** Raw NoteJson fetch — bypasses path-policy. Used by gate helpers to learn the resolved path. */
@@ -1212,6 +1439,7 @@ export class ObsidianService {
       });
       if (!res.ok) {
         await this.#throwForStatus(res, pathAndQuery, ctx, {
+          method: init.method,
           listRead: init.listRead,
           requestedUrl: url,
         });
@@ -1375,13 +1603,16 @@ export class ObsidianService {
    * malformed `OBSIDIAN_BASE_URL` is otherwise invisible behind a clean-looking
    * 404 (issue #122).
    *
-   * Issues #104, #116, and #122.
+   * `opts.method` is classification input only: the same upstream status and
+   * wording mean different things on a whole-file write than elsewhere.
+   *
+   * Issues #104, #116, #122, and #159.
    */
   async #throwForStatus(
     res: UndiciResponse,
     path: string,
     ctx: Context,
-    opts: { listRead?: boolean | undefined; requestedUrl: string },
+    opts: { method: string; listRead?: boolean | undefined; requestedUrl: string },
   ): Promise<never> {
     const text = await this.#readBodySafe(res);
     const body = parseJsonObject(text);
@@ -1564,6 +1795,31 @@ export class ObsidianService {
           throw contentPreexists();
         }
         /**
+         * A whole-file `PUT` or `POST` creates the note through Obsidian's
+         * `Vault.create` whenever the vault index, which is case-sensitive,
+         * holds no file under that exact name — and `Vault.create` throws
+         * "File already exists." when the disk does. On a case-insensitive
+         * filesystem that is a note whose name differs only in letter case;
+         * a file Obsidian does not index (a dot-file) refuses the same way.
+         * The plugin relays it as a 500 whose message ends in that sentence
+         * on a line of its own; the phrase inside other text (a filesystem
+         * `EEXIST` naming another path) is a different failure. A `Conflict`
+         * keeps it out of the retry loop: the next attempt meets the same
+         * file. The tools name the existing note from the folder listing.
+         */
+        if (
+          res.status === 500 &&
+          (opts.method === 'PUT' || opts.method === 'POST') &&
+          path.startsWith('/vault/') &&
+          /(?:^|\n)[ \t]*file already exists\.?\s*$/i.test(upstreamMsg)
+        ) {
+          throw conflict(
+            `Obsidian refused to create ${display}: a file already exists on disk at that path under different letter case, or one Obsidian does not index.`,
+            data('case_variant_exists'),
+            { cause },
+          );
+        }
+        /**
          * Unhandled 4xx and all 5xx. `httpStatusToErrorCode` supplies the same
          * canonical mapping `httpErrorFromResponse` would (the whole 5xx range
          * except 504 → ServiceUnavailable, 504 → Timeout) without that
@@ -1607,17 +1863,17 @@ export class ObsidianService {
 }
 
 /**
- * Count, per tag, the notes carrying it or a tag nested under it. Each hit's
- * `result` is the plugin's per-note tag list for `{"var": "tags"}` — strings,
- * deduplicated, `#` stripped, not parent-expanded, untagged notes omitted — so
- * one note carrying `work/a` and `work/b` adds 1 to `work`. Tags come back in
+ * Count, per tag, the notes carrying it or a tag nested under it. Each note's
+ * `tags` is the plugin's per-note tag list — strings, deduplicated, `#`
+ * stripped, not parent-expanded — so one note carrying `work/a` and `work/b`
+ * adds 1 to `work`, and an untagged note adds nothing. Tags come back in
  * order of first appearance.
  */
-function countTagsPerNote(notes: readonly StructuredSearchHit[]): ObsidianTag[] {
+function countTagsPerNote(notes: readonly Pick<ScopedNote, 'tags'>[]): ObsidianTag[] {
   const counts = new Map<string, number>();
-  for (const { result } of notes) {
+  for (const { tags } of notes) {
     const noteTags = new Set<string>();
-    for (const tag of result as string[]) {
+    for (const tag of tags) {
       const parts = tag.split('/');
       for (let depth = 1; depth <= parts.length; depth++) {
         noteTags.add(parts.slice(0, depth).join('/'));

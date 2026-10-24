@@ -6,10 +6,13 @@
  * @module tests/tools/obsidian-write-note.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { obsidianWriteNote } from '@/mcp-server/tools/definitions/obsidian-write-note.tool.js';
 import {
+  type DispatchOpts,
+  type DynamicReply,
   documentMapV2,
   type HeadingTree,
   instructionOf,
@@ -105,6 +108,7 @@ describe('obsidian_write_note (whole file)', () => {
   it('refuses to clobber an existing note when overwrite is false', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(500));
+    pool.intercept({ path: '/vault/', method: 'GET' }).reply(200, { files: ['Note.md'] });
 
     let putCalled = false;
     pool.intercept({ path: '/vault/Note.md', method: 'PUT' }).reply(() => {
@@ -155,6 +159,160 @@ describe('obsidian_write_note (whole file)', () => {
       previousSizeInBytes: 5000,
       currentSizeInBytes: 11,
     });
+  });
+
+  /** The case-variant listing runs only on a refused write; a catch-all records anything else. */
+  it.each([
+    ['a write to a new path', 404, false],
+    ['an exact-case overwrite', 200, true],
+  ])('sends HEAD, PUT, HEAD and nothing else for %s', async (_label, headStatus, overwrite) => {
+    const pool = harness.current().pool;
+    const seen: string[] = [];
+    const record = (opts: DispatchOpts, statusCode: number): DynamicReply => {
+      seen.push(`${opts.method} ${opts.path}`);
+      return { statusCode, data: '', responseOptions: { headers: { 'content-length': '4' } } };
+    };
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply((o) => record(o, headStatus));
+    pool.intercept({ path: '/vault/Note.md', method: 'PUT' }).reply((o) => record(o, 200));
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply((o) => record(o, 200));
+    pool.intercept({ path: () => true }).reply((o) => record(o, 500));
+
+    await obsidianWriteNote.handler(
+      obsidianWriteNote.input.parse({
+        target: { type: 'path', path: 'Note.md' },
+        content: 'body',
+        overwrite,
+      }),
+      createMockContext({ errors: obsidianWriteNote.errors }),
+    );
+
+    expect(seen).toEqual(['HEAD /vault/Note.md', 'PUT /vault/Note.md', 'HEAD /vault/Note.md']);
+  });
+});
+
+/**
+ * `Notes/case.md` exists; the caller writes `Notes/Case.md`. On a
+ * case-insensitive filesystem the HEAD answers 200 for the folded spelling and
+ * Obsidian's `Vault.create` refuses the PUT with HTTP 500 "File already
+ * exists." (Local REST API 5.2.0). The real name comes from the parent listing.
+ */
+describe('obsidian_write_note (case variant on a case-insensitive filesystem)', () => {
+  const textOf = (res: Awaited<ReturnType<typeof runToolContract>>) =>
+    res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+  const errorOf = (res: Awaited<ReturnType<typeof runToolContract>>) =>
+    (res.structuredContent as { error: { code: number; data: Record<string, unknown> } }).error;
+  const contractRecovery = obsidianWriteNote.errors?.find(
+    (e) => e.reason === 'case_variant_exists',
+  )?.recovery;
+  const input = (overwrite: boolean) => ({
+    target: { type: 'path' as const, path: 'Notes/Case.md' },
+    content: 'x',
+    overwrite,
+  });
+
+  /** HEAD 200, then the refused PUT queued four deep; returns the PUT count. */
+  function serveRefusedPut(): () => number {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Notes/Case.md', method: 'HEAD' }).reply(200, '', cl(7));
+    let puts = 0;
+    for (let i = 0; i < 4; i++) {
+      pool.intercept({ path: '/vault/Notes/Case.md', method: 'PUT' }).reply(() => {
+        puts++;
+        return {
+          statusCode: 500,
+          data: { message: 'Internal Server Error\nFile already exists.', errorCode: 50000 },
+        };
+      });
+    }
+    return () => puts;
+  }
+
+  /** The parent folder's listing: its files, or a 404 for a listing that fails. */
+  function serveListing(files: string[] | 'fails'): void {
+    const listing = harness.current().pool.intercept({ path: '/vault/Notes/', method: 'GET' });
+    if (files === 'fails') listing.reply(404, {});
+    else listing.reply(200, { files });
+  }
+
+  it.each([
+    ['overwrite: true, after one refused PUT', true, 1],
+    ['overwrite: false, before any PUT', false, 0],
+  ])('names the existing note on both surfaces (%s)', async (_label, overwrite, putCount) => {
+    const puts = serveRefusedPut();
+    serveListing(['Other.md', 'case.md']);
+
+    const res = await runToolContract(obsidianWriteNote, input(overwrite));
+
+    expect(res.isError).toBe(true);
+    expect(puts()).toBe(putCount);
+    const error = errorOf(res);
+    expect(error.code).toBe(JsonRpcErrorCode.Conflict);
+    expect(error.data).toMatchObject({
+      reason: 'case_variant_exists',
+      path: 'Notes/Case.md',
+      existingPath: 'Notes/case.md',
+      recovery: { hint: contractRecovery },
+    });
+    const text = textOf(res);
+    expect(text).toContain("Note 'Notes/case.md' already exists");
+    expect(text).toContain(contractRecovery);
+    expect(text).not.toContain('Internal Server Error');
+  });
+
+  it.each([
+    ['the exact name is listed', ['Case.md', 'case-notes.md']],
+    ['nothing in the folder matches', ['Other.md']],
+  ])('keeps file_exists when overwrite is false and %s', async (_label, files) => {
+    const puts = serveRefusedPut();
+    serveListing(files);
+
+    const res = await runToolContract(obsidianWriteNote, input(false));
+
+    expect(res.isError).toBe(true);
+    expect(puts()).toBe(0);
+    const { data } = errorOf(res);
+    expect(data).toMatchObject({ reason: 'file_exists', path: 'Notes/Case.md' });
+    expect(Object.hasOwn(data, 'existingPath')).toBe(false);
+  });
+
+  it.each([
+    ['no listed file matches ignoring case', ['Other.md']],
+    ['more than one listed file matches ignoring case', ['case.md', 'CASE.md']],
+    ['the folder listing itself fails', 'fails'],
+  ] as Array<[string, string[] | 'fails']>)('omits existingPath when %s', async (_label, files) => {
+    const puts = serveRefusedPut();
+    serveListing(files);
+
+    const res = await runToolContract(obsidianWriteNote, input(true));
+
+    expect(puts()).toBe(1);
+    const { data } = errorOf(res);
+    expect(data).toMatchObject({ reason: 'case_variant_exists', path: 'Notes/Case.md' });
+    expect(Object.hasOwn(data, 'existingPath')).toBe(false);
+    expect(textOf(res)).toContain('Notes/Case.md');
+  });
+
+  it.each([
+    ['overwrite: true, after the refused PUT', true],
+    ['overwrite: false, after the HEAD', false],
+  ])('propagates a cancellation during the folder listing (%s)', async (_label, overwrite) => {
+    serveRefusedPut();
+    const controller = new AbortController();
+    const cancelled = Object.assign(new Error('aborted'), { name: 'AbortError' });
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Notes/', method: 'GET' })
+      .reply(() => {
+        controller.abort();
+        throw cancelled;
+      });
+
+    const call = obsidianWriteNote.handler(
+      obsidianWriteNote.input.parse(input(overwrite)),
+      createMockContext({ signal: controller.signal, errors: obsidianWriteNote.errors }),
+    );
+
+    await expect(call).rejects.toBe(cancelled);
   });
 });
 

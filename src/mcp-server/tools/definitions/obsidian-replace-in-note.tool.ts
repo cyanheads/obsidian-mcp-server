@@ -196,6 +196,8 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
     const svc = getObsidianService();
     const { target } = input;
     const note = await svc.getNoteJson(ctx, target);
+    // The write goes to the note this read returned, never to a second resolution of `target`.
+    const pathTarget = svc.pinTarget(target, note.path);
     // Delivered bytes — not note.stat.size (see ObsidianService.tryGetSize).
     const previousSizeInBytes = Buffer.byteLength(note.content, 'utf8');
 
@@ -314,8 +316,8 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
 
     let currentSizeInBytes = previousSizeInBytes;
     if (totalReplacements > 0) {
-      await svc.writeNote(ctx, target, fm.open + yamlText + fm.close + body, 'markdown');
-      currentSizeInBytes = await svc.getSize(ctx, { type: 'path', path: note.path });
+      await svc.writeNote(ctx, pathTarget, fm.open + yamlText + fm.close + body, 'markdown');
+      currentSizeInBytes = await svc.getSize(ctx, pathTarget);
     }
 
     return {

@@ -165,8 +165,8 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
      * Resolve once and pin the rest of the flow to a path target so the
      * pre-PATCH size probe and the PATCH itself act on the same concrete file.
      */
-    const path = await svc.resolvePath(ctx, input.target);
-    const pathTarget = { type: 'path' as const, path };
+    const pathTarget = await svc.resolveTarget(ctx, input.target);
+    const { path } = pathTarget;
 
     const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
     const resolvedTarget = await svc.patchNote(ctx, pathTarget, input.content, {

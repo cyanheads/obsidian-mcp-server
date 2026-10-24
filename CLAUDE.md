@@ -2,10 +2,10 @@
 
 **Server:** obsidian-mcp-server
 **Version:** 3.7.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.12`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -39,7 +39,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **Secrets in env vars only.** `OBSIDIAN_API_KEY` is required; never hardcoded.
 - **Cut noise.** Add only what earns its place: no speculative generality, no guards for states the framework already prevents (Zod-validated params, classified errors), no abstraction until a third caller proves it, no option nothing sets.
 - **Command-palette tools are opt-in.** `obsidian_list_commands` and `obsidian_execute_command` are callable only when `OBSIDIAN_ENABLE_COMMANDS=true` — Obsidian commands are opaque and can be destructive. When the flag is unset, the entry point wraps both with `disabledTool()` so they're absent from `tools/list` (LLM can't invoke) but visible in the operator-facing manifest with a hint to enable them.
-- **Path-policy gating goes through `PathPolicy`.** Every path-taking method on `ObsidianService` calls `policy.assertReadable` / `assertWritable` before the upstream HTTP call; `listFiles` gates with `assertListable` and filters entries with `filterListing` (readable entries plus folders on the way to the scope), so every listing consumer inherits the scope; `obsidian_search_notes` post-filters hits via `svc.policy.filterReadable`, and `listTags` collects per-note tags through it when `policy.restrictsReads`. Don't bypass this — `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_READ_ONLY` are the single chokepoint, and `path_forbidden` is declared on every path-taking tool's `errors[]` contract.
+- **Path-policy gating goes through `PathPolicy`.** Every path-taking method on `ObsidianService` calls `policy.assertReadable` / `assertWritable` before the upstream HTTP call; `listFiles` gates with `assertListable` and filters entries with `filterListing` (readable entries plus folders on the way to the scope), so every listing consumer inherits the scope; `obsidian_search_notes` filters hits via `svc.policy.filterReadable`. Under `policy.restrictsReads`, `searchJsonLogic` never sends the caller's tree upstream: one `/search/` guarded by `readScopePattern` fetches the readable notes' contexts (plus one body fetch per batch of readable notes when the tree names `content`), `filterReadable` gates them, `keepReadable` reduces `links` / `backlinks` / `unresolvedLinks`, and `createJsonLogicEvaluation` runs the tree on a worker thread with the plugin's operators, bounded by depth, a per-note build budget, a per-search kept-result budget, and a deadline (`logic_too_costly`; a note too deep to hand to the worker is `note_too_deep`), so no hit, result, or error reads a note outside the scope. Link targets are still Obsidian's vault-wide resolution, so the reduced link fields can shift when an out-of-scope note appears or disappears (#165); docs state that bound, never a stronger one. `listTags` reads per-note tags from the same readable contexts, with no evaluation. An `active` / `periodic` target is gated on the path it resolves to, under the target's label: `resolveTarget` / `pinTarget` return a `PathTarget` whose `resolvedFrom` the asserts take, so a denial names `(active file)` or `daily note for 2026-10-01`, never a path the caller did not send, and a tool that reads a target then writes it writes to that pinned path rather than resolving the target again. Don't bypass this — `OBSIDIAN_READ_PATHS` / `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_READ_ONLY` are the single chokepoint, and `path_forbidden` is declared on every path-taking tool's `errors[]` contract.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
 ---
@@ -274,19 +274,25 @@ Available factories: `notFound`, `validationError`, `forbidden`, `unauthorized`,
 ```text
 src/
   index.ts                              # createApp() entry point — registers tools/resources, inits Obsidian service
+  instructions.ts                       # buildInstructions() — server `instructions`, effective path scope included
   config/
     server-config.ts                    # OBSIDIAN_* env vars (Zod schema)
   services/
     obsidian/
       obsidian-service.ts               # Local REST API client (init/accessor pattern)
-      frontmatter-ops.ts                # YAML frontmatter parse/serialize/edit helpers + inline tag reader
+      path-policy.ts                    # PathPolicy — OBSIDIAN_READ_PATHS / WRITE_PATHS / READ_ONLY gate
+      jsonlogic-deps.d.ts               # Type declarations for json-logic-js and glob-to-regexp
+      jsonlogic-evaluator.ts            # Scoped JSONLogic evaluation: bounds, worker hand-off, logic_* errors
+      jsonlogic-worker.ts               # Worker entry: the plugin's JSONLogic operators, hardened and budgeted
+      frontmatter-ops.ts                # YAML frontmatter parse/serialize/edit helpers + inline tag reader + the wikilink span rule (`wikilinkCloser`) `obsidian_get_note` imports
       markdown-blocks.ts                # Block structure (code, HTML, math, tables) for inline tag detection
       patch-instruction.ts              # markdown-patch 1.x headers / 2.0 instructions, format negotiation, 2.0 map flattening
       section-extractor.ts              # Heading/block/frontmatter section extraction
-      types.ts                          # Domain types (NoteJson, NoteTarget, etc.)
+      types.ts                          # Domain types (NoteJson, NoteTarget, PathTarget, etc.)
   mcp-server/
     tools/definitions/
       _shared/schemas.ts                # Shared TargetSchema + SectionSchema reused across tools
+      _shared/suggest-paths.ts          # Case-mismatch fallback and suggestions for reads; names the existing note on a `case_variant_exists` write
       index.ts                          # read/write/command tool sets + buildSearchNotesTool (Omnisearch-aware) and buildDeleteNoteTool (elicitation mode) factories
       obsidian-*.tool.ts                # 14 tool definitions (12 base + 2 opt-in command-palette pair)
     resources/definitions/
@@ -381,6 +387,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, `user_config` wiring, plugin manifest identity and env contract (run by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
+| `bun run test:coverage` | Run tests with Istanbul coverage |
 | `bun run start:stdio` | Production mode (stdio) — requires `bun run build` first |
 | `bun run start:http` | Production mode (HTTP) — requires `bun run build` first |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` rollup from `changelog/<minor>.x/*.md` |
@@ -435,6 +442,7 @@ security: false                            # optional — true ONLY for a source
 bun publish --access public
 
 docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-arg APP_VERSION=<version> \
   -t ghcr.io/cyanheads/obsidian-mcp-server:<version> \
   -t ghcr.io/cyanheads/obsidian-mcp-server:latest \
   --push .

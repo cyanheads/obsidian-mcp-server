@@ -1,7 +1,9 @@
 /**
  * @fileoverview Read-modify-write helpers for the YAML frontmatter block of a
  * note's raw content. Used by the composed manage-frontmatter / manage-tags
- * tools when the upstream Local REST API has no single-call equivalent.
+ * tools when the upstream Local REST API has no single-call equivalent. Also
+ * holds the wikilink span rule (`wikilinkCloser`) that the inline tag reader
+ * and `obsidian_get_note`'s outgoing-link parser share.
  * @module services/obsidian/frontmatter-ops
  */
 
@@ -423,16 +425,48 @@ function codeSpanCloser(text: string): (open: number, length: number) => number 
     return close === undefined ? undefined : close + length;
   };
 }
+
 /**
- * `[[Target#Heading|Alias]]`. The `#` in a wikilink opens a heading anchor and
- * the text after `|` is display text — neither is a tag. Protecting the whole
- * span rather than tightening the tag's left boundary is what makes the result
- * independent of what the linked note is named: `[[Note#Overview]]` only escapes
- * a boundary rule because the name happens to end in a word character, while
- * `[[Note (Draft)#Overview]]` does not. Obsidian rejects `[` and `]` inside a
- * link target, so a span never nests.
+ * The end of the wikilink each `[[` in `text` opens, or `undefined` when it
+ * opens none, as Obsidian's metadata cache reads links: from `[[` to the first
+ * `]]` on the same line. Single `[` and `]` belong to the link
+ * (`[[Note|see [1]]]` links `Note`), a second `[[` before that `]]` starts the
+ * link over (`[[a [[b]]` links `b`), and no link crosses a line break.
+ *
+ * Every opener before the same `[[`, `]]`, or line break stops there, so that
+ * stop is scanned for once and shared. Openers must be looked up in ascending
+ * order; the scan is then linear in `text`.
  */
-const WIKILINK = /\[\[[^[\]\n]*\]\]/;
+export function wikilinkCloser(text: string): (open: number) => number | undefined {
+  let stop = -1;
+  return (open) => {
+    if (open + 2 > stop) {
+      stop = open + 2;
+      while (
+        stop < text.length &&
+        text[stop] !== '\n' &&
+        !(text[stop + 1] === text[stop] && (text[stop] === '[' || text[stop] === ']'))
+      ) {
+        stop++;
+      }
+    }
+    return text[stop] === ']' ? stop + 2 : undefined;
+  };
+}
+
+/**
+ * The `[[` that opens `[[Target#Heading|Alias]]`. The `#` in a wikilink opens a
+ * heading anchor and the text after `|` is display text — neither is a tag.
+ * Protecting the whole span rather than tightening the tag's left boundary is
+ * what makes the result independent of what the linked note is named:
+ * `[[Note#Overview]]` only escapes a boundary rule because the name happens to
+ * end in a word character, while `[[Note (Draft)#Overview]]` does not. Only the
+ * opener is a regex; `wikilinkCloser` finds the closer, the rule
+ * `obsidian_get_note` reads outgoing links by. The span can hold single `[` and
+ * `]` (`[[Note|a #b [1]]]` is one link) but never a second `[[`, so one
+ * wikilink never holds another.
+ */
+const WIKILINK_OPEN = /(?<wikilink>\[\[)/;
 /** `![alt](source)` and `![alt][label]` — Obsidian reads no tag in an image's alt text. */
 const IMAGE = /!\[[^[\]\n]*\](?:\([^()\n]*\)|\[[^[\]\n]*\])/;
 /**
@@ -552,7 +586,7 @@ const QUOTE_MARKER = />(?=#)(?<=(?:^|\n)[ \t]*(?:>[ \t]*)*>)/;
 const INLINE_SPANS = new RegExp(
   [
     INLINE_CODE,
-    WIKILINK,
+    WIKILINK_OPEN,
     IMAGE,
     LINK_TAIL,
     LINK_DEFINITION,
@@ -811,6 +845,7 @@ function protectedSpans(text: string): InlineSpan[] {
   const spans: InlineSpan[] = [];
   const mathCloser = inlineMathCloser(text);
   const codeCloser = codeSpanCloser(text);
+  const linkCloser = wikilinkCloser(text);
   INLINE_SPANS.lastIndex = 0;
   for (;;) {
     const m = INLINE_SPANS.exec(text);
@@ -829,6 +864,19 @@ function protectedSpans(text: string): InlineSpan[] {
       let close = codeCloser(start, runEnd - start);
       while (close === undefined && ++start < runEnd) close = codeCloser(start, runEnd - start);
       if (close === undefined) continue;
+      end = close;
+      INLINE_SPANS.lastIndex = end;
+    } else if (m.groups?.wikilink !== undefined) {
+      /**
+       * An opener with no closer is text, and its second `[` may open a link
+       * of its own — `[[[[a]]` links `[a` from its second `[[` — so the scan
+       * resumes one character on rather than past the whole opener.
+       */
+      const close = linkCloser(start);
+      if (close === undefined) {
+        INLINE_SPANS.lastIndex = start + 1;
+        continue;
+      }
       end = close;
       INLINE_SPANS.lastIndex = end;
     } else if (m.groups?.inlineMath !== undefined) {

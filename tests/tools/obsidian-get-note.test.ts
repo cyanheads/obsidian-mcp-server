@@ -9,6 +9,9 @@ import { describe, expect, it } from 'vitest';
 import { obsidianGetNote } from '@/mcp-server/tools/definitions/obsidian-get-note.tool.js';
 import {
   contractErrorOf,
+  expectLinearCpu,
+  installMovingTargetVault,
+  MOVING_TARGET_NOTES,
   noteJson,
   repeatKey,
   servePluginVersion,
@@ -1186,6 +1189,31 @@ describe('obsidian_get_note / includeLinks', () => {
     expect(large / small).toBeLessThan(64);
   });
 
+  /**
+   * The wikilink scan's worst cases across a 64× span: an opener with no
+   * closer repeated, openers whose bodies hold single brackets, and one long
+   * line opening with an unclosed `[[` — under one line ending and under line
+   * breaks throughout.
+   */
+  it.each<[string, (size: number) => string]>([
+    ['repeated openers', (n) => '[['.repeat(n / 2)],
+    ['openers holding a bracketed alias', (n) => '[[a|[b]'.repeat(Math.ceil(n / 7))],
+    ['one long line opening with an unclosed link', (n) => `[[${'x'.repeat(n)}\n[[y]]`],
+    ['openers over line breaks throughout', (n) => '[[  \r\n'.repeat(Math.ceil(n / 6))],
+  ])('scans %s in linear time across a 64x span', async (_label, build) => {
+    await expectLinearCpu(build, async (content) => {
+      mockFullNote(content);
+      await obsidianGetNote.handler(
+        obsidianGetNote.input.parse({
+          format: 'full',
+          target: { type: 'path', path: 'Note.md' },
+          includeLinks: true,
+        }),
+        createMockContext({ errors: obsidianGetNote.errors }),
+      );
+    });
+  });
+
   it('captures internal markdown links and filters external URIs', async () => {
     mockFullNote(
       [
@@ -1578,5 +1606,108 @@ describe('obsidian_get_note / format()', () => {
         '- f1',
       ].join('\n'),
     );
+  });
+});
+
+/**
+ * `format: "document-map"` on an `active` or `periodic` target resolves it
+ * once and reads the map from the note that resolution returned, so the map
+ * and `path` describe the same note even when the target moves in between.
+ */
+describe('obsidian_get_note / document-map resolves an active or periodic target once', () => {
+  const { first, second } = MOVING_TARGET_NOTES;
+  const TARGETS = [
+    ['/active/', { type: 'active' }],
+    ['/periodic/daily/', { type: 'periodic', period: 'daily' }],
+    ['/periodic/weekly/2026/10/01/', { type: 'periodic', period: 'weekly', date: '2026-10-01' }],
+  ] as const;
+  type VaultConfig = Parameters<typeof installMovingTargetVault>[0];
+  const CONFIGS: [string, VaultConfig][] = [
+    ['no path policy', {}],
+    ['OBSIDIAN_READ_PATHS', { readPaths: ['work'] }],
+  ];
+  const CASES = CONFIGS.flatMap(([label, config]) =>
+    TARGETS.map(([route, target]) => [label, route, config, target] as const),
+  );
+
+  /** A vault whose two notes have different maps, so the map names the note it came from. */
+  const movingVault = (config: VaultConfig, firstNote = '# Work heading\n') => {
+    const vault = installMovingTargetVault(config);
+    vault.notes[first] = firstNote;
+    vault.notes[second] = '# Private heading\n';
+    return vault;
+  };
+
+  it.each(CASES)('%s, %s', async (_label, route, config, target) => {
+    const vault = movingVault(config);
+
+    const res = await runToolContract(obsidianGetNote, { format: 'document-map', target });
+
+    expect(res.isError).toBeFalsy();
+    expect(obsidianGetNote.output.parse(res.structuredContent)).toEqual({
+      result: {
+        format: 'document-map',
+        path: first,
+        headings: ['Work heading'],
+        blocks: [],
+        frontmatterFields: ['status'],
+      },
+    });
+    expect(res.content).toEqual([
+      {
+        type: 'text',
+        text: [
+          `**${first}** (format: document-map)`,
+          '',
+          '**Headings (1)**',
+          '- Work heading',
+          '',
+          '**Blocks (0)**',
+          '',
+          '**Frontmatter fields (1)**',
+          '- status',
+        ].join('\n'),
+      },
+    ]);
+    expect(vault.requests).toEqual([`GET ${route}`, 'GET /', `GET /vault/${first}`]);
+  });
+
+  /**
+   * An integer-named heading makes the map read the note a second time, for
+   * its heading order; that read addresses the resolved note too.
+   */
+  it('reads the heading order from the resolved note', async () => {
+    const vault = movingVault({}, '# 2024\n# Work heading\n');
+
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'document-map',
+      target: { type: 'active' },
+    });
+
+    expect(obsidianGetNote.output.parse(res.structuredContent).result).toMatchObject({
+      path: first,
+      headings: ['2024', 'Work heading'],
+    });
+    expect(vault.requests).toEqual([
+      'GET /active/',
+      'GET /',
+      `GET /vault/${first}`,
+      `GET /vault/${first}`,
+    ]);
+  });
+
+  it('denies a target that resolves outside the read scope by its label, before any map read', async () => {
+    const vault = movingVault({ readPaths: ['private'] });
+
+    expect(
+      await contractErrorOf(obsidianGetNote, {
+        format: 'document-map',
+        target: { type: 'active' },
+      }),
+    ).toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+      data: { reason: 'path_forbidden', path: '(active file)' },
+    });
+    expect(vault.requests).toEqual(['GET /active/']);
   });
 });

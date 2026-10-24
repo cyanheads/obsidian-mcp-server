@@ -16,6 +16,11 @@
  *    NotFound enriched with the candidates in the message and
  *    `error.data.suggestions[]`.
  *
+ * 3. **Case-variant naming on writes.** A whole-file write never substitutes
+ *    a path, but on a case-insensitive filesystem a write to a case variant of
+ *    an existing note is refused (`case_variant_exists`); the same listing
+ *    names the note it collided with as `existingPath`.
+ *
  * `obsidian_get_note` and `obsidian_open_in_ui` wrap their service calls with
  * `withCaseFallback`; writes and deletes match the exact path.
  * @module mcp-server/tools/definitions/_shared/suggest-paths
@@ -141,6 +146,78 @@ export async function findSimilarPaths(
   return [...probe.caseMatches, ...probe.extInsensitive].slice(0, MAX_SUGGESTIONS);
 }
 
+/** What the parent folder listing shows about the spelling of a path. */
+export interface CaseVariants {
+  /** The path itself is listed under exactly that name. */
+  exact: boolean;
+  /** Listed files whose names equal the path's ignoring case, but not exactly (full vault paths). */
+  variants: string[];
+}
+
+/**
+ * Read the parent folder listing for files that differ from `path` only in
+ * letter case. A listing that fails, or that the read scope withholds, reads
+ * as empty, so no path outside the read scope is ever named; the caller's
+ * cancellation propagates as itself.
+ */
+export async function findCaseVariants(
+  ctx: Context,
+  svc: ObsidianService,
+  path: string,
+): Promise<CaseVariants> {
+  const { caseMatches } = await probeParentDir(ctx, svc, path);
+  const normalized = path.replace(/^\/+|\/+$/g, '');
+  return {
+    exact: caseMatches.includes(normalized),
+    variants: caseMatches.filter((match) => match !== normalized),
+  };
+}
+
+/**
+ * Message and error data for a `case_variant_exists` refusal. `existingPath`
+ * is set only when exactly one variant is listed — never picked from several,
+ * and never inferred when none is: a file Obsidian does not index (a dot-file)
+ * refuses a write the same way and never appears in a listing.
+ */
+export function caseVariantError(
+  path: string,
+  variants: readonly string[],
+): { message: string; data: { path: string; existingPath?: string } } {
+  const existingPath = variants.length === 1 ? variants[0] : undefined;
+  if (existingPath === undefined) {
+    return {
+      message: `'${path}' collides with a file already on disk: one whose name differs only in letter case, or one Obsidian does not index.`,
+      data: { path },
+    };
+  }
+  return {
+    message: `Note '${existingPath}' already exists, and this vault's filesystem treats '${path}' as the same file.`,
+    data: { path, existingPath },
+  };
+}
+
+/**
+ * Run a whole-file write to `path`, and when the service refuses it as
+ * `case_variant_exists`, rethrow it naming the existing note from the parent
+ * listing. The listing is read only on that failure, so a write that succeeds
+ * costs no extra request.
+ */
+export async function withCaseVariantNamed<T>(
+  ctx: Context,
+  svc: ObsidianService,
+  path: string,
+  write: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await write();
+  } catch (err) {
+    if (!(err instanceof McpError) || err.data?.reason !== 'case_variant_exists') throw err;
+    const { variants } = await findCaseVariants(ctx, svc, path);
+    const { message, data } = caseVariantError(path, variants);
+    throw conflict(message, { ...data, reason: 'case_variant_exists' }, { cause: err });
+  }
+}
+
 async function probeParentDir(
   ctx: Context,
   svc: ObsidianService,
@@ -159,7 +236,9 @@ async function probeParentDir(
   try {
     const listing = await svc.listFiles(ctx, dir);
     entries = listing.files;
-  } catch {
+  } catch (err) {
+    // The caller's cancellation is not a listing that came back empty.
+    if (ctx.signal?.aborted) throw err;
     return empty;
   }
 

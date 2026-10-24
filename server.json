@@ -57,7 +57,7 @@
         },
         {
           "name": "OBSIDIAN_WRITE_PATHS",
-          "description": "Optional comma-separated vault-relative folder allowlist for writes. Same syntax as OBSIDIAN_READ_PATHS. Unset = full vault. Example: 'projects/,scratch/'.",
+          "description": "Optional comma-separated vault-relative folder allowlist for writes. Same syntax as OBSIDIAN_READ_PATHS. Unset = full vault, or the read scope when reads are restricted. Example: 'projects/,scratch/'.",
           "format": "string",
           "isRequired": false
         },
@@ -148,7 +148,7 @@
         },
         {
           "name": "OBSIDIAN_WRITE_PATHS",
-          "description": "Optional comma-separated vault-relative folder allowlist for writes. Same syntax as OBSIDIAN_READ_PATHS. Unset = full vault. Example: 'projects/,scratch/'.",
+          "description": "Optional comma-separated vault-relative folder allowlist for writes. Same syntax as OBSIDIAN_READ_PATHS. Unset = full vault, or the read scope when reads are restricted. Example: 'projects/,scratch/'.",
           "format": "string",
           "isRequired": false
         },

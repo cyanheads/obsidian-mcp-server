@@ -177,8 +177,8 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
           operation: input.operation,
         });
       }
-      const path = await svc.resolvePath(ctx, target);
-      const pathTarget = { type: 'path' as const, path };
+      const pathTarget = await svc.resolveTarget(ctx, target);
+      const { path } = pathTarget;
       const previousSizeInBytes = await svc.getSize(ctx, pathTarget);
       await svc.patchNote(ctx, pathTarget, JSON.stringify(input.value), {
         operation: 'replace',
@@ -203,6 +203,8 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     }
 
     const note = await svc.getNoteJson(ctx, target);
+    // The write goes to the note this read returned, never to a second resolution of `target`.
+    const pathTarget = svc.pinTarget(target, note.path);
     // Delivered bytes — not note.stat.size (see ObsidianService.tryGetSize).
     const previousSizeInBytes = Buffer.byteLength(note.content, 'utf8');
     const edit = deleteFrontmatterKey(note.content, input.key);
@@ -216,8 +218,8 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     const newContent = edit.content;
     let currentSizeInBytes = previousSizeInBytes;
     if (newContent !== note.content) {
-      await svc.writeNote(ctx, target, newContent, 'markdown');
-      currentSizeInBytes = await svc.getSize(ctx, { type: 'path', path: note.path });
+      await svc.writeNote(ctx, pathTarget, newContent, 'markdown');
+      currentSizeInBytes = await svc.getSize(ctx, pathTarget);
     }
     const projected = { ...note.frontmatter };
     delete projected[input.key];

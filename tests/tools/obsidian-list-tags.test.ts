@@ -12,7 +12,7 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
+import { jsonLogicVault, makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -376,10 +376,10 @@ describe('obsidian_list_tags / format() echoes the applied cap and filters', () 
  */
 describe('obsidian_list_tags / OBSIDIAN_READ_PATHS scope', () => {
   const NOTES = [
-    { filename: 'Work/a.md', result: ['proj/x', 'misc'] },
-    { filename: 'Work/b.md', result: ['proj/x', 'proj/y'] },
-    { filename: 'Work/c.md', result: ['proj/y', 'solo'] },
-    { filename: 'Private/p.md', result: ['proj/z', 'secret', 'misc'] },
+    { path: 'Work/a.md', tags: ['proj/x', 'misc'] },
+    { path: 'Work/b.md', tags: ['proj/x', 'proj/y'] },
+    { path: 'Work/c.md', tags: ['proj/y', 'solo'] },
+    { path: 'Private/p.md', tags: ['proj/z', 'secret', 'misc'] },
   ];
   const VAULT_WIDE = [
     { name: 'proj', count: 5 },
@@ -396,10 +396,10 @@ describe('obsidian_list_tags / OBSIDIAN_READ_PATHS scope', () => {
   });
 
   function scope(readPaths: string[]) {
-    const fetchImpl: ObsidianFetch = async (url) => {
-      const path = new URL(url).pathname;
-      const body = path === '/search/' ? NOTES : { tags: VAULT_WIDE };
-      return mockResponse(JSON.stringify(body), {
+    const vault = jsonLogicVault(NOTES);
+    const fetchImpl: ObsidianFetch = async (url, init) => {
+      if (new URL(url).pathname === '/search/') return vault.fetchImpl(url, init);
+      return mockResponse(JSON.stringify({ tags: VAULT_WIDE }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });

@@ -89,7 +89,7 @@
     },
     "OBSIDIAN_WRITE_PATHS": {
       "title": "Write Path Allowlist",
-      "description": "Comma-separated vault-relative folder allowlist for writes. Unset = full vault. Example: 'projects/,scratch/'.",
+      "description": "Comma-separated vault-relative folder allowlist for writes. Unset = full vault, or the read scope when reads are restricted. Example: 'projects/,scratch/'.",
       "type": "string",
       "required": false,
       "default": ""

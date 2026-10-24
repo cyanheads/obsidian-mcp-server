@@ -11,7 +11,7 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
+import { jsonLogicVault, makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -72,18 +72,16 @@ describe('obsidian://tags — OBSIDIAN_READ_PATHS scope', () => {
 
   it('lists only tags from readable notes, counted per note, in first-appearance order', async () => {
     const paths: string[] = [];
-    const fetchImpl: ObsidianFetch = async (url) => {
+    const vault = jsonLogicVault([
+      { path: 'Work/a.md', tags: ['work/a', 'work/b'] },
+      { path: 'Private/p.md', tags: ['secret', 'work/a'] },
+      { path: 'Work/b.md', tags: ['alpha', 'work/a'] },
+    ]);
+    const fetchImpl: ObsidianFetch = async (url, init) => {
       const path = new URL(url).pathname;
       paths.push(path);
-      const body =
-        path === '/search/'
-          ? [
-              { filename: 'Work/a.md', result: ['work/a', 'work/b'] },
-              { filename: 'Private/p.md', result: ['secret', 'work/a'] },
-              { filename: 'Work/b.md', result: ['alpha', 'work/a'] },
-            ]
-          : { tags: [{ name: 'secret', count: 1 }] };
-      return mockResponse(JSON.stringify(body), {
+      if (path === '/search/') return vault.fetchImpl(url, init);
+      return mockResponse(JSON.stringify({ tags: [{ name: 'secret', count: 1 }] }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });

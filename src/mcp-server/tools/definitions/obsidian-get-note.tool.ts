@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { wikilinkCloser } from '@/services/obsidian/frontmatter-ops.js';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import {
   computeFenceMask,
@@ -282,14 +283,13 @@ export const obsidianGetNote = tool('obsidian_get_note', {
           },
         };
       }
-      const [map, path] = await Promise.all([
-        svc.getDocumentMap(ctx, target),
-        svc.resolvePath(ctx, target),
-      ]);
+      // Resolve once and read the map from that note, so `path` and the map always agree.
+      const pinned = await svc.resolveTarget(ctx, target);
+      const map = await svc.getDocumentMap(ctx, pinned);
       return {
         result: {
           format: 'document-map' as const,
-          path,
+          path: pinned.path,
           headings: map.headings,
           blocks: map.blocks,
           frontmatterFields: map.frontmatterFields,
@@ -415,16 +415,6 @@ function stringifyValue(v: unknown): string {
 }
 
 /**
- * Wikilink: `[[body]]` or `![[body]]`, matched as Obsidian's metadata cache
- * reads it — from `[[` to the first `]]` on the same line. Single `[` and `]`
- * belong to the body (`[[Note|see [1]]]` links `Note`), but a second `[[`
- * starts the link over, so every match attempt stops at the next `[[`, `]]`,
- * or newline and the scan stays linear in note length. {@link wikilinkTarget}
- * takes the target out of the body.
- */
-const WIKILINK = /!?\[\[((?:(?!\[\[|\]\])[^\n])*)\]\]/g;
-
-/**
  * The target of a wikilink body: the text before the first `|` (alias) or `#`
  * (section). A backslash right before the alias pipe escapes it — Obsidian
  * reads `[[Note\|A]]` as `Note` (the only way to alias inside a table cell) —
@@ -454,6 +444,12 @@ const MARKDOWN_LINK = /\[[^[\]]*\]\((<[^<>\n]+>|(?:[^()\s]|\([^()\s]*\))+)(?:\s+
  * (any `scheme:` form) are filtered out — only vault-internal references
  * remain. No existence checks; this is the link graph as written.
  *
+ * A wikilink's extent is `wikilinkCloser`'s, the rule `obsidian_manage_tags`
+ * protects links by; the `!` of an embed sits before the `[[` and changes
+ * neither. An opener with no closer is passed over one character at a time,
+ * since its second `[` may open a link (`[[[[Note]]` links `[Note`).
+ * {@link wikilinkTarget} takes the target out of the body.
+ *
  * Fenced code blocks and inline code are blanked before matching so notes
  * documenting markdown syntax don't yield false-positive links.
  */
@@ -463,9 +459,16 @@ function parseOutgoingLinks(
   const cleaned = stripMarkdownCode(content);
   const links: Array<{ target: string; type: 'wikilink' | 'markdown' }> = [];
 
-  for (const m of cleaned.matchAll(WIKILINK)) {
-    const target = wikilinkTarget(m[1] ?? '');
+  const linkEnd = wikilinkCloser(cleaned);
+  for (let open = cleaned.indexOf('[['); open >= 0; ) {
+    const end = linkEnd(open);
+    if (end === undefined) {
+      open = cleaned.indexOf('[[', open + 1);
+      continue;
+    }
+    const target = wikilinkTarget(cleaned.slice(open + 2, end - 2));
     if (target) links.push({ target, type: 'wikilink' });
+    open = cleaned.indexOf('[[', end);
   }
 
   for (const m of cleaned.matchAll(MARKDOWN_LINK)) {

@@ -219,8 +219,10 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       };
     }
 
-    await svc.writeNote(ctx, target, reconciled.content, 'markdown');
-    const after = await svc.getNoteJson(ctx, target);
+    // Write and read back the note the first read returned, never a re-resolution of `target`.
+    const pathTarget = svc.pinTarget(target, note.path);
+    await svc.writeNote(ctx, pathTarget, reconciled.content, 'markdown');
+    const after = await svc.getNoteJson(ctx, pathTarget);
     // Delivered bytes — not after.stat.size (see ObsidianService.tryGetSize).
     const currentSizeInBytes = Buffer.byteLength(after.content, 'utf8');
     if (input.operation === 'add') {

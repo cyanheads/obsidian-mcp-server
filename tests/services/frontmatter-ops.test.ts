@@ -16,7 +16,9 @@ import {
   type TagLocation,
   type TagOperation,
   type TagReconcileResult,
+  wikilinkCloser,
 } from '@/services/obsidian/frontmatter-ops.js';
+import { expectLinearCpu } from '../helpers.js';
 
 /**
  * Both mutation helpers return either an edit or the reason they refused. Most
@@ -1262,6 +1264,148 @@ describe('reconcileTags / add inline — link spans', () => {
     expect(reconcile('See [[Note]]', ['wip'], 'add', 'inline').content).toBe(
       'See [[Note]]\n#wip\n',
     );
+  });
+});
+
+/**
+ * Obsidian reads a wikilink from `[[` to the first `]]` on its line, single `[`
+ * and `]` included, and a second `[[` starts the link over — the extent its
+ * metadata cache gives a link (Obsidian 1.14.4, the `obsidian_get_note`
+ * bracket-form readback). A `#` anywhere in that span is link text. Issue #160.
+ */
+describe('wikilinkCloser', () => {
+  /** Each opener of `text`, looked up in ascending order, with the span it opens. */
+  function spans(text: string): Array<[number, string | undefined]> {
+    const closer = wikilinkCloser(text);
+    const out: Array<[number, string | undefined]> = [];
+    for (let open = text.indexOf('[['); open >= 0; open = text.indexOf('[[', open + 1)) {
+      const end = closer(open);
+      out.push([open, end === undefined ? undefined : text.slice(open, end)]);
+    }
+    return out;
+  }
+
+  it.each([
+    ['a plain link', '[[a]]', [[0, '[[a]]']]],
+    ['single brackets in the alias', '[[a|b [1]]]', [[0, '[[a|b [1]]']]],
+    ['a lone closing bracket', '[[a ]b]]', [[0, '[[a ]b]]']]],
+    ['a lone opening bracket', '[[a [b]]', [[0, '[[a [b]]']]],
+    [
+      'a triple opener, whose first two brackets open the link',
+      '[[[a]]',
+      [
+        [0, '[[[a]]'],
+        [1, '[[a]]'],
+      ],
+    ],
+    [
+      'a quadruple opener, which opens from its second bracket on',
+      '[[[[a]]',
+      [
+        [0, undefined],
+        [1, '[[[a]]'],
+        [2, '[[a]]'],
+      ],
+    ],
+    [
+      'a second opener before the closer',
+      '[[a [[b]] c]]',
+      [
+        [0, undefined],
+        [4, '[[b]]'],
+      ],
+    ],
+    ['a line break before the closer', '[[a\nb]]', [[0, undefined]]],
+    ['a carriage return inside the link', '[[a\rb]]', [[0, '[[a\rb]]']]],
+    ['no closer', '[[a b', [[0, undefined]]],
+    ['a lone closing bracket at the end', '[[a]', [[0, undefined]]],
+  ] as const)('finds the span of %s', (_label, text, expected) => {
+    expect(spans(text)).toEqual(expected);
+  });
+
+  /**
+   * Openers before the same stop share it — the two of `[[[f]]` — and an
+   * opener past it scans afresh, across links, unclosed openers, and a line
+   * break.
+   */
+  it('gives each of a run of openers its own closer', () => {
+    const text = 'x [[a]] [[ [[b|[c]]] [[d\n[[e]] [[[f]]';
+    expect(spans(text)).toEqual([
+      [2, '[[a]]'],
+      [8, undefined],
+      [11, '[[b|[c]]'],
+      [21, undefined],
+      [25, '[[e]]'],
+      [31, '[[[f]]'],
+      [32, '[[f]]'],
+    ]);
+  });
+});
+
+describe('inline tags — a wikilink holding single brackets', () => {
+  const LINKS = [
+    ['a bracketed alias', 'x [[Note|a #b [1]]] y', 'b'],
+    ['a bracketed heading', 'x [[Note#Sec [x]|A #c]] y', 'c'],
+    ['a lone closing bracket in the alias', 'x [[Note|a ]#d]] y', 'd'],
+    ['an embedded bracketed alias', 'x ![[Note|a #b [1]]] y', 'b'],
+    ['an embedded bracketed heading', 'x ![[Note#Sec [x]|A #c]] y', 'c'],
+    ['an embedded lone closing bracket', 'x ![[Note|a ]#d]] y', 'd'],
+    ['a link opened by a triple bracket', 'x [[[Note|a #b]] y', 'b'],
+  ] as const;
+
+  it.each(LINKS)(
+    'a tag only in %s is link text: list skips it, remove leaves it, add applies it',
+    (_label, input, tag) => {
+      expect(listTagsFromContent(input, {}).inline).toEqual([]);
+
+      const removed = reconcile(input, [tag], 'remove', 'inline');
+      expect(removed.applied).toEqual([]);
+      expect(removed.skipped).toEqual([tag]);
+      expect(removed.content).toBe(input);
+
+      const added = reconcile(input, [tag], 'add', 'inline');
+      expect(added.applied).toEqual([tag]);
+      expect(added.skipped).toEqual([]);
+      expect(added.content).toBe(`${input}\n#${tag}\n`);
+    },
+  );
+
+  it('removes a real tag and leaves the same name in a bracketed link untouched', () => {
+    const r = reconcile('[[Note|a #b [1]]] and #b here', ['b'], 'remove', 'inline');
+    expect(r.applied).toEqual(['b']);
+    expect(r.content).toBe('[[Note|a #b [1]]] and here');
+  });
+
+  it.each([
+    ['after a bracketed link', 'x [[Note|a #b [1]]] #e y', 'e', 'x [[Note|a #b [1]]] y'],
+    ['after a closing triple bracket', 'x [[Note|a]]] #e y', 'e', 'x [[Note|a]]] y'],
+    ['in a link broken across lines', 'x [[Note|a\n#f]] y', 'f', 'x [[Note|a\n]] y'],
+    ['in an unclosed link', 'x [[Note|a #g y', 'g', 'x [[Note|a y'],
+    ['before a second opener', 'x [[a #h [[b]] y', 'h', 'x [[a [[b]] y'],
+  ] as const)('still reads and removes a tag %s', (_label, input, tag, removed) => {
+    expect(listTagsFromContent(input, {}).inline).toEqual([tag]);
+    const r = reconcile(input, [tag], 'remove', 'inline');
+    expect(r.applied).toEqual([tag]);
+    expect(r.content).toBe(removed);
+  });
+});
+
+/**
+ * The wikilink span's worst cases: an opener with no closer repeated, openers
+ * whose bodies hold single brackets, and one long line opening with an
+ * unclosed `[[` — under one line ending and under line breaks throughout.
+ */
+describe('wikilink spans stay linear in note length', () => {
+  const fill = (unit: string, size: number) =>
+    unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+
+  it.each<[string, (size: number) => string]>([
+    ['repeated openers', (n) => fill('[[', n)],
+    ['openers holding a bracketed alias', (n) => fill('[[a|[b]', n)],
+    ['one long line opening with an unclosed link', (n) => `[[${'x'.repeat(n)}\ny #t`],
+    ['openers over line breaks throughout', (n) => fill('[[  \r\n', n)],
+  ])('scans %s in linear time', async (_label, build) => {
+    await expectLinearCpu(build, (input) => listTagsFromContent(input, {}));
   });
 });
 

@@ -6,8 +6,16 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
+import type { ServerConfig } from '@/config/server-config.js';
 import { obsidianManageFrontmatter } from '@/mcp-server/tools/definitions/obsidian-manage-frontmatter.tool.js';
-import { instructionOf, servePluginVersion, setupHarness } from '../helpers.js';
+import type { NoteTarget } from '@/services/obsidian/types.js';
+import {
+  installMovingTargetVault,
+  instructionOf,
+  MOVING_TARGET_NOTES,
+  servePluginVersion,
+  setupHarness,
+} from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -359,5 +367,44 @@ describe('obsidian_manage_frontmatter / dropping the block keeps body indentatio
     );
 
     expect(putBody).toBe('    indented code line\n    second line\n');
+  });
+});
+
+/**
+ * An `active` or `periodic` target is resolved by the read; the delete writes
+ * to the note that read returned even when the target has moved to another
+ * note since.
+ */
+describe('obsidian_manage_frontmatter delete writes to the note its read resolved', () => {
+  it.each<[string, NoteTarget, string, Partial<ServerConfig>]>([
+    ['active, no path policy', { type: 'active' }, '/active/', {}],
+    ['active, OBSIDIAN_READ_PATHS', { type: 'active' }, '/active/', { readPaths: ['work'] }],
+    ['daily, no path policy', { type: 'periodic', period: 'daily' }, '/periodic/daily/', {}],
+    [
+      'weekly for 2026-10-01, OBSIDIAN_READ_PATHS',
+      { type: 'periodic', period: 'weekly', date: '2026-10-01' },
+      '/periodic/weekly/2026/10/01/',
+      { readPaths: ['work'] },
+    ],
+  ])('%s', async (_label, target, route, config) => {
+    const { first, second, body } = MOVING_TARGET_NOTES;
+    const vault = installMovingTargetVault(config);
+
+    const res = await runToolContract(obsidianManageFrontmatter, {
+      target,
+      operation: 'delete',
+      key: 'status',
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(obsidianManageFrontmatter.output.parse(res.structuredContent).result.path).toBe(first);
+    expect(vault.requests.filter((r) => r.startsWith('PUT '))).toEqual([`PUT /vault/${first}`]);
+    // The target route is resolved once; every other request names the pinned path.
+    expect(vault.requests.filter((r) => r !== 'GET /' && !r.includes(' /vault/'))).toEqual([
+      `GET ${route}`,
+    ]);
+    expect(vault.notes[first]).not.toContain('status: draft');
+    expect(vault.notes[first]).toContain(`body of ${first}`);
+    expect(vault.notes[second]).toBe(body(second));
   });
 });

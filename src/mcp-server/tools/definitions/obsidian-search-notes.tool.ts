@@ -12,7 +12,7 @@
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
-import { paginateArray } from '@cyanheads/mcp-ts-core/utils';
+import { decodeCursor, encodeCursor, paginateArray } from '@cyanheads/mcp-ts-core/utils';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -25,7 +25,7 @@ const CursorSchema = z
   .string()
   .optional()
   .describe(
-    'Opaque cursor from a prior response. Omit for the first page. Page size is server-determined; do not assume a fixed value.',
+    'Opaque cursor from a prior response. Omit for the first page. Page size is server-determined; do not assume a fixed value. Under OBSIDIAN_READ_PATHS, later `jsonlogic` pages come from the hit list the first page computed.',
   );
 
 const TextHitSchema = z
@@ -132,13 +132,16 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
   const textModeDescription =
     '`text` splits `query` on whitespace and requires every token, each matched case-insensitively as a substring of the filename or note body. Quotes are literal characters, not a phrase operator. Each hit returns match locations with surrounding context windows; tokens that sit close together, such as the words of a phrase, share one location.';
 
+  const jsonlogicModeDescription =
+    '`jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, `stat.{ctime,mtime,size}`, and `links`, `backlinks`, and `unresolvedLinks` (on plugin versions that provide them; under OBSIDIAN_READ_PATHS, readable entries only), plus `glob` and `regexp` operators — both take their arguments as `[PATTERN, VALUE]`, so the pattern comes first and the `{"var": ...}` reference second.';
+
   const inputSchema = z.object({
     mode: z
       .enum(modeEnum)
       .describe(
         omnisearchReachable
-          ? `Which search algorithm to run. ${textModeDescription} \`jsonlogic\` evaluates a JSONLogic tree against each note, with \`var\` paths into \`path\`, \`content\`, \`frontmatter.<key>\`, \`tags\`, and \`stat.{ctime,mtime,size}\`, plus \`glob\` and \`regexp\` operators — both take their arguments as \`[PATTERN, VALUE]\`, so the pattern comes first and the \`{"var": ...}\` reference second. \`omnisearch\` runs a BM25-ranked query via the Omnisearch plugin — supports quoted phrases, \`-exclusion\`, \`path:\` / \`ext:\` filters, typo tolerance, and PDF/OCR (with Text Extractor); upstream caps results at 50.`
-          : `Which search algorithm to run. ${textModeDescription} \`jsonlogic\` evaluates a JSONLogic tree against each note, with \`var\` paths into \`path\`, \`content\`, \`frontmatter.<key>\`, \`tags\`, and \`stat.{ctime,mtime,size}\`, plus \`glob\` and \`regexp\` operators — both take their arguments as \`[PATTERN, VALUE]\`, so the pattern comes first and the \`{"var": ...}\` reference second.`,
+          ? `Which search algorithm to run. ${textModeDescription} ${jsonlogicModeDescription} \`omnisearch\` runs a BM25-ranked query via the Omnisearch plugin — supports quoted phrases, \`-exclusion\`, \`path:\` / \`ext:\` filters, typo tolerance, and PDF/OCR (with Text Extractor); upstream caps results at 50.`
+          : `Which search algorithm to run. ${textModeDescription} ${jsonlogicModeDescription}`,
       ),
     query: z
       .string()
@@ -284,9 +287,25 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       reason: 'logic_invalid',
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The Local REST API rejected the JSONLogic tree — an unrecognized operator, or an operand it could not evaluate (an uncompilable `regexp` pattern). A mis-arity operator is not rejected: it evaluates to false and the search returns zero hits.',
+      when: 'The JSONLogic tree failed to evaluate against a note — an unrecognized operator, or an operand that could not be evaluated (an uncompilable `regexp` pattern). A mis-arity operator is not rejected: it evaluates to false and the search returns zero hits.',
       recovery:
         'Check the operator names and arity. `glob` and `regexp` take `[PATTERN, VALUE]` — pattern first, e.g. `{"regexp": ["^Inbox/", {"var": "path"}]}`; the reverse order compiles the note field as the pattern.',
+    },
+    {
+      reason: 'logic_too_costly',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "With OBSIDIAN_READ_PATHS set, the server evaluates the JSONLogic tree itself, and the tree passed a bound: nesting deeper than 1,000 levels, more than a work budget, or more than 10 s of evaluation. One work budget is per note — the size of values built by `merge`, `cat`, `map`, and array literals while evaluating that note, up to the note's own size plus 10,000,000 units — and one is per search: 10,000,000 units across every note for returned results, where a result whose JSON is at most 1,024 characters is free and a larger one pays for what it holds beyond its own note.",
+      recovery:
+        "Simplify the tree: nest fewer levels, avoid building arrays or strings many times a note's size with `merge`, `cat`, `map`, or `reduce`, return values drawn from the note rather than large built values or constants, and prefer a simpler `regexp` pattern.",
+    },
+    {
+      reason: 'note_too_deep',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.SerializationError,
+      when: 'With OBSIDIAN_READ_PATHS set, a readable note holds data, usually a frontmatter value, nested deeper than the server can hand to its evaluator (about 3,500 levels under Node, more under Bun).',
+      recovery:
+        'Flatten the deeply nested value, usually a frontmatter field, in the note the message names, or ask the operator to leave that note out of OBSIDIAN_READ_PATHS; no scoped jsonlogic search runs while it is readable.',
     },
     {
       reason: 'omnisearch_unreachable',
@@ -356,9 +375,22 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
             { mode: input.mode },
           );
         }
-        const raw = await svc.searchJsonLogic(ctx, input.logic);
-        const allowed = policy.filterReadable(raw);
-        const page = paginate(allowed, input.cursor, ctx);
+        /**
+         * A scoped search's cursor names the walk its first page stored, so
+         * the later pages read that stored hit list instead of evaluating the
+         * tree again.
+         */
+        const walk = input.cursor
+          ? decodeCursor(input.cursor, requestContext(ctx)).walk
+          : undefined;
+        const searched = await svc.pageJsonLogic(
+          ctx,
+          input.logic,
+          typeof walk === 'string' ? walk : undefined,
+          DEFAULT_PAGE_SIZE,
+        );
+        const allowed = policy.filterReadable(searched.hits);
+        const page = paginate(allowed, input.cursor, ctx, searched.walk);
         if (page.hits.length === 0) {
           ctx.enrich.notice(
             'No matches for the JSONLogic predicate. Verify the logic tree and field references.',
@@ -465,27 +497,33 @@ export const obsidianSearchNotes = buildSearchNotesTool({ omnisearchReachable: f
 /**
  * Apply MCP-spec cursor pagination to a fully assembled, post-filter result
  * array. Returns the page's hits, the total pre-pagination count, and
- * `nextCursor` (omitted on the last page). Localizes the `Context` →
- * `RequestContext` cast — `paginateArray`'s signature requires the index-
- * signature shape that handler-facing `Context` doesn't carry.
+ * `nextCursor` (omitted on the last page), which carries `walk` when given.
  */
 function paginate<T>(
   items: T[],
   cursor: string | undefined,
   ctx: Context,
+  walk?: string,
 ): { hits: T[]; totalCount: number; nextCursor?: string } {
-  const page = paginateArray(
-    items,
-    cursor,
-    DEFAULT_PAGE_SIZE,
-    MAX_PAGE_SIZE,
-    ctx as unknown as RequestContext,
-  );
+  const page = paginateArray(items, cursor, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, requestContext(ctx));
+  const nextCursor =
+    page.nextCursor !== undefined && walk !== undefined
+      ? encodeCursor({ ...decodeCursor(page.nextCursor, requestContext(ctx)), walk })
+      : page.nextCursor;
   return {
     hits: page.items,
     totalCount: page.totalCount ?? items.length,
-    ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
+    ...(nextCursor !== undefined ? { nextCursor } : {}),
   };
+}
+
+/**
+ * The `Context` → `RequestContext` cast the cursor helpers need — their
+ * signatures require the index-signature shape that handler-facing `Context`
+ * doesn't carry.
+ */
+function requestContext(ctx: Context): RequestContext {
+  return ctx as unknown as RequestContext;
 }
 
 function clipMatches<T extends { matches: unknown[] }>(

@@ -125,7 +125,7 @@ const ServerConfigSchema = z.object({
     'Optional vault-relative folder allowlist for read operations. Comma-separated; prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault.',
   ),
   writePaths: envPathList.describe(
-    'Optional vault-relative folder allowlist for write operations. Same syntax as OBSIDIAN_READ_PATHS. Write paths are implicitly readable. Unset = full vault.',
+    'Optional vault-relative folder allowlist for write operations. Same syntax as OBSIDIAN_READ_PATHS. Write paths are implicitly readable. Unset = full vault, or the read scope when reads are restricted.',
   ),
   readOnly: envBoolean
     .default(false)
