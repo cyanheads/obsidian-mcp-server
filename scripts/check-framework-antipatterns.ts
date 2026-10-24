@@ -64,13 +64,14 @@ interface Rule {
 const RULES: Rule[] = [
   {
     id: 'inputSchema-downgrade',
-    pattern: 'inputSchema:\\s*z\\.(unknown|any)\\(\\)|inputSchema:[^,]*\\.passthrough\\(\\)',
+    pattern:
+      'inputSchema:[[:space:]]*z\\.(unknown|any)\\(\\)|inputSchema:[^,]*\\.passthrough\\(\\)',
     pathspec: ['src/mcp-server/tools/', ':!**/*.test.ts'],
     message: 'Framework must not downgrade tool inputSchema — breaks tools/list advertising',
   },
   {
     id: 'inputSchema-mutation',
-    pattern: '\\.inputSchema\\s*=([^=]|$)',
+    pattern: '\\.inputSchema[[:space:]]*=([^=]|$)',
     pathspec: ['src/', ':!src/linter/', ':!**/*.test.ts'],
     message: 'Post-register inputSchema mutation breaks tools/list advertising',
   },

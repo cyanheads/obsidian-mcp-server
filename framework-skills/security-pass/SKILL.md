@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.12"
+  version: "1.13"
   audience: external
   type: audit
 ---
@@ -272,10 +272,10 @@ DataCanvas is opt-in and deliberately trades isolation for cross-agent token-sha
 
 - Data registered on canvases is **already public** or already-shared-out-of-band. The composite `(tenantId, canvasId)` scope collapses to `('default', canvasId)` in `MCP_AUTH_MODE=none` — anyone with the `canvasId` attaches.
 - External rate limiting (CDN, reverse proxy, WAF) fronts the deployment so the ~10¹⁸ keyspace can't be brute-forced. Without it, the entropy assumption breaks and discovery becomes feasible.
-- `CANVAS_MAX_CANVASES_PER_TENANT` sized for the memory budget — default 100 is the floor; raising it lets a single tenant exhaust memory faster.
+- `CANVAS_MAX_CANVASES_PER_TENANT` (default 500) sized against the container's memory cap — each canvas is its own DuckDB instance up to `CANVAS_DEFAULT_MEMORY_LIMIT_MB`, so the cap bounds how many a tenant can hold, not how much memory they use. Under `MCP_AUTH_MODE=none` every caller shares the one tenant.
 - `CANVAS_TTL_MS` / `CANVAS_ABSOLUTE_CAP_MS` not absurdly long. Defaults (24 h sliding / 7 d absolute) are reasonable; longer widens the window an unreferenced `canvasId` stays guessable.
-- `CANVAS_EXPORT_PATH` doesn't point into a shared mount, the repo, or a directory another service serves from. The path-sandbox blocks `..` traversal but doesn't prevent the configured root from being a bad choice.
-- Axis 1 (description templating from canvas-supplied content), Axis 5 (no parallel service runs raw SQL outside the canvas API and bypasses `assertReadOnlyQuery`), and Axis 7 (errors from canvas operations don't leak the failed SQL string back through `McpError.data`) all apply.
+- `CANVAS_EXPORT_PATH` is the engine's file surface: each canvas's DuckDB instance reads and writes only under it and the private scratch directory. It must not point into a shared mount, the repo, the app directory, a directory holding anything callers shouldn't read, or one another service serves from. The path-sandbox blocks `..` traversal but doesn't prevent the configured root from being a bad choice, and a broad root widens what the engine can reach.
+- Axis 1 (description templating from canvas-supplied content), Axis 5 (no parallel service runs caller SQL outside the canvas API's `query()` / `registerView()` — the exported `assertReadOnlyQuery` covers only the statement and plan checks, not the whole gate), and Axis 7 (errors from canvas operations don't leak the failed SQL string back through `McpError.data`) all apply.
 
 **Smell:** `MCP_AUTH_MODE=none` deployment registering per-user data (recent activity, account state, cart contents) onto a canvas. Or: `CANVAS_EXPORT_PATH=/srv/static` with a static file server pointing at the same root.
 
@@ -350,6 +350,6 @@ End with:
 - [ ] Axis 6 — tenant isolation: module-scope state swept
 - [ ] Axis 7 — leakage back: errors / outputs / `ctx.log` / `console.*` / telemetry / constant-time comparisons
 - [ ] Axis 8 — resource bounds on loops / retries / pagination / parse size+depth / per-tenant rate
-- [ ] **If `CANVAS_PROVIDER_TYPE=duckdb`:** Axis 9 — public-data assumption holds, external rate limiting in place, max-canvases-per-tenant + TTLs sized for the deployment, `CANVAS_EXPORT_PATH` doesn't escape into shared / served paths, `assertReadOnlyQuery` is the only SQL path
+- [ ] **If `CANVAS_PROVIDER_TYPE=duckdb`:** Axis 9 — public-data assumption holds, external rate limiting in place, max-canvases-per-tenant + TTLs sized for the deployment, `CANVAS_EXPORT_PATH` (the engine's file surface) doesn't reach shared, served, or caller-private paths, caller SQL reaches DuckDB only through the canvas API
 - [ ] Quick sanity pass: `bun audit`, lifecycle scripts, `.env.example`, config validation, new-dep provenance
 - [ ] Report: summary → grouped findings → numbered options

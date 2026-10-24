@@ -1,10 +1,10 @@
 ---
 name: git-wrapup
 description: >
-  Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). The work commits land first, then the version bump, verification, and the release commit on top. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here. Distilled from the git_wrapup_instructions protocol.
+  Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). The work commits land first, then the version bump, verification, and the release commit on top. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here.
 metadata:
   author: cyanheads
-  version: "1.29"
+  version: "1.30"
   audience: external
   type: workflow
 ---
@@ -54,27 +54,39 @@ If any gate is red, fix it before proceeding. This skill re-verifies build + tes
 Understand what's about to ship before touching version numbers:
 
 ```bash
+git branch --show-current                 # empty output = detached HEAD
 git status
 git log v<latest-tag>..HEAD --oneline    # commits since last release
 git diff HEAD --stat                      # every uncommitted change, staged or not
 git diff HEAD                             # review the actual content
+git ls-files --others --exclude-standard  # new files, which never appear in the diff
 ```
 
+**Check the branch first.** Empty output from `git branch --show-current` means a detached HEAD: halt. In every mode the wrap-up starts on `main`; release PR mode moves to `release/<version>` in step 2.
+
 Diff against `HEAD`, not the index: plain `git diff` omits staged changes entirely, so a group already staged before wrap-up began — a `git mv` from a migration step, a hook's output — shows up in `git status` as a line to scroll past and nowhere in the diff review. Whatever is staged is part of what ships and gets grouped in step 3 like everything else.
+
+**Read every untracked file in full.** New files ship through `git add` like any other change, but no diff shows their content, and `git status` collapses a new directory to a single line.
+
+**Ship only finished work no one is still writing.** Uncommitted changes outside the work being wrapped are candidates, not automatic exclusions: git records no author for them, so judge each from the evidence. A complete, safe change that has sat idle for hours folds in as its own commit. A change this run didn't make, modified in the last few minutes (check mtimes) or visibly half-done, may belong to a session still writing it: leave it uncommitted and report it, since committing it would ship work in progress and leave its writer editing on top of a released commit. Anything unsafe or secret-bearing stays out regardless.
 
 If the working tree is clean AND there are no commits since the last tag, halt — nothing to wrap up.
 
 ### 2. Determine the new version — and, in release PR mode, create its branch
 
-Read the current version from `package.json`. Apply the intended bump:
+Read the current version from `package.json`. The version is the caller's to set, not this skill's to pick:
+
+1. **A version pinned in the caller's brief is binding** — use it as given.
+2. **Otherwise apply the project's documented versioning policy** (its `CLAUDE.md`/`AGENTS.md`), which may classify changes differently from plain semver.
+3. **Otherwise use semver:**
 
 | Bump | When |
 |:-----|:-----|
-| **patch** | Bug fixes, dependency updates, metadata changes, docs |
-| **minor** | New tools, new features, new env vars, behavioral changes |
-| **major** | Breaking changes to tool schemas, removed tools, incompatible config |
+| **patch** | Backward-compatible fixes with no new functionality — bug fixes, dependency updates, metadata, docs |
+| **minor** | Backward-compatible new functionality; below 1.0, also any breaking change |
+| **major** | A breaking change to an existing contract (tool schemas, removed tools, incompatible config), once the project is at 1.0 or later |
 
-Default to **patch** unless the diff clearly warrants minor or major.
+When the diff doesn't clearly settle which row applies, ask the caller rather than picking.
 
 **In `gated` or `straight-through` mode, create the branch now, before going on to step 3** — the version you just settled is its name, and step 3 opens by committing:
 
@@ -84,6 +96,15 @@ git switch -c release/<version>           # uncommitted work rides along
 ```
 
 Do not defer this to "just before the first commit". Step 3 is where committing starts, so a branch not created here is a branch created too late. If `git branch --no-merged main --list 'release/*'` prints a branch, a prior release PR was never merged — halt and report it rather than stacking a second release on top. A `release/*` branch already merged into `main` is a leftover from a finished release, not a blocker: delete it with `git branch -d` and continue.
+
+Check the remote too, before creating the branch:
+
+```bash
+git ls-remote --heads origin release/<version>          # must print nothing
+gh pr list --head release/<version> --state all         # must print nothing
+```
+
+A hit means an abandoned run already claimed this version: halt and report the branch and PR. Never force-push past it.
 
 ### 3. Commit the work — one commit per concern
 
@@ -130,14 +151,14 @@ A body is too long the moment it:
 The changelog carries the depth, the tag carries the headline, the commit carries one line of why. When the body wants to grow, that pressure is telling you the content belongs in the changelog entry.
 
 **Rules:**
-- Plain `-m` flag only — no heredoc, no command substitution
+- Plain `-m` flag only — no heredoc, no command substitution. Never put a backtick inside a double-quoted `-m`: the shell runs it as command substitution and the span silently disappears from a message that, once pushed, can't be rewritten
 - No `Co-authored-by` or `Generated with` trailers
 - No marketing adjectives ("comprehensive", "robust", "enhanced", "seamless", "improved")
 - Each commit message stands alone for someone reading `git log` — no chat context, option numbers, or "as discussed"
 
 **Right-size it.** "Group by concern" is not "always split." A genuinely single-concern change — one fix, a dependency bump, a small doc edit — is one work commit, with step 8's release commit on top of it. Only when the version bump *is* the whole change — a republish, a metadata-only patch with nothing else in the tree — is there no work commit to make, and step 8's release commit becomes the entire stack. The failure mode to prevent is the inverse: a large, multi-layer feature crammed into one commit alongside the release artifacts.
 
-When every concern is committed, `git status` is clean. That clean tree is what makes everything steps 4–6 touch a release artifact and nothing else — confirm it before moving on.
+When every concern is committed, `git status` is clean, apart from changes step 1 left out and reported. That clean tree is what makes everything steps 4–6 touch a release artifact and nothing else — confirm it before moving on.
 
 ### 4. Bump version everywhere
 
@@ -154,8 +175,10 @@ Every file that declares a version must be updated. Skip any file that doesn't e
 Catch stragglers (replace the placeholder with the actual current version string, e.g. `0.9.7`):
 
 ```bash
-grep -rn "0.9.7" . --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=changelog
+grep -rnF "0.9.7" . --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=changelog --exclude=bun.lock
 ```
+
+`-F` matches the string literally; without it each `.` matches any character, and `0.9.7` also hits `10.9.7`, `0.9.70`, and every dependency version in the lockfile that happens to match.
 
 Resolve hits case by case — historical changelog entries are correct as-is; everything else should match the new version.
 
@@ -277,13 +300,13 @@ If the review pass changes what ships, `release-pr-review` updates `## Changes` 
 
 ```bash
 git log --oneline -8              # confirm the commit stack: work commits + release commit on top
-git status                        # must be clean
+git status                        # clean, apart from step 1's reported exclusions
 git tag --points-at HEAD          # must print nothing — tagging is release-and-publish's job
 git branch --show-current         # main, or release/<version> in release PR mode
 gh pr view --json number,url,state   # release PR mode: OPEN, head = the branch above
 ```
 
-If the working tree isn't clean or the release commit isn't at HEAD, something went wrong — investigate before proceeding.
+If the working tree holds anything beyond those exclusions, or the release commit isn't at HEAD, something went wrong — investigate before proceeding.
 
 **Do NOT tag, push `main`, or publish.** This skill stops here. `release-and-publish` merges the release branch when there is one, creates the tag, pushes, and publishes.
 
@@ -293,11 +316,15 @@ If the working tree isn't clean or the release commit isn't at HEAD, something w
 - **Never stash.** Not for quick checks, not for testing, not for any reason
 - **Never destructive.** No `git reset --hard`, `git restore .`, `git clean -f`, `git checkout -- .`, no force-push
 - **Bash git only.** Drive every git operation through the shell
+- **Never `--no-verify`.** A failing hook is a red gate. When a pre-commit hook fails, the commit did not happen: fix the cause and commit again — never `--amend`, which would rewrite the previous commit. When a hook reformats files, re-stage those paths before retrying
 - If `v<version>` already exists as a tag, **halt and report the conflict** — include the version string, existing tag SHA, and current HEAD SHA so the caller can resolve it. Do not delete or move tags without explicit authorization
 
 ## Checklist
 
-- [ ] Diff reviewed end-to-end before the first commit
+- [ ] Started on `main`, not a detached HEAD; release PR mode found no existing `release/<version>` branch or PR, local or remote
+- [ ] Diff and every untracked file reviewed end-to-end before the first commit
+- [ ] Unfinished changes this run didn't make left uncommitted and reported
+- [ ] Version taken from the brief, the project's policy, or semver, in that order — asked when the row was unclear
 - [ ] Work concerns committed before the version bump — a version-bearing file a work concern also touches ships whole in that concern's commit, so the release commit brings it the version hunk alone
 - [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — `devcheck` flags a mismatch in `server.json` (both levels), `manifest.json`, both plugin manifests, and the README badge; step 4's straggler grep covers the docs and Dockerfile labels
 - [ ] GH issues addressed by this work commented with what landed (if working from GH issues)
@@ -315,5 +342,6 @@ If the working tree isn't clean or the release commit isn't at HEAD, something w
 - [ ] A gate failure after the work is committed landed as a new commit on the stack — nothing amended, rebased, or otherwise rewritten
 - [ ] Every commit carries a body, and every body is one or two lines — none subject-only, none a paragraph
 - [ ] Release PR mode: branch pushed, PR open — title = release commit subject; body = theme line, `## Changes` in tag rules, `## Gates`, changelog link last (via `--body-file`, no closing keywords)
-- [ ] Working tree clean
+- [ ] No hook bypassed with `--no-verify`
+- [ ] Working tree clean, apart from step 1's reported exclusions
 - [ ] No tag at HEAD, nothing pushed to `main` — `release-and-publish` owns both

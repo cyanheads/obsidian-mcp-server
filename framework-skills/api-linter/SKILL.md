@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.21"
+  version: "1.22"
   audience: external
   type: reference
 ---
@@ -266,8 +266,9 @@ Evaluated on the emitted schema rather than on the Zod schema, because the two d
 
 | What you wrote | What is emitted |
 |:--|:--|
-| `z.enum([1, 2, 3, 4, 5])` — a numeric array handed to a string-only constructor | `{"type": "string", "enum": []}` |
-| `z.enum([])` | `{"type": "string", "enum": []}` |
+| `z.enum([1, 2, 3, 4, 5])` — a numeric array handed to a string-only constructor | `{"not": {}}` |
+| `z.enum([])` | `{"not": {}}` |
+| `.meta({ enum: [] })` / `.meta({ oneOf: [] })` / `.meta({ type: [] })` | the empty set as written |
 | `z.union([])` | `{"anyOf": []}` |
 | `z.never()` | `{"not": {}}` |
 
@@ -448,7 +449,7 @@ Also applies to resources and prompts (same rule ID, different `definitionType`)
 
 **Severity:** error
 
-Every tool must have a `handler` function (or `taskHandlers` object for task tools). Every resource must have a `handler`. Definitions without handlers can't do anything at runtime.
+Every tool must have a `handler` function. Every resource must have a `handler`. Definitions without handlers can't do anything at runtime.
 
 Also applies to resources (same rule ID, different `definitionType`).
 
@@ -662,7 +663,7 @@ Most of these are mechanical — fix the manifest field named in the diagnostic'
 
 ## Landing config rules
 
-Validate the `landing` config passed to `createApp()` (the config object that drives the framework's landing page). Run only when `input.landing` is provided to `validateDefinitions`. All errors — landing config that's structurally broken would render incorrectly on the public page.
+Validate the `landing` config passed to `createApp()` (the config object that drives the framework's landing page). Run only when `input.landing` is provided to `validateDefinitions`. Structural breakage is an error — it would render incorrectly on the public page. Input the page tolerates (extras it drops, an empty override it falls back from, an unconventional env-var name) is a warning.
 
 | Rule | Severity | Catches |
 |:-----|:---------|:--------|
@@ -672,20 +673,20 @@ Validate the `landing` config passed to `createApp()` (the config object that dr
 | `landing-logo-type` | error | `logo` is present but not a string |
 | `landing-logo-size` | error | `logo` is too long for inline rendering |
 | `landing-links-type` | error | `links` is present but not an array |
-| `landing-links-count` | error | `links` exceeds the max count |
+| `landing-links-count` | warning | `links` exceeds the max count — extras are dropped |
 | `landing-link-shape` | error | A `links[]` entry is not a plain object |
 | `landing-link-href` | error | A link entry's `href` is missing or not a non-empty string |
 | `landing-link-label` | error | A link entry's `label` is missing or not a non-empty string |
 | `landing-repo-root-type` | error | `repoRoot` is present but not a string |
 | `landing-repo-root-shape` | error | `repoRoot` is not a recognized GitHub URL shape |
 | `landing-env-example-type` | error | `envExample` is present but not a plain object |
-| `landing-env-example-count` | error | `envExample` has too many entries |
-| `landing-env-example-key` | error | An `envExample` key is empty or invalid |
+| `landing-env-example-count` | warning | `envExample` has too many entries — extras are dropped |
+| `landing-env-example-key` | warning | An `envExample` key is not SCREAMING_SNAKE_CASE |
 | `landing-env-example-value` | error | An `envExample` value is not a string |
 | `landing-connect-snippets-type` | error | `connectSnippets` is present but not a plain object |
-| `landing-connect-snippets-key` | error | A `connectSnippets` key is empty |
+| `landing-connect-snippets-key` | warning | A `connectSnippets` key is not a recognized tab id — it is dropped |
 | `landing-connect-snippets-value` | error | A `connectSnippets` value is not a string |
-| `landing-connect-snippets-empty` | error | A `connectSnippets` value is an empty string |
+| `landing-connect-snippets-empty` | warning | A `connectSnippets` value is an empty string — the derived snippet is used |
 | `landing-theme-type` | error | `theme` is present but not a plain object |
 | `landing-theme-accent` | error | `theme.accent` is present but not a string |
 | `landing-theme-accent-format` | error | `theme.accent` doesn't match the expected color format |

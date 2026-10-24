@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.14"
+  version: "1.15"
   audience: external
   type: reference
 ---
@@ -137,7 +137,7 @@ Use `runToolContract(definition, input, { context })` from `/testing` when a cus
 
 A declared reason thrown without a hint — a bare `ctx.fail('reason')` or a service throw carrying `{ reason }` — comes back with the entry's `recovery` as `data.recovery.hint` and a `Recovery:` line in `content[]`, as in production. The one production field it leaves out is `data.requestId` (and the `request <id>` term closing `content[]`), since there is no real request; a test asserting the factory's envelope instead expects both. Calling `definition.handler(...)` directly returns the `McpError` exactly as the throw site built it — no fill, no request id.
 
-Arguments that fail the `input` schema are rejected the way the production handler factory rejects them: `InvalidParams` (`-32602`), with a message naming the tool and every failing field. That is the code a client sees on the wire, so assert it — not `ValidationError` (`-32007`), which stays the classification for a `ZodError` a handler throws itself. A result that breaks the tool's own `output` or `enrichment` schema is the definition's bug, so it returns `InternalError` (`-32603`) with a message naming that contract, exactly as in production.
+Arguments that fail the `input` schema are rejected the way the production handler factory rejects them: `InvalidParams` (`-32602`), with a message naming the tool and the failing fields — the first 10 issue lines, then ` (+N more)` for the rest — and `data.issues` holding Zod's first 10 issues, at most 30 in all counted through every union's branches. `issuesCount`, how many issues Zod raised at the top level, sits beside `data.issues` whenever it keeps fewer of them — past the first 10, or sooner when the 30-issue budget runs out — as `errorsCount` sits beside a cut branch list: the same bound the factory applies. `-32602` is the code a client sees on the wire, so assert it — not `ValidationError` (`-32007`), which stays the classification for a `ZodError` a handler throws itself. A result that breaks the tool's own `output` or `enrichment` schema is the definition's bug, so it returns `InternalError` (`-32603`) with a message naming that contract, exactly as in production.
 
 Cancellation settles as it does in production. Pass `context: { signal }` and abort it: once the signal has fired, whatever the handler — or the output validation, `format()`, and enrichment after it — throws comes back as `RequestCancelled` (`-32011`), whether that is the signal's `AbortError`, its reason string, a `withRetry` backoff that stopped, or an `McpError` of the handler's own. A throw while the signal is still live keeps its own classification, and argument parsing stays outside the settle, so schema-invalid arguments on an aborted signal still return `InvalidParams`. A `toolContractSuite` error case with an aborted `context.signal` asserts `code: JsonRpcErrorCode.RequestCancelled` the same way.
 

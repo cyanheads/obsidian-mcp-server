@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.7"
+  version: "2.8"
   audience: external
   type: reference
 ---
@@ -110,7 +110,7 @@ The two halves are independent. On a tool that adopts the shape, `"x"` or a tabl
 |:---------|:--------|:---------|
 | Sliding TTL | 24 h, extended on every operation | `CANVAS_TTL_MS` |
 | Absolute cap from creation | 7 days | `CANVAS_ABSOLUTE_CAP_MS` |
-| Per-tenant active cap | 100 canvases | `CANVAS_MAX_CANVASES_PER_TENANT` |
+| Per-tenant active cap | 500 canvases (one shared tenant under `MCP_AUTH_MODE=none`) | `CANVAS_MAX_CANVASES_PER_TENANT` |
 | Sweeper interval | 60 s | `CANVAS_SWEEPER_INTERVAL_MS` (0 to disable) |
 | Persistence | In-memory only | — (v1; restart drops all canvases) |
 
@@ -124,6 +124,10 @@ On first use the DuckDB provider creates one private directory, `mcp-canvas-XXXX
 - **Staging.** Stream exports and `importFrom` write their transient files directly in it, under `crypto.randomUUID()` names, and unlink them once consumed. The directory's mode is the boundary, not the name.
 
 Dropping or expiring a canvas removes its spill directory once the calls still running on it settle, without waiting for them, since those calls can still be reading back the blocks it spilled. `shutdown()` removes the whole private directory once the calls still running against it settle, and does not wait for them: until then the directory stays in place and private, so no other local user can re-create its name and receive what those calls still write. A canvas whose creation straddles the shutdown is refused with `ServiceUnavailable` (-32000). A provider used again afterwards makes a fresh directory. After a crash or `SIGKILL` the directory stays behind, still private, and the next start does not sweep it — remove stale `mcp-canvas-*` directories by hand. A configured `CANVAS_TEMP_PATH` is created if missing and gets no ownership or mode check, so it must not be a directory another local user controls. When the private directory cannot be created, canvas creation fails with `ConfigurationError` (-32008) and the next attempt retries.
+
+### Engine file access
+
+Each canvas's DuckDB instance reads and writes files only under `CANVAS_EXPORT_PATH` and the private scratch directory, and its configuration is locked when the canvas is created, so no statement can widen that bound or raise the memory limit. A read naming any other path is refused by the engine itself, beneath the [SQL gate](#instancequerysql-options). The export root is part of the bound: a broad `CANVAS_EXPORT_PATH` widens what the engine can reach.
 
 ---
 
@@ -181,7 +185,7 @@ Querying a table that does not exist throws `NotFound` (`data.reason: 'missing_t
 
 A `SELECT` that parses but fails to prepare for any other reason — a mistyped column, an unknown scalar or table function, type, or collation, a schema the canvas does not have, an invalid expression — throws `ValidationError` (`data.reason: 'invalid_sql'`) and preserves the DuckDB binder detail in `data.binderMessage` (e.g. `Referenced column "x" not found...`, often with a candidate suggestion). This is distinct from `non_select_statement`, reserved for statements that genuinely aren't `SELECT`s — here the shape is fine, so the agent should fix the named column or function. DuckDB's FROM-first form (`FROM t`, `FROM t SELECT a`) is a `SELECT`: it passes the gate, and one that fails to prepare is classified the same way.
 
-A `SELECT` that prepares and then fails on the staged data throws `ValidationError` (`data.reason: 'sql_execution_error'`) with the engine message preserved and a hint pointing at `TRY_CAST` or filtering the offending rows. The split follows DuckDB's own execution-error classes — `Conversion Error`, `Invalid Input Error`, `Out of Range Error` — matched on the message prefix. `sql_read_only` and `sql_parse_error` are matched the same way: DuckDB's `Permission Error` or a write refused in `read-only mode`, and `Parser Error`. Engine faults (`IO Error`, `INTERNAL Error`, `Out of Memory Error`, and anything unmatched) stay `DatabaseError` whatever their text says, so an export, import, or spill failing on I/O — `Permission denied`, `Read-only file system` — is never reported to the caller as bad SQL. Every engine message the provider throws has the export root and the [scratch directory](#scratch-directory) replaced with `[path]`, leaving only the part below them (the caller's own export name); the raw engine error stays on `cause` for logs. `DUCKDB_ERROR_REASONS` exports these alongside `SQL_GATE_REASONS`.
+A `SELECT` that prepares and then fails on the staged data throws `ValidationError` (`data.reason: 'sql_execution_error'`) with the engine message preserved and a hint pointing at `TRY_CAST` or filtering the offending rows. The split follows DuckDB's own execution-error classes — `Conversion Error`, `Invalid Input Error`, `Out of Range Error` — matched on the message prefix. `sql_read_only` and `sql_parse_error` are matched the same way: DuckDB's `Permission Error` or a write refused in `read-only mode`, and `Parser Error`. A statement that names a file — refused by the engine outside the canvas's [engine file access](#engine-file-access), and by the gate inside it — is `sql_read_only` whatever its shape, with a hint pointing back to the staged tables and nothing from the file in the rejection. Engine faults (`IO Error`, `INTERNAL Error`, `Out of Memory Error`, and anything unmatched) stay `DatabaseError` whatever their text says, so an export, import, or spill failing on I/O — `Permission denied`, `Read-only file system` — is never reported to the caller as bad SQL. Every engine message the provider throws has the export root and the [scratch directory](#scratch-directory) replaced with `[path]`, leaving only the part below them (the caller's own export name); the raw engine error stays on `cause` for logs. `DUCKDB_ERROR_REASONS` exports these alongside `SQL_GATE_REASONS`.
 
 **Every gate and engine rejection carries `data.recovery.hint`**, which the framework mirrors into `content[]` as a `Recovery:` line — so the guidance reaches `structuredContent`-only and `content[]`-only clients alike. The hints name a capability, never a framework method: an MCP client sees only the consuming server's tool names, so `registerTable()` or `describe()` in a hint is guidance it cannot follow. Write your own hints the same way (see `api-errors`).
 
@@ -211,17 +215,18 @@ const chained = await instance.query(
 
 `denySystemCatalogs?: boolean` (default `false`) — when `true`, the gate rejects any reference to system catalog namespaces (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_<name>()` calls) at the text-scan layer before the query executes. Use on shared canvases where handle possession is the access boundary — catalog namespaces let callers enumerate every staged handle. Rejection throws `ValidationError` with `data.reason: 'system_catalog_access'`. Canvas-token servers that explicitly expose `describe()` to agents do not need this; only servers that intentionally hide the full catalog should opt in.
 
-**Read-only enforcement** (four layers + optional catalog layer):
-1. Text-level deny-list — pre-parse scan for file/HTTP-reading table functions (`read_csv*`, `read_json*`, `read_parquet*`, `read_text`, `read_blob`, `glob`, `iceberg_scan`, `delta_scan`, `postgres_scan`, `mysql_scan`, `sqlite_scan`, plus pre-staged spatial ones).
+**Read-only enforcement** (five layers + optional catalog layer, over the engine's own [file access bound](#engine-file-access)):
+1. Text-level deny-list — pre-parse scan for file/HTTP-reading table functions (`read_csv*`, `read_json*`, `read_parquet*`, `read_duckdb`, `read_text`, `read_blob`, `glob`, `iceberg_scan`, `delta_scan`, `postgres_scan`, `mysql_scan`, `sqlite_scan`, plus pre-staged spatial ones).
 2. Statement count (must be 1) via `extractStatements`.
 3. Statement type (must be `SELECT`) via `prepared.statementType`.
-4. EXPLAIN-plan walk against an allowlisted set of physical operators + a denied-function rescan over plan metadata strings.
+4. Parse-tree check — DuckDB's own parse of the statement. A call to a function that reads an engine setting (`current_setting`, `current_schema`, `current_schemas`, `in_search_path`), runs SQL or names a table from a string (`query`, `query_table`), or reads a file (the layer-1 list) is rejected as `denied_function`; a table reference that names a file, as `sql_read_only`. The one exception is `query()` over a single plain string literal: that SQL is gated as its own single SELECT statement — the catalog layer and layers 1–4 again, recursively — up to 4 `query()` levels deep, and layer 5 covers its plan inside the outer statement's. Any other `query()` argument, and nesting past 4 levels, is `denied_function`.
+5. EXPLAIN-plan walk against an allowlisted set of physical operators + a denied-function rescan over plan metadata strings.
 
 Any layer's rejection throws `ValidationError` with a structured `data.reason`. File-reading scans (`READ_CSV`, `READ_PARQUET`, `READ_JSON`), DDL (`CREATE_*`, `DROP_*`, `ALTER_*`), DML (`INSERT`, `UPDATE`, `DELETE`), exports (`COPY_TO_FILE`), and utility statements (`PRAGMA`, `ATTACH`, `LOAD`, `SET`) are all rejected.
 
 ### `instance.registerView(name, selectSql, options?)`
 
-Register a SQL view on the canvas. The `SELECT` runs through the same gate `query()` enforces (four layers), so a malicious definition fails at registration time, not later when the view is referenced. Pass `{ denySystemCatalogs: true }` to also block catalog namespace references in the view definition — same semantics as the `query()` flag.
+Register a SQL view on the canvas. The `SELECT` runs through the same gate `query()` enforces (five layers), so a malicious definition fails at registration time, not later when the view is referenced. Pass `{ denySystemCatalogs: true }` to also block catalog namespace references in the view definition — same semantics as the `query()` flag.
 
 ```ts
 await instance.registerView(
@@ -278,7 +283,9 @@ await instance.clear();                  // returns count dropped (drops views b
 
 ### Cancellation
 
-`registerTable`, `query`, and `export` accept `options.signal: AbortSignal`. The provider opens a fresh DuckDB connection per query/export so `connection.interrupt()` cancels exactly the in-flight work without disturbing other ops on the same canvas.
+`registerTable`, `query`, `export`, `registerView`, and `importFrom` accept `options.signal: AbortSignal`. `query`, `export`, and `importFrom` run their engine work on a fresh DuckDB connection per call, so `connection.interrupt()` cancels exactly that call without disturbing other ops on the same canvas.
+
+An abort at any point before one of those calls settles rejects it with `Timeout` (`data.reason: 'cancelled'`), never with rows: already aborted at the call, landing during the read-only gate, or arriving before the engine has begun a statement (DuckDB discards an interrupt it receives then, so the provider re-issues it once the statement starts). A cancelled `registerAs` leaves no table behind, and a cancelled `importFrom` no target table. `registerView` rejects the same way up to its view DDL, which is catalog-only and commits once begun. `registerTable` checks the signal between rows and rethrows the signal's own reason (an `AbortError` by default) unchanged.
 
 ---
 
@@ -308,7 +315,7 @@ If your tool surfaces row data via `structuredContent`, the JSON-safe shape flow
 | `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` |
 | `CANVAS_EXPORT_PATH` | `canvas.exportRootPath` | `./.canvas-exports` |
 | `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `os.tmpdir()` — parent of the private [scratch directory](#scratch-directory) |
-| `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `100` |
+| `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `500` |
 | `CANVAS_TTL_MS` | `canvas.ttlMs` | `86_400_000` (24 h) |
 | `CANVAS_ABSOLUTE_CAP_MS` | `canvas.absoluteCapMs` | `604_800_000` (7 d) |
 | `CANVAS_SWEEPER_INTERVAL_MS` | `canvas.sweeperIntervalMs` | `60_000` |
@@ -574,7 +581,7 @@ Pass `schema` explicitly whenever a column's type can't be read off the first ro
 - [ ] `canvas_id` accepted as optional input, returned in output
 - [ ] A `dataframe_query` tool is registered in this server whenever any tool emits a `canvas_id` — a token with no query tool is dead output. Register `dataframe_describe` too (lets the agent discover staged table/column names), and `dataframe_drop` behind its opt-in env flag — wrapped in `disabledTool()` while the flag is off
 - [ ] Canvas earns its keep: the staged data is analytical (an agent would SQL it), not a discovery/search surface of categorical metadata
-- [ ] SQL queries are read-only (enforced by the four-layer gate, but don't attempt writes)
+- [ ] SQL queries are read-only (enforced by the five-layer gate, but don't attempt writes)
 - [ ] Testing: mock the module-level `getCanvas()` accessor with `vi.spyOn` or a test setup that calls `setCanvas(mockCanvas)`
 - [ ] `bun run devcheck` passes
 

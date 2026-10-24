@@ -4,7 +4,7 @@ description: >
   Design the tool surface, resources, and service layer for a new MCP server. Use when starting a new server, planning a major feature expansion, or when the user describes a domain/API they want to expose via MCP. Produces a design doc at docs/design.md that drives implementation.
 metadata:
   author: cyanheads
-  version: "2.31"
+  version: "2.32"
   audience: external
   type: workflow
 ---
@@ -303,6 +303,7 @@ Every `.describe()` is prompt text the LLM reads. Parameters should convey: what
 - **Constrain the type.** Enums and literals over free strings. Regex validation for formatted IDs. Ranges for numeric bounds.
 - **The input root is already strict.** `tool()` applies `.strict()` at the root and advertises `additionalProperties: false`, so an unknown top-level key is rejected by name instead of silently stripped; nested objects still strip unless made strict themselves. Open the root with `.passthrough()` (Zod 4 also spells it `.loose()`; `tool()` honors either) only on a tool that deliberately proxies arbitrary upstream parameters (a raw-query tool), and say so in its description.
 - **A blank optional string is unset.** Form-based clients send every optional field they display as `""`. Treat the blank as omitted — left off the upstream request, never forwarded as `param=`, which some APIs read differently from omission — and never design a `.min(1)` onto an optional field to catch it. `add-tool` has the schema pattern that keeps a validator on the field.
+- **Numeric bounds earn their `.max()`.** An output-only ceiling the content already bounds (`maxSections`, a character budget) takes none: a larger value means no limit. A workload cap (an ID batch, `limit`) keeps a hard ceiling against absurd input. Between the per-call cap and that ceiling, a read — or an operation whose contract allows partial completion — processes up to the cap and names the remainder, disclosed like a capped list (below), since a rejection for a value with one obvious reading only costs the caller a round trip. A write, destructive, or otherwise atomic batch over its cap rejects before doing anything, naming the cap, so its `.max()` is the cap itself: doing the first items and naming the rest splits one intended operation in two and leaves the caller to work out which items changed.
 - **Use JSON-Schema-serializable types only.** The MCP SDK serializes schemas to JSON Schema for `tools/list`. Types like `z.custom()`, `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()` throw at runtime. Use structural equivalents (e.g., `z.string().describe('ISO 8601 date')` instead of `z.date()`).
 - **Explain costs and tradeoffs** when a parameter choice has meaningful consequences.
 - **Name alternative approaches** when a simpler path exists.
@@ -332,7 +333,7 @@ nctIds: z.union([z.string(), z.array(z.string()).max(5)])
 | Delimiter-joined list where an array is accepted | `"US,JP,KR"` → `["US","JP","KR"]` | Split on the documented separator |
 | Spelled-out vs. abbreviated name | `"Houston, Texas"` → `"Houston, TX"` | Normalize against the bundled name table |
 
-These are **value**-level, and the mappings are domain knowledge — settle them per input in the design doc's param table. Argument **key** names are not: the framework rewrites declared and case-style key aliases and drops client-added root keys before the schema sees the arguments, and repairs a JSON-stringified array or object, or an integer sent for a string, against the tool's own schema after a failed parse — so an ID field stays `z.string()`, never a `string | number` union. Don't re-implement any of that per server — see `add-tool` § *Three things the framework fixes before the schema sees the arguments*.
+These are **value**-level, and the mappings are domain knowledge — settle them per input in the design doc's param table. Argument **key** names are not: the framework rewrites declared and case-style key aliases and drops client-added root keys before the schema sees the arguments, and, against the tool's own schema after a failed parse, repairs a JSON-stringified array or object, an integer sent for a string, a number or boolean sent as a string, and a lone string sent for a list, and deletes `null` sent for an optional field — so an ID field stays `z.string()`, never a `string | number` union, a list field stays `z.array()`, never a `string | string[]` union, and an optional field never needs `.nullish()` to absorb a client that sends `null` for unset. A delimiter-joined list is still yours to split: the framework never wraps a string holding a comma or a line break. Don't re-implement any of that per server — see `add-tool` § *Three things the framework fixes before the schema sees the arguments*.
 
 This resolves one submitted value to one canonical value, and does not loosen the strict token match in [MCP-side list filtering](#mcp-side-list-filtering), which scores a query against many candidate names.
 
