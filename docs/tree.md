@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-10-05 06:18:33
+Generated on: 2026-10-24 08:39:31
 
 ```text
 obsidian-mcp-server/
@@ -31,6 +31,7 @@ obsidian-mcp-server/
 │   ├── 3.4.x/
 │   ├── 3.5.x/
 │   ├── 3.6.x/
+│   ├── 3.7.x/
 │   └── template.md
 ├── docs/
 │   └── openapi.yaml
@@ -177,13 +178,17 @@ obsidian-mcp-server/
 │   ├── services/
 │   │   └── obsidian/
 │   │       ├── frontmatter-ops.ts
+│   │       ├── jsonlogic-deps.d.ts
+│   │       ├── jsonlogic-evaluator.ts
+│   │       ├── jsonlogic-worker.ts
 │   │       ├── markdown-blocks.ts
 │   │       ├── obsidian-service.ts
 │   │       ├── patch-instruction.ts
 │   │       ├── path-policy.ts
 │   │       ├── section-extractor.ts
 │   │       └── types.ts
-│   └── index.ts
+│   ├── index.ts
+│   └── instructions.ts
 ├── tests/
 │   ├── config/
 │   │   └── server-config.test.ts
@@ -208,6 +213,7 @@ obsidian-mcp-server/
 │   │   └── obsidian-vault-note.test.ts
 │   ├── services/
 │   │   ├── frontmatter-ops.test.ts
+│   │   ├── jsonlogic-evaluator.test.ts
 │   │   ├── obsidian-service-base-url.test.ts
 │   │   ├── obsidian-service-close.test.ts
 │   │   ├── obsidian-service-error-containment.test.ts

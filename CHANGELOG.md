@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.7.1](changelog/3.7.x/3.7.1.md) — 2026-10-24 · 🛡️ Security
+
+Read-scope fixes: under OBSIDIAN_READ_PATHS, JSONLogic search runs in the server over readable notes only, active and periodic denials name the target rather than the resolved note, read-then-write tools write to the note they read, and instructions state the effective scope. A case-variant write fails as case_variant_exists.
+
 ## [3.7.0](changelog/3.7.x/3.7.0.md) — 2026-10-05 · 🛡️ Security
 
 obsidian_delete_note now deletes on the first call unless OBSIDIAN_DELETE_ELICITATION=true, and obsidian_list_tags and obsidian_list_notes no longer expose tag names or folder and note names outside OBSIDIAN_READ_PATHS.
