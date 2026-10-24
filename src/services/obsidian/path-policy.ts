@@ -240,6 +240,9 @@ function normalize(path: string): string {
     .toLowerCase();
 }
 
+/** A single character that `prefixPattern` escapes with a backslash to match it literally. */
+const REGEX_METACHARACTER = /^[\\^$.*+?()[\]{}|-]$/;
+
 /**
  * A regex source matching every path whose `normalize()` form equals `prefix`
  * or sits under it, as `matchesAny` decides, and possibly more. Built for the
@@ -260,7 +263,8 @@ function prefixPattern(prefix: string): string {
     else if (char === 'k') pattern += '[kKK]';
     else if (char >= 'a' && char <= 'z') pattern += `[${char}${char.toUpperCase()}]`;
     else if (char === '/') pattern += '[/\\\\]';
-    else pattern += char.replace(/[\\^$.*+?()[\]{}|-]/, '\\$&');
+    else if (REGEX_METACHARACTER.test(char)) pattern += `\\${char}`;
+    else pattern += char;
   }
   return `${pattern}(?:[/\\\\]|$)`;
 }
