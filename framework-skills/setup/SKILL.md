@@ -4,7 +4,7 @@ description: >
   Post-init orientation for an MCP server built on @cyanheads/mcp-ts-core. Use after running `@cyanheads/mcp-ts-core init` to understand the project structure, conventions, and skill sync model. Also use when onboarding to an existing project for the first time.
 metadata:
   author: cyanheads
-  version: "1.12"
+  version: "1.13"
   audience: external
   type: workflow
 ---
@@ -65,6 +65,7 @@ tests/
 Add these as needed:
 
 ```text
+skills/                                         # Skills the server publishes to the agents that use it — `add-skill`; usually none
 src/
   worker.ts                                     # createWorkerHandler() — only for Cloudflare Workers
   config/
@@ -108,9 +109,9 @@ See the `add-tool`, `add-app-tool`, `add-resource`, `add-prompt`, `add-service`,
 
 ## Skill Sync
 
-Copy all project skills into your agent's skill directory so they're available as context. `framework-skills/` is the source of truth. It is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, and these are development skills, not skills for the agents that install the server — leave `skills/` for those.
+Copy all project skills into your agent's skill directory so they're available as context. `framework-skills/` is the source of truth. It is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, and these are development skills, not skills for the agents that install the server. Root `skills/` is for those — the skills the server publishes, written by hand with the `add-skill` skill. Neither `init` nor this sync nor `maintenance` creates or modifies it.
 
-**Don't edit `framework-skills/*/SKILL.md` or `framework-skills/*/references/*`.** These are external skill files synced from `@cyanheads/mcp-ts-core` — the `maintenance` skill overwrites them on package updates, so local edits get lost. Project-specific agent context belongs in `CLAUDE.md` / `AGENTS.md`.
+**Don't edit the framework's skills in `framework-skills/`** (`SKILL.md` and `references/` of any skill carrying `metadata.audience: external`). They are synced from `@cyanheads/mcp-ts-core` — the `maintenance` skill overwrites them on package updates, so local edits get lost. Project-specific agent context belongs in `CLAUDE.md` / `AGENTS.md`, or in a development skill of the server's own, which leaves out `metadata.audience`.
 
 **For Claude Code:**
 
@@ -137,10 +138,11 @@ Complete these one-time setup tasks:
    | `server.json` | `name` (reverse-DNS, e.g. `io.github.<owner>/<server>`), `description`, `repository.url` | `lint:mcp` |
    | `.claude-plugin/plugin.json` | `description` | `lint:packaging` |
    | `.codex-plugin/plugin.json` | `description`, `interface.shortDescription`, `interface.longDescription` | `lint:packaging` |
+   | `plugin.json` | `description` | `lint:packaging` |
 
-   Fill the rest of the same blocks while you are in them — `package.json` `description` and `repository.url`, both plugin manifests' `author` / `homepage` / `repository` / `keywords`, the Codex manifest's `interface.developerName` / `category` / `websiteURL`, and `manifest.json` `description` / `author.name`. Nothing gates them, and every install surface reads them.
+   Fill the rest of the same blocks while you are in them — `package.json` `description` and `repository.url`, all three plugin manifests' `author` / `homepage` / `repository` / `keywords`, the Codex manifest's `interface.developerName` / `category` / `websiteURL`, and `manifest.json` `description` / `author.name`. Nothing gates them, and every install surface reads them.
 
-   When the server takes a user-supplied value (an API key, a contact email, an instance URL), wire it into the plugin manifests the way each client delivers it — never as `"KEY": ""` in `env`, which `lint:packaging` rejects because the empty value replaces the user's exported key and is read as unset. In `.claude-plugin/plugin.json`, declare the option under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and set `"KEY": "${user_config.<option>}"` in `env`. In `.codex-plugin/mcp.json`, list the variable name in `env_vars`. Mirror the `user_config` block you write in `manifest.json`.
+   When the server takes a user-supplied value (an API key, a contact email, an instance URL), wire it into the plugin manifests the way each client delivers it — never as `"KEY": ""` in `env`, which `lint:packaging` rejects because the empty value replaces the user's exported key and is read as unset. In `.claude-plugin/plugin.json`, declare the option under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and set `"KEY": "${user_config.<option>}"` in `env`. In `.codex-plugin/mcp.json`, list the variable name in `env_vars`. Mirror the `user_config` block you write in `manifest.json`. Root `mcp.json` keeps only the fixed `env` it shares with `.codex-plugin/mcp.json`: Agent Plugins has no credential mechanism. Codex ≥ 0.150.0 starts the server from root `mcp.json` and merges the overlay's `env_vars` into it only while `.codex-plugin/plugin.json` keeps `"mcpServers": "./.codex-plugin/mcp.json"`; Claude Code keeps reading `.claude-plugin/plugin.json`. Don't document a keyed server as working in Cursor, GitHub Copilot, VS Code, or Kiro.
 
    A server that will never be published or installed as a plugin can drop the plugin-manifest gate instead — set `"packaging": { "pluginManifests": false }` in `devcheck.config.json`.
 6. **Verify the scaffold builds clean** — `bun run devcheck`. Fix any issues before starting real work.

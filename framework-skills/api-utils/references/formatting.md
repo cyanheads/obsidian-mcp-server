@@ -1,8 +1,29 @@
 # Formatting Utilities (`utils/formatting`)
 
 ```ts
-import { markdown, MarkdownBuilder, diffFormatter, tableFormatter, treeFormatter } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownInline, markdownImage, markdownLink, markdown, MarkdownBuilder, diffFormatter, tableFormatter, treeFormatter } from '@cyanheads/mcp-ts-core/utils';
 ```
+
+---
+
+## `escapeMarkdownInline()` / `markdownLink()` / `markdownImage()`
+
+Encoders for text a tool did not author. `content[]` carries the same data as `structuredContent`, so an upstream string must read back unchanged under a CommonMark parse — never as emphasis, a link, raw HTML, or a list it happens to resemble.
+
+| Export | Signature | Notes |
+|:-------|:----------|:------|
+| `escapeMarkdownInline` | `(text) -> string` | Escapes only what can parse as syntax: a backslash before ASCII punctuation, whitespace, or the line end; `` ` `` `*` `[` `]` `\|` `~` everywhere and `_` unless a letter or digit sits on both sides; `<` before a letter, `/`, `!`, `?`, or an email autolink; `&` before an entity-shaped run; at the start of every line `#`, `>`, a list marker, a thematic break, a setext underline, or a table delimiter row; at the end of every line the last `#` of a run a space or tab precedes (`abc #` → `abc \#`, which an ATX heading would drop as its closing sequence). Edge whitespace on each line, every Unicode whitespace character but U+000B included, becomes a numeric reference (`&#32;`, `&#9;`, `&#160;`) — a paragraph strips spaces and tabs, a GFM table cell strips the rest; a vertical tab stays literal, since markdown-it decodes `&#11;` as U+FFFD; a line break becomes a hard break (`\` + newline), a final one `&#10;`; CR/CRLF read back as LF. `<=50`, `AT&T`, `C#`, `C# 12`, `a # b`, `snake_case`, `C:\Users\x` come back unchanged. NUL is outside the guarantee (CommonMark replaces it with U+FFFD) |
+| `markdownLink` | `(label, url) -> string` | `[label](<url>)`: label escaped, destination in `<…>` with `\ < >` backslash-escaped (never percent-encoded, so it still equals the `structuredContent` URL). A non-`http(s)`, relative, unparseable, or multi-line URL renders as literal text `label (url)` |
+| `markdownImage` | `(alt, url, title?) -> string` | `![alt](<url> "title")` under the same rules; the literal fallback is `alt (url "title")`. Use for image fields (logos, thumbnails) so the image renders instead of its URL escaped into prose |
+
+```ts
+escapeMarkdownInline('A*p* <b>x</b>\n- y'); // 'A\\*p\\* \\<b>x\\</b>\\\n\\- y'
+markdownImage('Team logo', 'https://cdn.example/a b.png'); // '![Team logo](<https://cdn.example/a b.png>)'
+markdownLink('[docs]', 'https://example.com/q?x=<1>'); // '[\\[docs\\]](<https://example.com/q?x=\\<1\\>>)'
+markdownLink('run', 'javascript:alert(1)'); // 'run (javascript:alert(1))'
+```
+
+Escape what goes *inside* authored Markdown, not the Markdown itself: `` `**Title:** ${escapeMarkdownInline(item.title)}` ``. The output is inline text, and reads back exactly in these slots: a value of one line in a paragraph, after a label, and in an ATX heading, list item, block quote, or GFM table cell; a value with line breaks in a paragraph, list item, or block quote, which it stays inside through hard breaks. Keep a multi-line value out of headings and table cells — a heading or table row ends at the line break. Two encoded values placed edge to edge can still form syntax neither holds (`<` then `b>`); separate them with authored text. Never defang (`https[:]//`, HTML entities) — that changes the data on one surface.
 
 ---
 
@@ -26,17 +47,17 @@ import { markdown, MarkdownBuilder, diffFormatter, tableFormatter, treeFormatter
 | `paragraph` | `(text) -> this` | Text + `\n\n` |
 | `blockquote` | `(text) -> this` | Each line prefixed with `>` + space |
 | `hr` | `() -> this` | `---` |
-| `link` | `(text, url) -> this` | `[text](url)`; no trailing newline |
+| `link` | `(text, url) -> this` | `markdownLink(text, url)`: `[text](<url>)` with the label escaped, or literal `text (url)` for a non-`http(s)` URL; no trailing newline |
 | `table` | `(headers, rows) -> this` | GFM table; no-ops if headers or rows empty |
 | `section` | `(title, content) -> this` | H2 heading + callback |
 | `section` | `(title, level, content) -> this` | Heading at level 2/3/4 + callback |
 | `details` | `(summary, details) -> this` | HTML `<details>`/`<summary>` collapsible block |
 | `alert` | `(type, content) -> this` | GFM `[!TYPE]` alert blockquote |
 | `taskList` | `(items) -> this` | GFM checkbox list; `items: Array<{ checked: boolean; text: string }>` |
-| `image` | `(altText, url, title?) -> this` | `![alt](url "title")` |
+| `image` | `(altText, url, title?) -> this` | `markdownImage(altText, url, title)`: `![alt](<url> "title")` with the alt escaped, or literal text for a non-`http(s)` URL (relative paths included) |
 | `strikethrough` | `(text) -> this` | `~~text~~`; no trailing newline |
 | `diff` | `(changes) -> this` | ` ```diff ` block; `changes: { additions?: string[]; deletions?: string[]; context?: string[] }` |
-| `badge` | `(label, message, color?) -> this` | shields.io badge image; `color` defaults to `'blue'` |
+| `badge` | `(label, message, color?) -> this` | shields.io badge image via `markdownImage`, alt text `label: message` escaped; `color` defaults to `'blue'` |
 | `bold` | `(text) -> this` | `**text**`; no trailing newline |
 | `italic` | `(text) -> this` | `*text*`; no trailing newline |
 | `boldItalic` | `(text) -> this` | `***text***`; no trailing newline |

@@ -4,7 +4,7 @@ description: >
   Cloudflare Workers deployment using `createWorkerHandler` from `@cyanheads/mcp-ts-core/worker`. Covers the full handler signature, binding types, CloudflareBindings extensibility, runtime compatibility guards, and wrangler.toml requirements.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.11"
   audience: external
   type: reference
 ---
@@ -50,6 +50,7 @@ Fresh scaffolds register definitions directly in the entry point as shown above.
 | `prompts` | `PromptDefinition[]` | Prompt definitions to register |
 | `extensions` | `Record<string, object>` | SEP-2133 extensions to advertise in server capabilities |
 | `instructions` | `string \| (env: CloudflareBindings) => string` | Server-level orientation forwarded to the model on every `initialize`. Resolver form runs inside `initializeApp(env)` so env-derived text is available (see Workers-specific warnings). Empty string treated as unset. |
+| `skills` | `Record<string, string \| Uint8Array>` | Published skills to serve over MCP (SEP-2640): paths under the skills folder mapped to file contents — see [Serving skills](#serving-skills) |
 | `setup` | `(core: CoreServices) => void \| Promise<void>` | Runs after core services are ready, during the first request (lazy init inside the fetch handler) |
 | `extraEnvBindings` | `[bindingKey: string, processEnvKey: string][]` | Maps CF string bindings to `process.env` keys |
 | `extraObjectBindings` | `[bindingKey: string, globalKey: string][]` | Maps CF object bindings (KV, R2, D1, AI) to `globalThis` keys |
@@ -61,6 +62,7 @@ Fresh scaffolds register definitions directly in the entry point as shown above.
 - **Env bindings refreshed per-request**: Cloudflare may rotate binding object references between requests; the handler re-injects them on every call.
 - **OTel NodeSDK is disabled in Workers** — `canUseNodeSDK()` returns `false` for V8 isolates, so no OTLP spans or metrics are emitted. Structured logs via `ctx.log` still work. `OTEL_ENABLED=true` has no effect in Workers. `ctx.waitUntil()` is received and passed through to `app.fetch` and `onScheduled` but not called by the framework (nothing to flush asynchronously).
 - **Singleton app promise with retry-on-failure**: the framework init runs once; if it fails, the next request retries rather than leaving the Worker in a permanently broken state.
+- **Core config is re-parsed on the first request**: init drops any config cached before it and parses again after the bindings are injected, with or without `name`/`version`, so `MCP_AUTH_MODE`, `ENVIRONMENT`, and the always-`http` transport hold even when something read `config` at module load. A `resetConfig(overrides)` call made before that request does not survive it.
 
 ---
 
@@ -175,6 +177,45 @@ export {};
 
 ---
 
+## Serving skills
+
+`createApp({ skills: 'skills' })` reads a folder; a Worker has no filesystem, so `createWorkerHandler` takes the same tree as a record: each key a path under the skills folder (`<skill>/SKILL.md`, `<skill>/references/<file>.md`), each value the file's contents. Only files in the record are served — list every reference file the skill links to. Build it from Wrangler `Text` module imports:
+
+```ts
+// src/worker.ts
+import guideMd from '../skills/my-server-guide/SKILL.md';
+import idsMd from '../skills/my-server-guide/references/ids.md';
+
+export default createWorkerHandler({
+  tools: allToolDefinitions,
+  skills: {
+    'my-server-guide/SKILL.md': guideMd,
+    'my-server-guide/references/ids.md': idsMd,
+  },
+});
+```
+
+Wrangler's default module rules don't cover `.md`, so add a `Text` rule (`fallthrough` keeps the defaults), and declare the module type for TypeScript:
+
+```toml
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true
+```
+
+```ts
+// src/markdown.d.ts
+declare module '*.md' {
+  const text: string;
+  export default text;
+}
+```
+
+The record is loaded once per isolate, on the first request, with the same non-strict loading as `createApp`: a skill the SDK rejects is skipped with a logged warning, and a path that leaves the tree fails init with a `ConfigurationError`. Opting in adds the same surface as on Node — the `io.modelcontextprotocol/skills` extension capability, `skills/list`, `skills/get`, `resources/directory/read`, each `SKILL.md` in `resources/list`, and the `skill://{+path}` template. `add-skill` covers authoring the tree.
+
+---
+
 ## Workers-specific warnings
 
 **`instructions` resolver runs after env injection.** When `instructions` is a function, it runs inside `initializeApp(env)` — after `injectEnvVars()` — so env-derived text reaches the model without fighting the Workers module-load lifecycle:
@@ -188,13 +229,13 @@ export default createWorkerHandler({
 });
 ```
 
-Plain strings work the same as on `createApp`. Type extends `Omit<CreateAppOptions, 'instructions'>`, so this is the only option whose shape differs between Node and Worker entry points.
+Plain strings work the same as on `createApp`. Type extends `Omit<CreateAppOptions, 'instructions' | 'skills' | 'teardown'>`: `instructions` and `skills` are the two options whose shape differs between Node and Worker entry points, and `teardown` does not exist on Workers (an isolate is evicted without notice).
 
-**Lazy env parsing is mandatory.** Cloudflare injects env bindings at request time via `injectEnvVars()`, after all static module imports complete. Never parse `process.env` at module top-level in Workers:
+**Lazy env parsing is mandatory.** The framework writes bindings into `process.env` at request time via `injectEnvVars()`, after all static module imports complete. Under `nodejs_compat` with a `compatibility_date` of 2025-04-01 or later, a same-named binding is already in `process.env` at module load, but a renamed one (`extraEnvBindings` targets, `ENVIRONMENT` → `NODE_ENV`, `LOG_LEVEL` → `MCP_LOG_LEVEL`) is not, and with `nodejs_compat_do_not_populate_process_env` none are. Never parse `process.env` at module top-level in Workers:
 
 ```ts
 // WRONG — parsed before env is injected
-const apiKey = process.env.MY_API_KEY;  // undefined in Workers
+const apiKey = process.env.MY_API_KEY;  // missing whenever the binding isn't copied at load
 
 // CORRECT — lazy parse inside a function or getter
 export function getServerConfig() {

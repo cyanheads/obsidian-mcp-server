@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). The work commits land first, then the version bump, verification, and the release commit on top. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here.
 metadata:
   author: cyanheads
-  version: "1.30"
+  version: "1.32"
   audience: external
   type: workflow
 ---
@@ -28,7 +28,7 @@ A project can route every release through a pull request — one PR per version,
 | **gated** | commit stack on `release/<version>`, branch pushed, PR open | a review pass on the PR (`release-pr-review` skill), then a separate `release-and-publish` run fast-forwards `main`, tags, and ships |
 | **straight-through** | same as gated | the same agent continues straight into `release-and-publish` |
 
-The branch is created at wrapup time, never before — its name carries the version, so it cannot exist until step 2 has settled one. The moment that number is known, the uncommitted tree moves to `release/<version>` (end of step 2), and every commit in the run lands there. **No commit in these two modes ever reaches `main`, including the first one:** a stack committed on `main` and then branched is a rewrite to undo, and once it is pushed there is no undo, because force-push is banned. The commit stack, the release commit, and the tag format are identical in every mode — the PR adds an artifact around them, it does not change them.
+Create `release/<version>` as soon as the version is known, before any commit; a caller-pinned version permits branching before step 1. Every work and release commit lands on that branch. If commits were accidentally made on an unpushed `main`, create the release branch at HEAD and continue without moving `main`; never reset, force a branch ref, or rewrite history. If those commits were already pushed to `main`, report the state before proceeding. The commit stack, release commit, and tag format are identical in every mode — the PR adds an audit artifact.
 
 ## Pre-wrapup gate checklist
 
@@ -62,7 +62,7 @@ git diff HEAD                             # review the actual content
 git ls-files --others --exclude-standard  # new files, which never appear in the diff
 ```
 
-**Check the branch first.** Empty output from `git branch --show-current` means a detached HEAD: halt. In every mode the wrap-up starts on `main`; release PR mode moves to `release/<version>` in step 2.
+**Check the branch first.** Empty output from `git branch --show-current` means a detached HEAD: halt. Start on `main`, or on `release/<version>` when the caller has already pinned the version and created that branch. Release PR mode must be on the release branch before step 3.
 
 Diff against `HEAD`, not the index: plain `git diff` omits staged changes entirely, so a group already staged before wrap-up began — a `git mv` from a migration step, a hook's output — shows up in `git status` as a line to scroll past and nowhere in the diff review. Whatever is staged is part of what ships and gets grouped in step 3 like everything else.
 
@@ -88,7 +88,7 @@ Read the current version from `package.json`. The version is the caller's to set
 
 When the diff doesn't clearly settle which row applies, ask the caller rather than picking.
 
-**In `gated` or `straight-through` mode, create the branch now, before going on to step 3** — the version you just settled is its name, and step 3 opens by committing:
+**In `gated` or `straight-through` mode, create the branch now, before going on to step 3.** If the caller already had you create this release branch, verify its name and skip the creation command; otherwise:
 
 ```bash
 git branch --show-current                 # must be main
@@ -108,13 +108,13 @@ A hit means an abandoned run already claimed this version: halt and report the b
 
 ### 3. Commit the work — one commit per concern
 
-**Release PR mode: `git branch --show-current` must print `release/<version>` before you run the first `git commit`.** If it prints `main`, step 2's branch step was skipped — go back and do it. The uncommitted tree moves with you, so nothing is lost by branching late, but a commit already on `main` has to be unwound.
+**Release PR mode: `git branch --show-current` must print `release/<version>` before every `git commit`.** If it prints `main`, create the release branch before committing. If commits already exist on an unpushed `main`, branch at HEAD and continue; never reset, force a branch ref, or otherwise move existing refs to recover.
 
 **The work is committed before the version is bumped.** Work concerns routinely share a file with the version — a dependency refresh edits `package.json`, a doc edit lands in a `CLAUDE.md`/`AGENTS.md` that pins a version string — and the file is the atomic boundary, so whichever commit comes first takes the file whole. Committing the work first leaves the version hunk (step 4) as the only thing those files carry into the release commit.
 
 Do NOT `git add -A` into one commit. Group the working tree into a handful of logical commits — never one blob. A feature spanning multiple layers splits by layer: runtime/logic, linter/tooling, docs/skills. Unrelated changes (two separate fixes, an incidental doc tweak) are their own commits. A dependency refresh is its own commit — `chore(deps): …` carrying `package.json`, the lockfile, and any pins it moved elsewhere. Work commits do not carry the version.
 
-Stage each group explicitly, commit it by pathspec, then move to the next:
+Verify each proposed group using the snapshot gate below before running `git commit`. Then stage that unchanged group explicitly, commit it by pathspec, and move to the next:
 
 ```bash
 git add <paths-for-this-concern>
@@ -126,7 +126,7 @@ git commit --only <paths-for-this-concern> -m "<subject>" -m "<body>"
 
 **The file is the atomic boundary:** NEVER split a single file's working-tree changes across commits, regardless of mechanism — not `git add -p`, not an index-only patch (`git apply --cached`), not editing the file between commits to remove-then-re-add a hunk. When one file serves two concerns, it ships whole in the commit of its dominant concern; a later commit may touch the file again only for changes made AFTER the first commit (the version bump applied in step 4).
 
-**Every commit builds and passes its tests on its own.** When a concern changes an exported contract — a service method's return type, a shared helper's signature, a renamed export, a changed query or behavior a consumer's tests assert — the files that consume it AND their tests ride in the same commit, even when they also carry other concerns. Grouping the contract change into one commit and each consumer into its own later commit leaves pushed commits that fail typecheck or the suite alone, and pushed history is never rewritten to repair them. A snapshot can typecheck and still be red: before pushing, check out each work commit's tree (`git stash` is not the tool — extract it with `git archive <sha> | tar -x -C <scratch>`, symlink the project's `node_modules` into it) and run the test script there. Run it first on a snapshot of the commit the stack starts from: a test that fails in that baseline too, such as one that resolves paths through the symlinked `node_modules`, fails because of the snapshot method, not the group. Merge only groups whose snapshot fails where the baseline passes.
+**Every commit builds and passes its tests on its own — verify BEFORE committing.** A changed service contract or I/O boundary ships with its consumers and tests, even when those files also carry other concerns. Test the baseline snapshot first. For each proposed group, use a temporary `GIT_INDEX_FILE`: `git read-tree HEAD`, then `git add -- <whole-file-paths>`. Export that candidate with `git checkout-index -a --prefix=<scratch>/` under the same temporary index — not `git archive`, which drops every `export-ignore` path in `.gitattributes`, often `tests/` and `scripts/` — symlink the project's `node_modules`, and run the fast pair there: the build (or typecheck), then the unit test script (`bun run test`). Never the full lane matrix per commit — integration, worker, packaging, or coverage lanes, or an aggregate such as `test:all` or `test:package`: it already passed on the finished tree before wrapup, runs again in step 7 and in release-and-publish, and repeating it per snapshot multiplies the slowest gate by the commit count. Also run any verification command the candidate introduces or strengthens, such as coverage: it must pass in the first commit that advertises it, with its supporting tests and configuration. Wait for every command to finish successfully before committing the same unchanged paths through the real index; a running gate is not a pass. The temporary index leaves existing staging and the working tree untouched. If the candidate fails where the baseline passes, combine its dependent file groups and repeat the snapshot gate while they are still uncommitted. A failure shared with the baseline may be a snapshot-method problem — a test that resolves real paths through the symlinked `node_modules`, or one that needs a git repository — so copy `node_modules` (`cp -cR` clones it on APFS) or `git init` the scratch tree, and resolve it before judging the group. Never create a commit to discover whether its grouping passes, and never rewrite history to repair grouping.
 
 **A dependency bump lands before the commits that use it.** When any later commit in the stack uses something the new versions introduce — a new framework export, a new `tool()` option, a changed signature — `chore(deps)` is the first work commit. It builds on its own: `package.json`, the lockfile, and any source change the upgrade itself forces (a renamed import, a removed option) ride in it, so the commits above it compile against the versions they were written for. Ordered the other way, the adopting commit and every commit up to the bump fail typecheck at their own SHA. The exception is a `package.json` that also carries another concern's entry pointing at files a deps-first commit would not contain, such as a new `exports` subpath or `files` entry. That snapshot fails, so the dependency changes ride the commit that adds those files, and its body says so.
 
@@ -167,7 +167,7 @@ Every file that declares a version must be updated. Skip any file that doesn't e
 - `package.json` — `version`
 - `server.json` — top-level `version` AND every `packages[].version` entry. `lint:mcp` flags a mismatch at either level
 - `manifest.json` (if present) — `version`. Packaging validation fails on a mismatch, and on a scoped `name` (use `bls-mcp-server`, not `@cyanheads/bls-mcp-server`)
-- `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` (if present) — `version`. Packaging validation fails on a mismatch; `.codex-plugin/mcp.json` is connection config and carries none
+- `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, and root `plugin.json` (if present) — `version`. Packaging validation fails on a mismatch; `.codex-plugin/mcp.json` and root `mcp.json` are connection config and carry none
 - `README.md` — version badge. Packaging validation fails on a mismatch with `package.json`; a literal `-` in a prerelease is escaped as `--` (`Version-0.14.0--rc.1-`)
 - `CLAUDE.md` / `AGENTS.md` — if they pin a version string
 - `Dockerfile` — OCI labels if they pin the version
@@ -210,10 +210,10 @@ security: false    # true ONLY for a security fix in this server's own source �
 
 ```bash
 bun run changelog:build    # rebuilds CHANGELOG.md rollup from per-version files
-bun run tree               # regenerates docs/tree.md — run when files were added, removed, or moved in src/
+bun run tree               # regenerates docs/tree.md after the changelog files are created
 ```
 
-Both scripts are idempotent — safe to run even if nothing changed.
+Changelog files and directories count as structure changes even when `src/` is unchanged.
 
 ### 7. Run the verification gate
 
@@ -226,7 +226,7 @@ bun run test:all           # or `bun run test` if no test:all script exists
 bun run test:package       # only if the script exists — NOT part of test:all
 ```
 
-**If any fails, halt.** Do not bypass verification to land the release commit.
+**If any fails, halt.** Do not bypass verification to land the release commit. Halting means reporting back with the failing output — a failure that isn't a formatter auto-fix (a red or intermittent test, a type error) is the caller's to diagnose and fix; don't investigate it, add debug files, or edit source or tests to chase it.
 
 The work is already committed by this point, so the fix is a new commit on top of the stack, under step 3's conventions — never `git commit --amend`, never a rebase, reset, or any other rewrite of a commit the stack already carries. Land the fix, then re-run this step. The same holds when the gate passes but leaves the tree dirty: `devcheck` auto-fixes as it runs, and a formatter fix to a file committed in step 3 is a follow-up commit of its own, not something to fold into the release commit.
 
@@ -321,23 +321,24 @@ If the working tree holds anything beyond those exclusions, or the release commi
 
 ## Checklist
 
-- [ ] Started on `main`, not a detached HEAD; release PR mode found no existing `release/<version>` branch or PR, local or remote
+- [ ] Started on `main` or the caller-created `release/<version>`, not a detached HEAD; no conflicting release branch or PR exists
 - [ ] Diff and every untracked file reviewed end-to-end before the first commit
 - [ ] Unfinished changes this run didn't make left uncommitted and reported
 - [ ] Version taken from the brief, the project's policy, or semver, in that order — asked when the row was unclear
 - [ ] Work concerns committed before the version bump — a version-bearing file a work concern also touches ships whole in that concern's commit, so the release commit brings it the version hunk alone
-- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — `devcheck` flags a mismatch in `server.json` (both levels), `manifest.json`, both plugin manifests, and the README badge; step 4's straggler grep covers the docs and Dockerfile labels
+- [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, root `plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — `devcheck` flags a mismatch in `server.json` (both levels), `manifest.json`, the plugin manifests, and the README badge; step 4's straggler grep covers the docs and Dockerfile labels
 - [ ] GH issues addressed by this work commented with what landed (if working from GH issues)
 - [ ] Docs updated for any new or changed features
 - [ ] Changelog authored at `changelog/<major.minor>.x/<version>.md`
 - [ ] `CHANGELOG.md` rollup regenerated (`bun run changelog:build`)
-- [ ] `docs/tree.md` regenerated if structure changed (`bun run tree`)
+- [ ] `docs/tree.md` regenerated after changelog creation (`bun run tree`)
 - [ ] `bun run devcheck` passes
 - [ ] `bun run rebuild` succeeds
 - [ ] `bun run test:all` (or `test`) passes
 - [ ] `bun run test:package` passes, when the project defines it — it guards the public-export manifest and `test:all` does not run it
 - [ ] Release PR mode: stack committed on `release/<version>`, never on `main`
 - [ ] Work grouped into logical commits (large features split by layer); release artifacts (version + changelog + tree) committed separately on top, subject leading with the version
+- [ ] Each proposed work commit's complete tree passed build and tests before committing; dependent groups were combined while still uncommitted
 - [ ] `chore(deps)` is the first work commit whenever a later commit uses what the new versions introduce, and it builds on its own — carrying `package.json`, the lockfile, and any source change the upgrade forces
 - [ ] A gate failure after the work is committed landed as a new commit on the stack — nothing amended, rebased, or otherwise rewritten
 - [ ] Every commit carries a body, and every body is one or two lines — none subject-only, none a paragraph

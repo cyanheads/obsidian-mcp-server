@@ -97,10 +97,17 @@ function skillDirNames(root: string): string[] {
     .map((e) => e.name);
 }
 
-/** True when a skill is framework-managed — its SKILL.md carries `audience: external`. */
+/**
+ * True when a skill is framework-managed — its SKILL.md frontmatter carries
+ * `audience: external`. The body is never read: a published skill may quote that
+ * line in prose without becoming a framework skill.
+ */
 function isFrameworkManaged(skillMdPath: string): boolean {
   if (!existsSync(skillMdPath)) return false;
-  return /^\s*audience:\s*external\s*$/m.test(readFileSync(skillMdPath, 'utf-8'));
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(
+    readFileSync(skillMdPath, 'utf-8'),
+  )?.[1];
+  return frontmatter !== undefined && /^\s*audience:\s*external\s*$/m.test(frontmatter);
 }
 
 /** Skill directories under `root` whose `SKILL.md` carries `audience: external`. */

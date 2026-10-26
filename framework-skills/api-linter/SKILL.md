@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.22"
+  version: "1.23"
   audience: external
   type: reference
 ---
@@ -285,7 +285,7 @@ Fires when a tool's `input` carries an `x-mcp-header` designation — from `head
 | Constraint | Example violation |
 |:--|:--|
 | Statically reachable through a chain of `properties` keys | A designation on an array element, a `z.record()` value, any field of a **discriminated-union input root** (the root advertises `oneOf`), or a schema hoisted into `$defs` by `.meta({ id })` |
-| Primitive-typed property — `string`, `integer`, `number`, `boolean` | `headerParam(z.object({ … }), 'Region')` |
+| Primitive-typed property — `string`, `integer`, `boolean` | `headerParam(z.object({ … }), 'Region')`, or `headerParam(z.number(), 'Ratio')` (`number` is excluded; use `z.int()`) |
 | Non-empty RFC 9110 token | `headerParam(z.string(), 'Bad Name')` — spaces, control characters, and HTTP delimiters are all rejected |
 | Case-insensitively unique across the whole input schema | `'Region'` and `'REGION'` on two sibling fields |
 

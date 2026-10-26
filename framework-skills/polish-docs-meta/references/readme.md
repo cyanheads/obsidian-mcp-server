@@ -30,9 +30,9 @@ Framework badge                         ← solo spotlight row — `Built on @cy
 ## Overview                             ← short description paragraph → `### Tools` / `### Resources` / `### Prompts` two-column tables
 ## Capability reference                 ← one `###` entry per primitive, heading tagged `<sub>tool|resource|prompt</sub>`, contract-shaped bullets
 ## Features                             ← one-sentence framework line + domain-specific bullets + agent-friendly output bullets
-## Getting started                      ← hosted (if any), bunx/npx/docker configs, HTTP one-liner, prerequisites, install
+## Getting started                      ← `claude mcp add` (hosted if any, then local), one local JSON config, pointer to Running the server
 ## Configuration                        ← env var table + `.env.example` pointer
-## Running the server                   ← dev, production, Workers/Docker
+## Running the server                   ← prerequisites, clone + install, dev, production, Docker, Workers
 ## Project structure                    ← directory/purpose table
 ## Development guide                    ← link to CLAUDE.md/AGENTS.md, key rules
 ## Contributing                         ← issues only
@@ -121,9 +121,9 @@ If a public hosted instance is available, **promote it to a top-level callout** 
 </div>
 ```
 
-Keep the full connection-config JSON block inside a `### Public Hosted Instance` subsection under Getting Started (covered below). This callout is just the visibility pointer.
+Getting started opens with the hosted `claude mcp add --transport http` line (covered below). This callout is just the visibility pointer.
 
-No hosted instance → omit the callout, the Getting Started subsection, and any hosted mention in the Overview. Never state the absence ("no public hosted instance"); self-hosting is the default a reader already assumes.
+No hosted instance → omit the callout, the hosted line in Getting started, and any hosted mention in the Overview. Never state the absence ("no public hosted instance"); self-hosting is the default a reader already assumes.
 
 ### Overview
 
@@ -234,144 +234,46 @@ The **Agent-friendly output** subsection documents output-design choices that ma
 
 ### Getting Started
 
-Lead with the lowest-friction option. If a public hosted instance exists, show that first. Then the **three standard install configs in order — `bunx`, `npx`, `docker run`** — followed by the HTTP one-liner quickstart, then prerequisites and install steps.
-
-**Standard three-block pattern** (the house style across shipping `@cyanheads/*` servers):
+Two `claude mcp add` commands (hosted, then local), one JSON config for every other client, and a pointer to Running the server. The header's install badges already cover Claude Desktop, Cursor, and VS Code, so this section carries no per-client blocks.
 
 ```markdown
 ## Getting started
 
-Add the following to your MCP client configuration file. See [`docs/api-key.md`](./docs/api-key.md) for how to generate an API key.
+Connect to the hosted instance, no install:
 
-\`\`\`json
-{
-  "mcpServers": {
-    "my-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/my-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info",
-        "ACME_API_KEY": "your-api-key"
-      }
-    }
-  }
-}
+\`\`\`sh
+claude mcp add --transport http my-mcp-server https://my-server.example.com/mcp
 \`\`\`
 
-Or with npx (no Bun required):
+Or run it locally:
+
+\`\`\`sh
+claude mcp add my-mcp-server -e ACME_API_KEY=your-key -- npx -y @cyanheads/my-mcp-server
+\`\`\`
+
+For other clients, add this to the MCP config file:
 
 \`\`\`json
 {
   "mcpServers": {
-    "my-server": {
-      "type": "stdio",
+    "my-mcp-server": {
       "command": "npx",
-      "args": ["-y", "@cyanheads/my-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info",
-        "ACME_API_KEY": "your-api-key"
-      }
+      "args": ["-y", "@cyanheads/my-mcp-server"],
+      "env": { "ACME_API_KEY": "your-key" }
     }
   }
 }
 \`\`\`
 
-Or with Docker:
-
-\`\`\`json
-{
-  "mcpServers": {
-    "my-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "MCP_TRANSPORT_TYPE=stdio",
-        "-e", "ACME_API_KEY=your-api-key",
-        "ghcr.io/cyanheads/my-mcp-server:latest"
-      ]
-    }
-  }
-}
-\`\`\`
-
-For Streamable HTTP, set the transport and start the server:
-
-\`\`\`sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 ACME_API_KEY=... bun run start:http
-# Server listens at http://localhost:3010/mcp
-\`\`\`
+Get a key at [acme.dev/keys](https://acme.dev/keys). For Docker or a source build, see [Running the server](#running-the-server).
 ```
 
-Refer to "your MCP client configuration file" generically — don't prescribe `claude_desktop_config.json` by name. Different clients use different config paths and the server isn't client-specific.
-
-**If a public hosted instance exists**, precede the three-block pattern with a `### Public Hosted Instance` subsection and wrap the local configs in a `### Self-Hosted / Local` subsection:
-
-```markdown
-### Public Hosted Instance
-
-A public instance is available at `https://my-server.example.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-\`\`\`json
-{
-  "mcpServers": {
-    "my-server": {
-      "type": "streamable-http",
-      "url": "https://my-server.example.com/mcp"
-    }
-  }
-}
-\`\`\`
-
-### Self-Hosted / Local
-
-[bunx / npx / docker blocks here]
-```
-
-**Prerequisites:** Include a Bun version line and any domain-specific setup (API key format, rate-limit tiers, required accounts). Don't just list Bun — readers need to know what else to prepare.
-
-```markdown
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- An Acme API key — see [`docs/api-key.md`](./docs/api-key.md) for how to generate one.
-```
-
-**Installation:** Standard four steps (clone, cd, install, configure env):
-
-```markdown
-### Installation
-
-1. **Clone the repository:**
-
-\`\`\`sh
-git clone https://github.com/cyanheads/my-mcp-server.git
-\`\`\`
-
-2. **Navigate into the directory:**
-
-\`\`\`sh
-cd my-mcp-server
-\`\`\`
-
-3. **Install dependencies:**
-
-\`\`\`sh
-bun install
-\`\`\`
-
-4. **Configure environment:**
-
-\`\`\`sh
-cp .env.example .env
-# edit .env and set required vars
-\`\`\`
-```
-
-Omit the clone/install steps if the server is npm-only (not meant to be cloned).
+- **Names.** The `claude mcp add` name and the `mcpServers` key are the unscoped package name; `npx -y` takes the full `package.json` `name`. No `@latest`.
+- **Hosted line only with a hosted instance.** Without one, drop the first block and its lead-in, and open the local block with "Add it to Claude Code:".
+- **`-e` and `env` carry required variables only.** An optional variable that unlocks something (a higher rate limit, an extra source) gets one sentence after the JSON naming it and what it changes. Never framework variables: `MCP_TRANSPORT_TYPE` is already `stdio` by default, and `MCP_LOG_LEVEL` belongs in Configuration. `-e` goes after the name, as `claude mcp add --help` shows.
+- **One JSON block, the local stdio shape.** `command` + `args` under `mcpServers` is the shape nearly every client reads. No hosted JSON: remote-server config differs per client (`"type": "http"`, `"streamableHttp"`, or no type) and drifts, while the URL already sits in the hosted callout and the `claude mcp add` line.
+- **Not on npm** (Docker- or source-only) → swap `npx -y <package>` for that launch command in both places.
+- **Close with the pointer sentence**, preceded by where to get a key when one is required.
 
 ### Configuration
 
@@ -401,12 +303,22 @@ Source from the server config Zod schema and `.env.example`.
 
 ### Running the Server
 
-Separate from Getting Started. Show dev and build + run, plus Workers deployment when the server has a Worker entry; a Docker subsection is optional (see below).
+Separate from Getting Started, which points here for Docker and source builds. Show prerequisites, clone and install, dev and build + run, Docker when the server publishes an image, and Workers deployment when the server has a Worker entry.
 
 ```markdown
 ## Running the server
 
 ### Local development
+
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+- **Clone and install:**
+
+  \`\`\`sh
+  git clone https://github.com/cyanheads/my-mcp-server.git
+  cd my-mcp-server && bun install
+  cp .env.example .env   # set ACME_API_KEY
+  \`\`\`
 
 - **Build and run:**
 
@@ -431,11 +343,10 @@ Separate from Getting Started. Show dev and build + run, plus Workers deployment
 ### Docker
 
 \`\`\`sh
-docker build -t my-mcp-server .
-docker run --rm -e ACME_API_KEY=your-key -p 3010:3010 my-mcp-server
+docker run --rm -e ACME_API_KEY=your-key -p 3010:3010 ghcr.io/cyanheads/my-mcp-server:latest
 \`\`\`
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/my-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
+The image defaults to HTTP transport, stateless session mode, and logs to `/var/log/my-mcp-server`. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/my-mcp-server:latest"]`. To build locally, `docker build -t my-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 ### Cloudflare Workers
 
@@ -452,7 +363,7 @@ bun run deploy:prod
 \`\`\`
 ```
 
-The Docker subsection is optional and usually skipped: when the server publishes an image and Getting started already shows the Docker client config, a local-build walkthrough adds little. Include it only when the server ships a Dockerfile with behavior a user needs to know before building (the log directory, the OTEL build arg), and then keep that trailing paragraph. Include the Workers subsection only if the server ships a `src/worker.ts` entry.
+Include the Docker subsection when the server publishes an image, since Getting started sends Docker users here; adjust the image defaults in its paragraph to the server's Dockerfile. Omit the clone-and-install step if the server is npm-only (not meant to be cloned). Include the Workers subsection only if the server ships a `src/worker.ts` entry.
 
 ### Project Structure
 
@@ -522,9 +433,9 @@ Apache-2.0 — see [LICENSE](LICENSE) for details.
 - **Concise on every pass.** Re-runs tighten as well as correct; see § *Concision* for what survives a cut and what doesn't, and validate everything that survives.
 - **One two-column table per primitive type.** Tools, resources, and prompts each get a small heading and a Name/Description table, even when a table has one row. No `Type` column — most servers are tool-heavy and many have no resources or prompts.
 - **Promote hosted instances.** If there's a public URL, put it in a top-level callout under the badges — not buried in Getting Started.
-- **Three install configs.** `bunx`, `npx`, `docker run` in that order. Each as a complete MCP-client JSON block.
+- **One command, one config.** `claude mcp add` for hosted and local, then one local stdio JSON for every other client. Per-client installs belong to the header badges; Docker and source builds to Running the server.
 - **Real names from code.** Tool names, env vars, and URIs must match the source exactly. Copy from the definitions, don't paraphrase.
-- **Lowest friction first.** Hosted instance > bunx > npx > docker > clone.
+- **Lowest friction first.** Hosted `claude mcp add` > local `claude mcp add` > JSON config > Docker or source under Running the server.
 - **No badges unless publishing.** Badges for unpublished packages are noise.
 - **Client-agnostic framing.** Say "your MCP client configuration file", not `claude_desktop_config.json`.
 - **Keep it current.** Update the README whenever tools are added or removed.

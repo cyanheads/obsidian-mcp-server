@@ -113,19 +113,21 @@ const strict = await jsonParser.parse<Config>(jsonString, 0);
 | Method | Sync? | Signature |
 |:-------|:------|:----------|
 | `createDocument` | async | `(context?) -> Promise<PDFDocument>` |
-| `loadDocument` | async | `(pdfBytes, context?) -> Promise<PDFDocument>` |
+| `loadDocument` | async | `(pdfBytes, context?, budget?) -> Promise<PDFDocument>` |
 | `addPage` | **sync** | `(doc, options?) -> PDFPage` |
 | `embedFont` | async | `(doc, fontName?, context?) -> Promise<PDFFont>` |
 | `embedImage` | async | `(doc, options, context?) -> Promise<PDFImage>` |
 | `drawText` | async | `(page, options) -> Promise<void>` |
 | `drawImage` | async | `(page, options) -> Promise<void>` |
-| `mergePdfs` | async | `(pdfBytesArray, context?) -> Promise<PDFDocument>` |
-| `splitPdf` | async | `(pdfBytes, ranges, context?) -> Promise<PDFDocument[]>` |
+| `mergePdfs` | async | `(pdfBytesArray, context?, budget?) -> Promise<PDFDocument>` |
+| `splitPdf` | async | `(pdfBytes, ranges, context?, budget?) -> Promise<PDFDocument[]>` |
 | `fillForm` | **sync** | `(doc, options, context?) -> void` |
 | `extractMetadata` | **sync** | `(doc) -> PdfMetadata` |
 | `setMetadata` | **sync** | `(doc, metadata) -> void` |
-| `extractText` | async | `(doc, options?, context?) -> Promise<ExtractTextResult>` |
+| `extractText` | async | `(input, options?, context?) -> Promise<ExtractTextResult>` |
 | `saveDocument` | async | `(doc, context?) -> Promise<Uint8Array>` |
+
+`budget` is `ParserInputBudgetOptions` (`{ maxBytes?: number }`); on `mergePdfs` it bounds the inputs' combined size. `extractText`'s `input` is raw bytes (`Uint8Array | ArrayBuffer`, the `unpdf`-only path) or a loaded `PDFDocument`, which is serialized with `save()` first.
 
 ### Option types
 
@@ -142,7 +144,10 @@ interface DrawTextOptions {
   lineHeight?: number;  // multiplier, default 1.2
 }
 
-interface EmbedImageOptions { imageBytes: Uint8Array | ArrayBuffer; format: 'png' | 'jpg' }
+interface EmbedImageOptions {
+  imageBytes: Uint8Array | ArrayBuffer; format: 'png' | 'jpg';
+  maxBytes?: number;    // input budget; unbounded when omitted
+}
 
 interface DrawImageOptions {
   image: PDFImage; x: number; y: number;
@@ -150,14 +155,18 @@ interface DrawImageOptions {
   rotate?: number; opacity?: number; // default: 0, 1
 }
 
-interface PageRange { start: number; end: number }  // 0-based, inclusive
+interface PageRange { start: number; end: number }  // 0-based page indices, end inclusive
 
 interface FillFormOptions {
   fields: Record<string, string | boolean | number>;
   flatten?: boolean;  // default false — flatten removes form interactivity
 }
 
-interface ExtractTextOptions { mergePages?: boolean }  // default false
+interface ExtractTextOptions {
+  mergePages?: boolean;   // default false
+  maxBytes?: number;      // input budget; unbounded when omitted
+  maxImageSize?: number;  // pixel ceiling on one decoded image, passed to pdf.js; unbounded when omitted
+}
 
 interface ExtractTextResult { text: string | string[]; totalPages: number }
 // mergePages=true -> single string; false -> string[] per page
@@ -176,6 +185,14 @@ interface SetMetadataOptions {
 ```
 
 Also re-exports from `pdf-lib`: `PDFDocument`, `PDFFont`, `PDFImage`, `PDFPage`, `RGB`.
+
+### Errors
+
+A caller-supplied PDF that cannot be read fails as `ValidationError`; every other failure is `InternalError`. The `reason` names the operation either way (`pdf_load_failed`, `pdf_merge_failed`, `pdf_split_failed`, `pdf_text_extract_failed`), and a missing peer passes through as `ConfigurationError`.
+
+- **`extractText`** classifies by the pdf.js exception name: `InvalidPDFException` (empty body, no PDF structure, a trailer `/Root` that is not a catalog) and `PasswordException` (encrypted; `extractText` takes no password) are `ValidationError`. `UnknownErrorException` and anything else, and a `save()` failure when a `PDFDocument` is passed, are `InternalError`.
+- **`loadDocument`, `mergePdfs`, `splitPdf`** fail as `ValidationError` when `pdf-lib` cannot load a source: no PDF header, encrypted, or no document catalog. pdf-lib loads a catalog-less file without complaint and only breaks on first use, so the parser rejects it at load. A failure after loading is `InternalError`.
+- **`splitPdf`** checks every range against the loaded page count before copying anything: a range that is not integers with `0 <= start <= end < pageCount` fails as `ValidationError` (`pdf_split_failed`), and the message names the range as `ranges[i] { start, end }` with the valid bounds.
 
 ### Usage
 

@@ -4,7 +4,7 @@ description: >
   Stand up a persistent, self-refreshing local mirror of a bulk upstream dataset with the MirrorService (@cyanheads/mcp-ts-core/mirror). Use when a server wraps a large or slow API and should query a synced local index (embedded SQLite + FTS5) instead of paginating the live API per request.
 metadata:
   author: cyanheads
-  version: "1.5"
+  version: "1.6"
   audience: external
   type: reference
 ---
@@ -82,7 +82,7 @@ A store that cannot be opened or initialized (a lock held past `busyTimeoutMs`, 
 - `filters` — `[{ column, op, value }]`, AND-combined, over declared columns. `op` ∈ `eq|ne|gt|gte|lt|lte|in` (`in` takes an array).
 - `sort` — `{ column, direction }` or `'relevance'` (FTS bm25; requires `match`). Defaults to insertion order.
 
-For access paths the generic query can't express — junction tables for index-backed multi-value filtering, denormalized counters, bespoke `bm25` weighting — use the **raw handle**: `const db = await mirror.raw();` then run prepared statements against your own auxiliary tables (declare them via a migration). Add the auxiliary DDL in a `migrations` step; maintain it from your `sync` mapping or SQL triggers.
+For access paths the generic query can't express — junction tables for index-backed multi-value filtering, denormalized counters, bespoke `bm25` weighting — use the **raw handle**: `const db = await mirror.raw();` then run prepared statements against your own auxiliary tables (declare them via a migration). Add the auxiliary DDL in a `migrations` step; maintain it from your `sync` mapping or SQL triggers. SQLite never indexes a foreign-key child column on its own. Give every auxiliary table an index whose leading column is the one your writes match on, usually the parent's primary key. Without it, a per-record rebuild such as `DELETE FROM paper_categories WHERE paper_id = ?`, or an `ON DELETE CASCADE` fired by a tombstone, scans the whole table on every row, and a page that should take milliseconds takes minutes on a million-row junction. Confirm with `EXPLAIN QUERY PLAN`: the plan should say `SEARCH … USING INDEX`, never `SCAN`.
 
 A migration runs identically on first creation and on upgrade: a fresh database runs every migration up to `version` right after the declarative DDL, an existing one runs only those above its stored version. So `up()` must tolerate a database that already has the current declarative shape — `CREATE TABLE IF NOT EXISTS` for auxiliary objects, never an `ALTER` that assumes an older layout of a declared column.
 
@@ -132,6 +132,7 @@ RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > ts
 - [ ] `defineMirror({ name, store, sync })`; the server holds the instance (one per mirror)
 - [ ] `sqliteMirrorStore` spec declares `primaryKey`, `columns`, and (if searching) `fts`
 - [ ] `sync` yields `{ records, tombstones?, cursor?, checkpoint? }` per page; checkpoint is lexicographically monotonic
+- [ ] Every auxiliary table has an index led by the column its writes match on (`EXPLAIN QUERY PLAN` shows no `SCAN`)
 - [ ] Read path gated on `await mirror.ready()` with a live fallback when not ready
 - [ ] `better-sqlite3` added as a peer dependency for Node deployments; mirror disabled on Workers
 - [ ] Refresh wired via `schedulerService` in `setup()`; init runs out-of-band

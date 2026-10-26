@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.26"
+  version: "1.28"
   audience: external
   type: reference
 ---
@@ -19,7 +19,9 @@ Import: `AppConfig`, `config`, `parseConfig`, `resetConfig`, `ConfigSchema` from
 
 ## Core config
 
-Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variables. Uses a lazy proxy — parsing is deferred until the first property read.
+Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variables. Uses a lazy proxy — parsing is deferred until the first property read, and importing the package (any subpath) never reads it, so a bad framework variable surfaces when `createApp()` starts: the `Configuration error — server failed to start` banner lists each failure as the variable, its schema path, and the reason (`  - CANVAS_DEFAULT_ROW_LIMIT (canvas.defaultRowLimit): Too small: expected number to be >=1`), and the process exits 1. The thrown `ConfigurationError` carries the same failures as `data.issues` (`{ envVar, path, message, code }`). `createWorkerHandler()` drops any config cached before its first request and re-parses after the bindings are injected.
+
+**Startup overrides must survive reparsing.** `createApp()` resets core config when applying identity or session-mode options, so an earlier `resetConfig(overrides)` is not a persistent application default. After dotenv loading, seed server defaults into unset environment variables (including blank or whole-value placeholder settings), preserve explicit operator values, then reset the cached config. Validate the resolved `core.config` in `setup()`.
 
 **Priority (highest to lowest):**
 
@@ -103,23 +105,23 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | Env Var | `AppConfig` field | Default | Notes |
 |:--------|:-----------------|:--------|:------|
 | `MCP_TRANSPORT_TYPE` | `mcpTransportType` | `stdio` | `stdio` \| `http` |
-| `MCP_HTTP_PORT` | `mcpHttpPort` | `3010` | Port for HTTP transport |
+| `MCP_HTTP_PORT` | `mcpHttpPort` | `3010` | Port for HTTP transport; integer, 0–65535 |
 | `MCP_HTTP_HOST` | `mcpHttpHost` | `127.0.0.1` | Bind address |
 | `MCP_HTTP_ENDPOINT_PATH` | `mcpHttpEndpointPath` | `/mcp` | HTTP endpoint path |
-| `MCP_HTTP_MAX_BODY_BYTES` | `mcpHttpMaxBodyBytes` | `1048576` (1 MiB) | Max **inbound** JSON-RPC request body; oversized requests get `413` before per-request allocation. Does **not** cap upstream data staged into a canvas or response sizes. `0` disables (defer to runtime/proxy). The only body limit in force — the SDK's own 4 MiB read cap never engages, so a value above 4 MiB holds as set. |
-| `MCP_HTTP_MAX_PORT_RETRIES` | `mcpHttpMaxPortRetries` | `15` | Rungs of the port ladder walked when a bind collides; each rung tries `port + 1`. See [Port binding](#port-binding) |
-| `MCP_HTTP_PORT_RETRY_DELAY_MS` | `mcpHttpPortRetryDelayMs` | `50` | Delay between port retries (ms) |
+| `MCP_HTTP_MAX_BODY_BYTES` | `mcpHttpMaxBodyBytes` | `1048576` (1 MiB) | Integer. Max **inbound** JSON-RPC request body; oversized requests get `413` before per-request allocation. Does **not** cap upstream data staged into a canvas or response sizes. `0` disables (defer to runtime/proxy). The only body limit in force — the SDK's own 4 MiB read cap never engages, so a value above 4 MiB holds as set. |
+| `MCP_HTTP_MAX_PORT_RETRIES` | `mcpHttpMaxPortRetries` | `15` | Integer ≥ 0. Rungs of the port ladder walked when a bind collides; each rung tries `port + 1`. See [Port binding](#port-binding) |
+| `MCP_HTTP_PORT_RETRY_DELAY_MS` | `mcpHttpPortRetryDelayMs` | `50` | Delay between port retries; integer ms, 0–2147483647 |
 | `MCP_SESSION_MODE` | `mcpSessionMode` | `auto` | `stateless` \| `stateful` \| `auto`; `auto` resolves to `stateful`. Under `stateless`, the 2025-era multi-round-trip shim still runs but its capability gate refuses: each request is served by an instance that never processed `initialize`, so the client-capability view is empty and a `ctx.requestInput` round can never be answered — fail-closed, but unconditional, so the tool is unusable for those clients rather than merely guarded. 2026-07-28 clients and stdio are unaffected. Seed it from code with `createApp({ sessionMode })` — see below |
-| `MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS` | `mcpStatefulSessionStaleTimeoutMs` | `1800000` | 30 min; stale session eviction |
+| `MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS` | `mcpStatefulSessionStaleTimeoutMs` | `1800000` | 30 min; stale session eviction; integer ms, 1–2147483647 |
 | `MCP_HTTP_RESUMABILITY` | `mcpHttpResumability` | `true` | SSE stream replay under stateful HTTP. On by default — selecting a session mode is the opt-in. Kill switch only; no effect on stateless serving or the session-less 2026-07-28 era |
 | `MCP_HTTP_RESUMABILITY_MAX_EVENTS` | `mcpHttpResumabilityMaxEvents` | `512` | Events retained per session for replay; oldest evicted first. Lower it on a server whose tools return large results |
 | `MCP_HTTP_RESUMABILITY_TTL_MS` | `mcpHttpResumabilityTtlMs` | `300000` | 5 min; how long a retained event stays replayable |
 | `MCP_ALLOWED_ORIGINS` | `mcpAllowedOrigins` | — | Comma-separated list of browser origins the MCP endpoint accepts; others get `403`. Omitted, CORS is wildcard but only loopback origins pass; `*` accepts any origin (disables DNS-rebinding protection). An accepted origin's preflight also allows `Mcp-Method`, `Mcp-Name`, `Last-Event-ID`, and each tool's `Mcp-Param-<Name>` — see `api-auth` |
 | `MCP_SERVER_RESOURCE_IDENTIFIER` | `mcpServerResourceIdentifier` | — | RFC 8707 resource indicator URL |
 | `MCP_PUBLIC_URL` | `mcpPublicUrl` | — | Public-facing origin for reverse proxies (Cloudflare Tunnel, nginx, ALB) so emitted URLs carry the correct scheme |
-| `MCP_HEARTBEAT_INTERVAL_MS` | `mcpHeartbeatIntervalMs` | `0` (disabled) | Heartbeat ping interval; 0 disables |
-| `MCP_HEARTBEAT_MISS_THRESHOLD` | `mcpHeartbeatMissThreshold` | `3` | Missed heartbeats before session is considered stale |
-| `MCP_GC_PRESSURE_INTERVAL_MS` | `mcpGcPressureIntervalMs` | `0` (disabled) | Bun-only opt-in forced GC loop for HTTP deployments with heap growth |
+| `MCP_HEARTBEAT_INTERVAL_MS` | `mcpHeartbeatIntervalMs` | `0` (disabled) | Heartbeat ping interval; integer ms, 0–2147483647; 0 disables |
+| `MCP_HEARTBEAT_MISS_THRESHOLD` | `mcpHeartbeatMissThreshold` | `3` | Integer ≥ 1. Missed heartbeats before session is considered stale |
+| `MCP_GC_PRESSURE_INTERVAL_MS` | `mcpGcPressureIntervalMs` | `0` (disabled) | Bun-only opt-in forced GC loop for HTTP deployments with heap growth; integer ms, 0–2147483647; 0 disables |
 
 #### Port binding
 
@@ -142,8 +144,8 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `OAUTH_ISSUER_URL` | `oauthIssuerUrl` | — | Required for `oauth` mode |
 | `OAUTH_AUDIENCE` | `oauthAudience` | — | Required for `oauth` mode |
 | `OAUTH_JWKS_URI` | `oauthJwksUri` | — | Override JWKS endpoint (otherwise derived from issuer) |
-| `OAUTH_JWKS_COOLDOWN_MS` | `oauthJwksCooldownMs` | `300000` | 5 min; min time between JWKS refetches |
-| `OAUTH_JWKS_TIMEOUT_MS` | `oauthJwksTimeoutMs` | `5000` | JWKS fetch timeout (ms) |
+| `OAUTH_JWKS_COOLDOWN_MS` | `oauthJwksCooldownMs` | `300000` | 5 min; min time between JWKS refetches; integer ms, 0–2147483647; 0 disables the cooldown |
+| `OAUTH_JWKS_TIMEOUT_MS` | `oauthJwksTimeoutMs` | `5000` | JWKS fetch timeout; integer ms, 1–2147483647 |
 | `DEV_MCP_AUTH_BYPASS` | `devMcpAuthBypass` | `false` | Skip auth in development; blocked in `production` |
 | `MCP_JWT_EXPECTED_ISSUER` | `mcpJwtExpectedIssuer` | — | Optional issuer validation for JWT mode |
 | `MCP_JWT_EXPECTED_AUDIENCE` | `mcpJwtExpectedAudience` | — | Optional audience validation for JWT mode |
@@ -166,17 +168,17 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | Env Var | `AppConfig` field | Default | Notes |
 |:--------|:-----------------|:--------|:------|
 | `CANVAS_PROVIDER_TYPE` | `canvas.providerType` | `none` | `none` \| `duckdb`. Set to `duckdb` to enable `core.canvas`. Fails closed on Cloudflare Workers (DuckDB has no V8-isolate build). |
-| `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` | Per-canvas DuckDB `memory_limit` PRAGMA value, in MB. |
+| `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` | Per-canvas DuckDB `memory_limit` PRAGMA value, in MB; integer ≥ 64. |
 | `CANVAS_EXPORT_PATH` | `canvas.exportRootPath` | `./.canvas-exports` | Sandbox root for path-targeted exports. Absolute paths and `..` traversal are rejected. |
 | `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `os.tmpdir()` | Parent of the provider's private scratch directory: on first use the DuckDB provider creates `mcp-canvas-XXXXXX` inside it (`mkdtemp`, `0700` on POSIX) for each canvas's own DuckDB `temp_directory` and the transient files behind stream exports and `importFrom`; shutdown removes it once the calls still running against it settle. Created if missing, with no ownership or mode check — must not be a directory another local user controls, and on Windows, where the private directory inherits the parent's ACL, must not grant other users access. Never resolves to the process cwd — DuckDB's own cwd-relative `.tmp` default fails on a non-root or read-only container rootfs. |
-| `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `500` | Active canvas cap per tenant; throws `RateLimited` when exceeded. Under `MCP_AUTH_MODE=none` every caller shares one tenant. |
+| `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `500` | Integer ≥ 1. Active canvas cap per tenant; throws `RateLimited` when exceeded. Under `MCP_AUTH_MODE=none` every caller shares one tenant. |
 | `CANVAS_TTL_MS` | `canvas.ttlMs` | `86400000` | Sliding TTL (24 h). Every operation extends the expiry. |
 | `CANVAS_ABSOLUTE_CAP_MS` | `canvas.absoluteCapMs` | `604800000` | Absolute cap from creation (7 d). Sliding window clamps to this. |
-| `CANVAS_SWEEPER_INTERVAL_MS` | `canvas.sweeperIntervalMs` | `60000` | Background sweep interval. Set to `0` to disable. |
-| `CANVAS_DEFAULT_ROW_LIMIT` | `canvas.defaultRowLimit` | `10000` | Default cap on rows materialized into a query response. |
-| `CANVAS_SCHEMA_SNIFF_ROWS` | `canvas.schemaSniffRows` | `100` | Rows to materialize for schema inference when `schema` is omitted. |
+| `CANVAS_SWEEPER_INTERVAL_MS` | `canvas.sweeperIntervalMs` | `60000` | Background sweep interval; integer ms, 0–2147483647. Set to `0` to disable. |
+| `CANVAS_DEFAULT_ROW_LIMIT` | `canvas.defaultRowLimit` | `10000` | Default cap on rows materialized into a query response; a safe integer ≥ 1. |
+| `CANVAS_SCHEMA_SNIFF_ROWS` | `canvas.schemaSniffRows` | `100` | Rows to materialize for schema inference when `schema` is omitted; integer ≥ 1. |
 
-**Platform support:** Linux/macOS/Windows × x64 supported, Linux/macOS arm64 supported. Windows arm64 unsupported (DuckDB upstream). See `api-canvas` skill for the full DataCanvas reference.
+**Platform support:** Linux, macOS and Windows on x64 and arm64 have published prebuilt DuckDB bindings. See `api-canvas` for the DataCanvas API and distribution requirements.
 
 #### Supabase (optional sub-object)
 
@@ -200,8 +202,8 @@ Activated when `SUPABASE_URL` is set.
 | `LLM_DEFAULT_MODEL` | `llmDefaultModel` | `google/gemini-2.5-flash-preview-05-20` | OpenRouter model ID |
 | `LLM_DEFAULT_TEMPERATURE` | `llmDefaultTemperature` | — | Float |
 | `LLM_DEFAULT_TOP_P` | `llmDefaultTopP` | — | Float |
-| `LLM_DEFAULT_MAX_TOKENS` | `llmDefaultMaxTokens` | — | Integer |
-| `LLM_DEFAULT_TOP_K` | `llmDefaultTopK` | — | Integer |
+| `LLM_DEFAULT_MAX_TOKENS` | `llmDefaultMaxTokens` | — | Integer ≥ 1; anything else fails startup |
+| `LLM_DEFAULT_TOP_K` | `llmDefaultTopK` | — | Integer ≥ 0 (`0` considers every token); anything else fails startup |
 | `LLM_DEFAULT_MIN_P` | `llmDefaultMinP` | — | Float |
 
 ---
@@ -216,7 +218,7 @@ Activated when `SUPABASE_URL` is set.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | — | OTLP/HTTP base URL; resolves `tracesEndpoint` to `<base>/v1/traces` and `metricsEndpoint` to `<base>/v1/metrics` (path prefix kept) when the signal-specific variable is unset |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `openTelemetry.tracesEndpoint` | — | OTLP traces endpoint URL; overrides the base, used as-is |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `openTelemetry.metricsEndpoint` | — | OTLP metrics endpoint URL; overrides the base, used as-is |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | `openTelemetry.logsEndpoint` | — | OTLP logs endpoint URL; the only switch for log record export, never derived from the base. Needs the optional peers `@opentelemetry/sdk-logs`, `@opentelemetry/exporter-logs-otlp-http`, `@opentelemetry/api-logs` |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | `openTelemetry.logsEndpoint` | — | OTLP logs endpoint URL; the only switch for log record export, never derived from the base. Needs the optional peers `@opentelemetry/sdk-logs` and `@opentelemetry/exporter-logs-otlp-http` |
 | `OTEL_TRACES_SAMPLER_ARG` | `openTelemetry.samplingRatio` | `1.0` | 0–1; fraction of traces to export |
 | `OTEL_LOG_LEVEL` | `openTelemetry.logLevel` | `INFO` | OTel SDK internal log level: `NONE` \| `ERROR` \| `WARN` \| `INFO` \| `DEBUG` \| `VERBOSE` \| `ALL`; aliases `warning`→`WARN`, `err`→`ERROR`, `information`→`INFO`. Diag output goes to stderr at every level |
 
@@ -236,7 +238,7 @@ Activated when `SPEECH_TTS_ENABLED` or `SPEECH_STT_ENABLED` is set.
 | `SPEECH_TTS_BASE_URL` | `speech.tts.baseUrl` | — | Override provider base URL |
 | `SPEECH_TTS_DEFAULT_VOICE_ID` | `speech.tts.defaultVoiceId` | — | Default voice identifier |
 | `SPEECH_TTS_DEFAULT_MODEL_ID` | `speech.tts.defaultModelId` | — | Default model identifier |
-| `SPEECH_TTS_TIMEOUT` | `speech.tts.timeout` | — | Request timeout (ms) |
+| `SPEECH_TTS_TIMEOUT` | `speech.tts.timeout` | — | Request timeout; integer ms, 1–2147483647 |
 
 #### STT (Speech-to-Text)
 
@@ -247,7 +249,7 @@ Activated when `SPEECH_TTS_ENABLED` or `SPEECH_STT_ENABLED` is set.
 | `SPEECH_STT_API_KEY` | `speech.stt.apiKey` | — | Provider API key |
 | `SPEECH_STT_BASE_URL` | `speech.stt.baseUrl` | — | Override provider base URL |
 | `SPEECH_STT_DEFAULT_MODEL_ID` | `speech.stt.defaultModelId` | — | Default model identifier |
-| `SPEECH_STT_TIMEOUT` | `speech.stt.timeout` | — | Request timeout (ms) |
+| `SPEECH_STT_TIMEOUT` | `speech.stt.timeout` | — | Request timeout; integer ms, 1–2147483647 |
 
 ---
 
@@ -264,7 +266,7 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
   apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
+  maxResults: z.coerce.number().int().min(1).max(500).default(100),
   verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
 });
 
@@ -293,6 +295,8 @@ setup(core) {
 
 **Env booleans — use `z.stringbool()`, never `z.coerce.boolean()`.** `z.coerce.boolean()` runs `Boolean(value)`, so `"false"`, `"0"`, and `"no"` all coerce to `true` — the flag becomes impossible to disable through the environment except by omitting it entirely. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` (case-insensitive) and rejects anything else, so `MY_VERBOSE_LOGGING=false` actually disables and a typo fails loudly at startup instead of silently coercing. An empty string is not in that accepted set — `z.stringbool()` rejects `''` with `Invalid option`. What makes a blank `.env` line take the default is the normalization layer described under **Unset means unset** below, not the schema type.
 
+**Env numbers — bound each one to the range its consumer accepts.** `z.coerce.number()` alone fails startup only on a non-number (`abc`); `-5`, `0`, `25.5`, and `4294967296` all start the server. A value that feeds a timer then fails every call that builds it: `AbortSignal.timeout()` throws on a negative value (`RangeError` on Node, `TypeError` on Bun), Node also rejects a fractional one or one past 2^32 - 1, `0` times out before any request goes out, and `setTimeout` past 2^31 - 1 ms fires after 1 ms. Give every timer `z.coerce.number().int().min(1).max(2_147_483_647)` (one shared schema when several variables are timers) and every count or cap `.int()` with the `min`/`max` the code needs, so an out-of-range value stops startup with the banner naming the variable.
+
 **Unset means unset.** `parseEnvConfig` and the framework's own config both treat an empty string and a whole-value `${…}` placeholder — what an MCPB or plugin host forwards when a user leaves an option blank and nothing substitutes it — as the variable being absent: an optional field stays `undefined`, a defaulted field takes its default, and a required field fails as missing rather than as a format error against the literal text. A value that merely contains `${…}` is kept. No per-field `z.preprocess` guard is needed for either case.
 
 **Why `parseEnvConfig`?** It maps Zod schema paths to env var names so validation errors name the actual variable at fault. A missing `MY_API_KEY` produces:
@@ -302,7 +306,7 @@ Server config validation failed:
   - MY_API_KEY (apiKey): Invalid input: expected string, received undefined
 ```
 
-Instead of a raw `ZodError` dump at startup. The framework catches the resulting `ConfigurationError` and prints a clean banner (full stack behind `DEBUG=true`).
+Instead of a raw `ZodError` dump at startup. The framework catches the resulting `ConfigurationError` and prints a clean banner (full stack behind `DEBUG=true`). A failure inside a field names the variable that fed it, with the full schema path in parentheses — an array element a `.transform()`/`.pipe()` produced reads `MY_ENDPOINTS (endpoints.0.url)`, a property of an object parsed from one JSON variable reads `MY_DB_JSON (db.port)`. `data.issues[].envVar` carries the same variable.
 
 Direct `ServerConfigSchema.parse(...)` still works — the framework intercepts raw `ZodError` thrown from `setup()` and converts it — but error messages won't know about env var names, so they show the Zod path (`apiKey`) instead of the variable name (`MY_API_KEY`). No normalization runs on that path either, so a blank `MY_FLAG=` arrives as `''` and fails validation. `normalizeEnv` is exported from `/config` for exactly that case: normalize the values first, then parse.
 

@@ -4,7 +4,7 @@ description: >
   Investigate, adopt, and verify dependency updates — with special handling for `@cyanheads/mcp-ts-core`. Captures what changed, understands why, cross-references against the codebase, adopts framework improvements, syncs project skills, and runs final checks. Supports two entry modes: run the full flow end-to-end, or review updates you already applied.
 metadata:
   author: cyanheads
-  version: "2.10"
+  version: "2.11"
   audience: external
   type: workflow
 ---
@@ -78,7 +78,7 @@ Scan specifically for:
 | Config changes | New env vars, renamed keys, changed defaults |
 | Linter rules | New definition-lint rules that may now flag existing tools/resources |
 | New or materially-changed skills | Note new skills or workflow changes (renamed steps, new checklist items) worth surfacing at end-of-run. Don't auto-invoke — some skills (e.g. `security-pass`) are user-triggered. The per-version changelog entries (e.g. one calling out `security-pass` v1.0) name what changed. |
-| New template-scaffolded files | Compare `templates/` in the package against the project root. Files that `init` would create for a new project but don't exist in this project are adoption candidates — create them with project-specific values (version, name, description; user-supplied variables from `server.json` go into `userConfig` + `${user_config.<option>}` for `.claude-plugin/` and into `env_vars` for `.codex-plugin/mcp.json`, never as `""` in `env`). Examples: `manifest.json`, `.mcpbignore`, `.codex-plugin/`, `.claude-plugin/`. Skip files the project has intentionally opted out of (documented in CLAUDE.md/AGENTS.md or a code comment). |
+| New template-scaffolded files | Compare `templates/` in the package against the project root. Files that `init` would create for a new project but don't exist in this project are adoption candidates — create them with project-specific values (version, name, description; user-supplied variables from `server.json` go into `userConfig` + `${user_config.<option>}` for `.claude-plugin/` and into `env_vars` for `.codex-plugin/mcp.json`, never as `""` in `env`). Examples: `manifest.json`, `.mcpbignore`, `.codex-plugin/`, `.claude-plugin/`, `plugin.json` + `mcp.json`. The Agent Plugins root pair comes from `templates/plugin.json` and `templates/mcp.json`; `env_vars` never moves into root `mcp.json`, and both overlays stay, with the `.codex-plugin/plugin.json` `"mcpServers": "./.codex-plugin/mcp.json"` pointer — Codex ≥ 0.150.0 forwards `env_vars` to the root server only through it (0.146–0.149 load the pair but not the overlay's `env_vars`). Rename a root `mcp.json` that lacks `$schema` (a client-config sample) first: once root `plugin.json` exists, Codex disables MCP for the plugin when that file breaks the schema. Skip the pair when the unscoped package name breaks Agent Plugins §5.5 (uppercase letters or `_`). Skip files the project has intentionally opted out of (documented in CLAUDE.md/AGENTS.md or a code comment). |
 | Changelog `agent-notes` | Read `agent-notes` frontmatter from each new per-version changelog file — these carry release-specific adoption instructions for downstream consumers (new files to create, fields to populate, one-time migration steps). Apply them alongside other adoption work in Step 6. |
 
 Cross-reference each finding against the server's code. Collect adoption opportunities for Step 6.
@@ -89,14 +89,14 @@ Read the upstream template end-to-end and compare it against the current `CLAUDE
 
 ### 5. Sync project skills and scripts
 
-Skills flow in two hops: package → project `framework-skills/` → agent directories. Framework scripts flow in one: package → project `scripts/`. Both drift silently unless resynced.
+Skills flow in two hops: package → project `framework-skills/` → agent directories. Framework scripts flow in one: package → project `scripts/`. Both drift silently unless resynced. Root `skills/` — the skills the server publishes to its users' agents (`add-skill`) — is the author's: no phase below creates, modifies, or copies it.
 
 **Phase A — Package → Project `framework-skills/`**
 
 1. **Package** — `node_modules/@cyanheads/mcp-ts-core/framework-skills/` (canonical source)
 2. **Project** — `framework-skills/` at project root (working copy; may contain local overrides or server-specific skills)
 
-**One-time migration from `skills/` (framework 0.13.0).** Earlier releases scaffolded this tree at `skills/`. Claude Code and Codex auto-load a plugin's root `skills/`, so a server shipping `.claude-plugin/` or `.codex-plugin/` handed its development skills to every agent that installed it. If the project has `skills/` and no `framework-skills/`: `git mv skills framework-skills`, then update every path reference — `CLAUDE.md`/`AGENTS.md`, `.mcpbignore` (`/skills/` → `/framework-skills/`), `.github/CONTRIBUTING.md` — regenerate `docs/tree.md`, and continue below. `bun run devcheck` reports an unmigrated tree until this is done. The agent mirrors (`.claude/skills/`, `.agents/skills/`) keep their names; plugin hosts do not scan them.
+**One-time migration from `skills/` (framework 0.13.0).** Earlier releases scaffolded this tree at `skills/`. Claude Code and Codex auto-load a plugin's root `skills/`, so a server shipping `.claude-plugin/` or `.codex-plugin/` handed its development skills to every agent that installed it. The migration applies only when root `skills/` holds framework skills — `SKILL.md` frontmatter carrying `metadata.audience: external`; a `skills/` without them is the server's published tree and stays put. If the project has such a `skills/` and no `framework-skills/`: `git mv skills framework-skills`, then update every path reference — `CLAUDE.md`/`AGENTS.md`, `.mcpbignore` (`/skills/` → `/framework-skills/`), `.github/CONTRIBUTING.md` — regenerate `docs/tree.md`, and continue below. `bun run devcheck` reports an unmigrated tree until this is done. The agent mirrors (`.claude/skills/`, `.agents/skills/`) keep their names; plugin hosts do not scan them.
 
 Procedure:
 

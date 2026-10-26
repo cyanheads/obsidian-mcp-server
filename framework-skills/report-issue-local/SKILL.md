@@ -4,7 +4,7 @@ description: >
   File a bug or feature request against this MCP server's own repo. Use for server-specific issues — tool logic, service integrations, config problems, or domain bugs that aren't caused by the framework.
 metadata:
   author: cyanheads
-  version: "1.12"
+  version: "1.13"
   audience: external
   type: workflow
 ---
@@ -78,7 +78,7 @@ gh issue create --template "Bug Report" --web
 
 ### CLI (non-interactive)
 
-Structure the `--body` to match the template's form fields. Description is two or three sentences; the reproduction is the exact input and the observed output, nothing else. Add `### Additional context` only when it changes the fix (a workaround, a related issue, the one log line that matters) — omitted by default.
+Structure the `--body` to match the template's form fields. `Environment` is the form's one-row table: the server version from `package.json`, the installed mcp-ts-core version from `node_modules/@cyanheads/mcp-ts-core/package.json` (not the `^` range), the runtime with its version (`bun --version`), the transport, and the OS. Description is two or three sentences; the reproduction is the exact input and the observed output, nothing else. Add `### Additional context` only when it changes the fix (a workaround, a related issue, the one log line that matters) — omitted by default.
 
 ````bash
 gh issue create \
@@ -86,25 +86,11 @@ gh issue create \
   --label "bug" \
   --assignee "@me" \
   --body "$(cat <<'ISSUE'
-### Server version
+### Environment
 
-<package.json version>
-
-### mcp-ts-core version
-
-<installed version from node_modules/@cyanheads/mcp-ts-core/package.json — not the ^ range>
-
-### Runtime
-
-Bun
-
-### Runtime version
-
-<bun --version>
-
-### Transport
-
-stdio
+| Server | mcp-ts-core | Runtime | Transport | OS |
+|---|---|---|---|---|
+| 0.4.2 | 0.13.16 | Bun 1.4.4 | stdio | macOS 15.x |
 
 ### Description
 
@@ -208,7 +194,7 @@ gh issue create --template "Feature Request" --web
 
 ### CLI (non-interactive)
 
-The first three headings are the Feature Request form's own fields, in its order — `Use case` and `Proposed behavior` are required by the form, so a body without them does not satisfy it. `Out of scope` is one or two lines. Nothing else by default: a `Scope`, `Flow`, `Design / Tradeoffs`, or `Depends on` block is added only when the reader cannot act without it, and each stays to a few lines.
+Read `.github/ISSUE_TEMPLATE/feature_request.yml` and match its field labels and order. The default form requires `Use case` and `Proposed behavior`; `Alternatives considered` and `Additional context` are optional. Include an optional section only when it changes what the reader needs to do. Scope boundaries belong in `Additional context` when necessary, not in a mandatory extra heading.
 
 ````bash
 gh issue create \
@@ -234,9 +220,9 @@ What you want the server to do, then the new behavior or surface. For tool/resou
 
 What you tried or evaluated instead, and why it didn't fit.
 
-### Out of scope
+### Additional context
 
-- Adjacent work that belongs in a separate issue
+Only context needed to act, such as a relevant dependency or a scope boundary. Omit this section when it adds nothing.
 ISSUE
 )"
 ````
@@ -280,6 +266,6 @@ gh issue close <number> --reason completed --comment "Fixed in <commit or PR>"
 - [ ] All secrets, credentials, and tokens redacted
 - [ ] Title follows `type(scope): description` format
 - [ ] Primary label assigned (`bug` / `enhancement` / `documentation`)
-- [ ] If bug: version, runtime, repro steps, actual vs expected behavior included
-- [ ] If feature: `Use case` and `Proposed behavior` present (the form's required fields), `Alternatives considered` third; Out of scope defined
+- [ ] If bug: Environment table filled in, repro steps, actual vs expected behavior included
+- [ ] If feature: the repository form's required fields are present; optional sections follow its labels and order and add necessary context
 - [ ] Inside the budget — ~150 words for a bug, ~250 for a feature, code and logs excluded — and every section past the form's fields earns its place

@@ -4,7 +4,7 @@ description: >
   Authentication, authorization, and multi-tenancy patterns for `@cyanheads/mcp-ts-core`. Use when implementing auth scopes on tools/resources, configuring auth modes (none/jwt/oauth), working with JWT/OAuth env vars, or understanding how tenantId flows through ctx.state.
 metadata:
   author: cyanheads
-  version: "1.6"
+  version: "1.7"
   audience: external
   type: reference
 ---
@@ -148,7 +148,7 @@ A `WARNING`-level log is emitted at startup whenever the flag is active so opera
 | `DELETE /mcp` | Yes (when auth enabled) — session termination |
 | `OPTIONS /mcp` | No (handled by CORS middleware before auth) |
 
-**CORS:** Set `MCP_ALLOWED_ORIGINS` to a comma-separated list of allowed origins, or `*` for open access. Left unset, only loopback browser origins reach the endpoint. The preflight for an accepted origin allows every request header the server reads: `Content-Type`, `Authorization`, `Mcp-Session-Id`, `MCP-Protocol-Version`, the 2026-07-28 `Mcp-Method` and `Mcp-Name`, `Last-Event-ID` (SSE resume), and one `Mcp-Param-<Name>` per `headerParam` designation on a registered tool — derived from the tool definitions, nothing to configure. Any other origin gets the first four only, so it learns no designation names.
+**CORS:** Set `MCP_ALLOWED_ORIGINS` to a comma-separated list of allowed origins, or `*` for open access. Left unset, only loopback browser origins reach the endpoint. The preflight for an accepted origin allows every request header the server reads: `Content-Type`, `Authorization`, `Mcp-Session-Id`, `MCP-Protocol-Version`, the 2026-07-28 `Mcp-Method` and `Mcp-Name`, `Last-Event-ID` (SSE resume), and one `Mcp-Param-<Name>` per `headerParam` designation on a registered tool — derived from the tool definitions, nothing to configure. Any other origin gets the first four only, so it learns no designation names. Every response exposes `Mcp-Session-Id`, `WWW-Authenticate`, and `Retry-After`, so a browser client can read its session ID, a 401's RFC 9728 `resource_metadata` challenge, and when a retryable `503` (draining, session capacity) may be retried.
 
 **Stdio mode:** No HTTP auth layer. Authorization is handled entirely by the host process.
 

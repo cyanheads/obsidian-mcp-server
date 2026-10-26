@@ -10,7 +10,7 @@ body:
         **Secondary labels.** `enhancement` is applied automatically — also add one or more of the following in the sidebar if they apply:
         - `performance` — improves memory, CPU, latency, or resource usage
         - `security` — hardens the security posture
-        - `breaking-change` — will break public API; requires a major bump
+        - `breaking-change` — will break public API or an existing tool contract
         - `surplus-token-idea` — worth exploring when token budget allows
 
   - type: textarea

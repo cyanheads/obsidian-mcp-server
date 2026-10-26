@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.8"
+  version: "2.11"
   audience: external
   type: reference
 ---
@@ -13,7 +13,7 @@ metadata:
 
 `DataCanvas` is a primitive for **storage stashes, canvas computes**. The existing `IStorageProvider` is a key/value abstraction — it can stash blobs but exposes no analytical surface. `DataCanvas` is the analytical surface: register tabular data from upstream APIs, run SQL across multiple registered tables, and export results as CSV/Parquet/JSON.
 
-**Tier 3** — `@duckdb/node-api` is an optional peer dependency (`bun add @duckdb/node-api`). Servers that don't enable canvas pay zero install cost. Lazy-loaded on first use.
+**Tier 3** — `@duckdb/node-api` is an optional peer dependency (`bun add @duckdb/node-api`; 1.5.5-r.1 and later 1.5.x, or 2.0.0-r.1 and later 2.x). Servers that don't enable canvas pay zero install cost. Lazy-loaded on first use.
 
 **Disabled by default.** Set `CANVAS_PROVIDER_TYPE=duckdb` to enable. Otherwise `core.canvas` is `undefined`.
 
@@ -120,7 +120,7 @@ The sweeper runs as an `unref`'d `setInterval` — does not keep the event loop 
 
 On first use the DuckDB provider creates one private directory, `mcp-canvas-XXXXXX`, under `CANVAS_TEMP_PATH` (the OS temp directory when unset) with `mkdtemp` — mode `0700` on POSIX; on Windows it inherits the parent's ACL, so there the parent must not grant other users access. All scratch I/O stays inside it:
 
-- **Spills.** Each canvas gets its own DuckDB `temp_directory` there. DuckDB names spill files by block size alone, so canvases sharing one directory would overwrite each other's evicted blocks once two of them spill past `memory_limit` at the same time.
+- **Spills.** Each canvas gets its own DuckDB `temp_directory` there. DuckDB v1.5 names spill files by block size alone, so canvases sharing one directory would overwrite each other's evicted blocks once two of them spill past `memory_limit` at the same time.
 - **Staging.** Stream exports and `importFrom` write their transient files directly in it, under `crypto.randomUUID()` names, and unlink them once consumed. The directory's mode is the boundary, not the name.
 
 Dropping or expiring a canvas removes its spill directory once the calls still running on it settle, without waiting for them, since those calls can still be reading back the blocks it spilled. `shutdown()` removes the whole private directory once the calls still running against it settle, and does not wait for them: until then the directory stays in place and private, so no other local user can re-create its name and receive what those calls still write. A canvas whose creation straddles the shutdown is refused with `ServiceUnavailable` (-32000). A provider used again afterwards makes a fresh directory. After a crash or `SIGKILL` the directory stays behind, still private, and the next start does not sweep it — remove stale `mcp-canvas-*` directories by hand. A configured `CANVAS_TEMP_PATH` is created if missing and gets no ownership or mode check, so it must not be a directory another local user controls. When the private directory cannot be created, canvas creation fails with `ConfigurationError` (-32008) and the next attempt retries.
@@ -177,6 +177,8 @@ await instance.registerTable('recent_fetch', rows, { ttlMs: 30 * 60 * 1000 });
 - Tables registered without `ttlMs` inherit the canvas lifecycle exactly as before (no change to default behavior).
 - `instance.describe()` surfaces `TableInfo.expiresAt` (ISO 8601) for tables that have a per-table TTL; absent otherwise.
 
+**Replacement is atomic.** Registering an existing name replaces the table in one transaction: other calls read the previous table until the new one commits, and a source that throws, a value that fails conversion, or an abort rolls back to the previous table and its TTL — or, on a first registration, to no table. A sync source the call stops reading early is closed, so its `finally` runs. Two registrations of one name at once fail the second with DuckDB's write-write conflict.
+
 ### `instance.query(sql, options?)`
 
 Run SQL across registered tables. Returns at most `rowLimit` rows (default 10 000). When the result exceeds `rowLimit`, the response carries `truncated: true` and `rowCount` reflects the number of materialized rows (not the full result set). For full result sets and exact counts, pass `registerAs` — the result is materialized as a new canvas table; the response carries a `preview` slice and the exact `rowCount`.
@@ -219,7 +221,7 @@ const chained = await instance.query(
 1. Text-level deny-list — pre-parse scan for file/HTTP-reading table functions (`read_csv*`, `read_json*`, `read_parquet*`, `read_duckdb`, `read_text`, `read_blob`, `glob`, `iceberg_scan`, `delta_scan`, `postgres_scan`, `mysql_scan`, `sqlite_scan`, plus pre-staged spatial ones).
 2. Statement count (must be 1) via `extractStatements`.
 3. Statement type (must be `SELECT`) via `prepared.statementType`.
-4. Parse-tree check — DuckDB's own parse of the statement. A call to a function that reads an engine setting (`current_setting`, `current_schema`, `current_schemas`, `in_search_path`), runs SQL or names a table from a string (`query`, `query_table`), or reads a file (the layer-1 list) is rejected as `denied_function`; a table reference that names a file, as `sql_read_only`. The one exception is `query()` over a single plain string literal: that SQL is gated as its own single SELECT statement — the catalog layer and layers 1–4 again, recursively — up to 4 `query()` levels deep, and layer 5 covers its plan inside the outer statement's. Any other `query()` argument, and nesting past 4 levels, is `denied_function`.
+4. Parse-tree check — DuckDB's own parse of the statement. A call to a function that reads an engine setting (`current_setting`, `current_schema`, `current_schemas`, `in_search_path`), runs SQL or names a table from a string (`query`, `query_table`), or reads a file (the layer-1 list) is rejected as `denied_function`. So is an unqualified `current_schema` written without parentheses, quoted or not: DuckDB binds it to the function whenever no column of that name is in scope, and the parse tree cannot tell the two apart, so a staged column named `current_schema` is read qualified (`c.current_schema`). That refusal says so in its message and carries its own recovery hint — qualify the column with its table, or remove the reference — in place of the remove-the-function hint every other `denied_function` refusal carries. It is the one denied name DuckDB binds bare; columns named after the others (`query`, `current_setting`) read unqualified. A table reference that names a file is rejected as `sql_read_only`. The one exception is `query()` over a single plain string literal: that SQL is gated as its own single SELECT statement — the catalog layer and layers 1–4 again, recursively — up to 4 `query()` levels deep, and layer 5 covers its plan inside the outer statement's. Any other `query()` argument, and nesting past 4 levels, is `denied_function`.
 5. EXPLAIN-plan walk against an allowlisted set of physical operators + a denied-function rescan over plan metadata strings.
 
 Any layer's rejection throws `ValidationError` with a structured `data.reason`. File-reading scans (`READ_CSV`, `READ_PARQUET`, `READ_JSON`), DDL (`CREATE_*`, `DROP_*`, `ALTER_*`), DML (`INSERT`, `UPDATE`, `DELETE`), exports (`COPY_TO_FILE`), and utility statements (`PRAGMA`, `ATTACH`, `LOAD`, `SET`) are all rejected.
@@ -250,7 +252,7 @@ const imported = await target.importFrom(source.canvasId, 'orders', { asName: 'o
 // { tableName: 'orders_copy', rowCount: 2, columns: [...] }
 ```
 
-Idempotent on re-import (drop + create on the target). `asName` defaults to `sourceTableName`. Throws `validationError({ reason: 'import_same_canvas' })` if source and target are the same canvas — use `query({ registerAs })` to materialize within a single canvas. Throws `notFound({ reason: 'missing_table' })` if the source table is missing; `validationError({ reason: 'import_view_clash' })` if the target name collides with an existing view.
+Idempotent on re-import: the target table is replaced in one transaction, and a copy that fails or is cancelled leaves the previous one in place. `asName` defaults to `sourceTableName`. Throws `validationError({ reason: 'import_same_canvas' })` if source and target are the same canvas — use `query({ registerAs })` to materialize within a single canvas. Throws `notFound({ reason: 'missing_table' })` if the source table is missing; `validationError({ reason: 'import_view_clash' })` if the target name collides with an existing view.
 
 ### `instance.export(tableName, target, options?)`
 
@@ -312,7 +314,7 @@ If your tool surfaces row data via `structuredContent`, the JSON-safe shape flow
 | Env Var | `AppConfig` field | Default |
 |:--------|:-----------------|:--------|
 | `CANVAS_PROVIDER_TYPE` | `canvas.providerType` | `none` (also: `duckdb`) |
-| `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` |
+| `CANVAS_DEFAULT_MEMORY_LIMIT_MB` | `canvas.defaultMemoryLimitMb` | `1024` — also caps each engine at one thread per 64 MB, below the count DuckDB detects (cores, or a container's CPU quota) |
 | `CANVAS_EXPORT_PATH` | `canvas.exportRootPath` | `./.canvas-exports` |
 | `CANVAS_TEMP_PATH` | `canvas.tempRootPath` | `os.tmpdir()` — parent of the private [scratch directory](#scratch-directory) |
 | `CANVAS_MAX_CANVASES_PER_TENANT` | `canvas.maxCanvasesPerTenant` | `500` |
@@ -531,7 +533,7 @@ Pass `schema` explicitly whenever a column's type can't be read off the first ro
 
 ### Cancellation and partial state
 
-`signal.abort()` throws on the next iteration of the preview drain or the spill drain. If abort fires after `canvas.registerTable` has begun appending rows, the helper best-effort calls `canvas.drop(tableName)` before the throw propagates — the contract is "partial drain is not registered."
+`signal.abort()` throws on the next iteration of the preview drain or the spill drain. A partial drain is never registered: `registerTable` rolls an abort or failure back, so the canvas is left as it was, a table of the same name included. Every early exit — the `maxRows` cap, an abort, a failed registration — closes the source, so a generator's `finally` (closing a paginated stream, releasing a cursor) runs; a source that ran out or threw is not closed again.
 
 ### When *not* to use spillover
 
@@ -565,8 +567,7 @@ Pass `schema` explicitly whenever a column's type can't be read off the first ro
 |:---------|:-------|
 | Linux x64 / arm64 | Supported |
 | macOS x64 / arm64 | Supported |
-| Windows x64 | Supported |
-| Windows arm64 | **Not supported** (DuckDB upstream limitation) |
+| Windows x64 / arm64 | Supported (`@duckdb/node-api` 1.5.6-r.1 and 2.0.0-r.1 publish prebuilt bindings for both) |
 | Cloudflare Workers | **Not supported** — fail-closed at init time |
 
 ---

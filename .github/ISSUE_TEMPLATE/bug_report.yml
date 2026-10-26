@@ -18,59 +18,17 @@ body:
         - `breaking-change` — fix will break public API
         - `surplus-token-idea` — worth exploring when token budget allows
 
-  - type: input
-    id: version
+  - type: textarea
+    id: environment
     attributes:
-      label: Server version
-      placeholder: "3.5.2"
+      label: Environment
+      description: "Replace the second row. Server: the version from package.json. mcp-ts-core: the installed version, not the ^ range. Runtime: Bun, Node.js, or Cloudflare Workers, with its version. Transport: stdio, HTTP, or Worker. OS is optional."
+      value: |
+        | Server | mcp-ts-core | Runtime | Transport | OS |
+        |---|---|---|---|---|
+        | 3.x.y | 0.x.y | Bun 1.4.x | stdio | macOS 15.x |
     validations:
       required: true
-
-  - type: input
-    id: framework-version
-    attributes:
-      label: mcp-ts-core version
-      placeholder: "0.x.y"
-    validations:
-      required: true
-
-  - type: dropdown
-    id: runtime
-    attributes:
-      label: Runtime
-      options:
-        - Bun
-        - Node.js
-        - Cloudflare Workers
-    validations:
-      required: true
-
-  - type: input
-    id: runtime-version
-    attributes:
-      label: Runtime version
-      placeholder: "Bun 1.4.x / Node 24.x"
-    validations:
-      required: true
-
-  - type: dropdown
-    id: transport
-    attributes:
-      label: Transport
-      options:
-        - stdio
-        - HTTP (Streamable HTTP)
-        - Worker (Cloudflare)
-    validations:
-      required: true
-
-  - type: input
-    id: os
-    attributes:
-      label: OS
-      placeholder: "macOS 15.x / Ubuntu 24.04 / etc."
-    validations:
-      required: false
 
   - type: textarea
     id: description

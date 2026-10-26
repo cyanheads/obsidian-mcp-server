@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.34"
+  version: "2.37"
   audience: external
   type: reference
 ---
@@ -42,6 +42,7 @@ For shape selection (Workflow, Instruction, or Reference variants — standard s
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 
 export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
   title: '{{TOOL_TITLE}}',
@@ -105,7 +106,10 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
     ctx.enrich.echo(input.query);
     ctx.enrich.total(items.length);
     if (items.length === 0) {
-      ctx.enrich.notice(`No items matched "${input.query}". Try broader terms or check the spelling.`);
+      // A notice is authored Markdown, so the caller's text inside it is escaped.
+      ctx.enrich.notice(
+        `No items matched "${escapeMarkdownInline(input.query)}". Try broader terms or check the spelling.`,
+      );
     }
     return { items };
   },
@@ -118,10 +122,13 @@ export const {{TOOL_EXPORT}} = tool('{{tool_name}}', {
     const lines: string[] = [];
     // Render each item with all relevant fields — not just a count or title.
     // A thin one-liner (e.g., "Found 5 items") leaves the model blind to the data.
+    // Upstream text goes through escapeMarkdownInline so it reads back as written.
     for (const item of result.items) {
-      lines.push(`## ${item.name}`);
-      lines.push(`**ID:** ${item.id} | **Status:** ${item.status}`);
-      if (item.description) lines.push(item.description);
+      lines.push(`## ${escapeMarkdownInline(item.name)}`);
+      lines.push(
+        `**ID:** ${escapeMarkdownInline(item.id)} | **Status:** ${escapeMarkdownInline(item.status)}`,
+      );
+      if (item.description) lines.push(escapeMarkdownInline(item.description));
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },
@@ -378,7 +385,7 @@ The emitted property carries `"x-mcp-header": "Region"` and nothing else about t
 
 **It mirrors, it does not relocate.** When the body carries a value for a designated property, the matching `Mcp-Param-<Name>` header MUST be present and decode to an equal value; the SDK cross-checks the pair before dispatch and rejects a disagreement with `-32020` (`HeaderMismatch`, HTTP `400`). Absent or `null` in the body means no header is expected. **Your handler still reads the argument from `input`** — there is nothing new to do in the handler body. Browser clients need nothing extra either: the HTTP transport's CORS preflight allows `Mcp-Param-<Name>` for every designation on a registered tool, for each origin `MCP_ALLOWED_ORIGINS` accepts.
 
-**Where a designation is legal.** The property must be primitive-typed (`string`, `integer`, `number`, `boolean`) and statically reachable through a chain of `properties` keys. Top-level and nested `z.object()` fields qualify. These do not:
+**Where a designation is legal.** The property must be primitive-typed (`string`, `integer`, `boolean`; a `z.number()` emits `number`, which the spec excludes, so use `z.int()`) and statically reachable through a chain of `properties` keys. Top-level and nested `z.object()` fields qualify. These do not:
 
 | Placement | Why |
 |:--|:--|
@@ -425,14 +432,16 @@ async handler(input, ctx) {
   const res = await search(input.query, input.limit);
   ctx.enrich.echo(res.parsed);   // → structuredContent.effectiveQuery + "Query: …" trailer
   ctx.enrich.total(res.total);   // → structuredContent.totalCount + "N total" trailer
-  if (res.items.length === 0) ctx.enrich.notice(`No matches for "${input.query}".`);
+  if (res.items.length === 0) {
+    ctx.enrich.notice(`No matches for "${escapeMarkdownInline(input.query)}".`); // authored Markdown
+  }
   return { items: res.items };   // enrichment never rides in the domain return
 },
 ```
 
 A *required* enrichment field the handler never populates fails the effective-output parse — surfacing the bug rather than dropping it silently. Enrichment keys must be disjoint from `output` keys (lint-enforced). The sections below are applications of this rule.
 
-**Trailer rendering is a per-field call.** Each field's `content[]` trailer line resolves as: its kind-tag if set (`notice`/`total`/`echo`/`delta`), else the definition's per-field `enrichmentTrailer.render`/`label`, else the generic `**key:** value` (objects/arrays `JSON.stringify`'d). A structured (object/array) field with no `render` ships as a one-line JSON blob — the `enrichment-trailer-render` lint rule errors on that. Give it a renderer, or a `label` to relabel a scalar key:
+**Trailer rendering is a per-field call.** Each field's `content[]` trailer line resolves as: the definition's per-field `enrichmentTrailer.render` if set, else its kind-tag (`notice`/`total`/`echo`/`delta`), else the generic `**key:** value` with `label` replacing the key (objects/arrays `JSON.stringify`'d). A `render` therefore overrides a kind-tagged field's default line (a notice that needs escaping in `content[]` but not in `structuredContent`), while a `label` relabels only the generic and `delta` lines. A structured (object/array) field with no `render` ships as a one-line JSON blob — the `enrichment-trailer-render` lint rule errors on that. Give it a renderer, or a `label` to relabel a scalar key:
 
 ```typescript
 enrichment: {
@@ -441,11 +450,13 @@ enrichment: {
 },
 enrichmentTrailer: {
   totalFound: { label: 'Total Found' },                                  // → "**Total Found:** 2990"
-  appliedFilters: { render: (f) => `### Filters\n- Range: ${f.dateRange}` }, // markdown, not JSON
+  appliedFilters: { render: (f) => `### Filters\n- Range: ${escapeMarkdownInline(f.dateRange)}` }, // markdown, not JSON
 },
 ```
 
 `structuredContent` always keeps the full structured value; `enrichmentTrailer` only controls the human-facing `content[]` line.
+
+**Pass echo, delta, and generic values raw.** They are data, often a value the agent copies into its next call — a query, a cursor, SQL — so the framework renders their strings, and an object's JSON, as code literals: a code span (`` `cat:astro-ph*` ``), or a fenced block on its own lines when the value holds a line break. A query holding `*`, `[x](y)`, or a line-leading `- ` reads back as written with no backslash to carry into the next call, an empty string renders as nothing, and numbers, booleans, and `null` render as themselves. Escaping or backtick-wrapping first would show in `structuredContent` too. Authored text stays live Markdown — a `render` result, a `label`, the `total` line, the `notice` blockquote — so escape any untrusted text you embed in a `notice` or `render` yourself.
 
 ### Image / audio output belongs in `ctx.content`
 
@@ -460,6 +471,23 @@ async handler(input, ctx) {
 ```
 
 The alternative — declaring `previewData: z.string()` in `output` and emitting the block from `format()` — ships the bytes twice (once in `structuredContent`, once in the block). Reserve `output` for data the agent reasons over; route raw media through `ctx.content`. Test with `getContentBlocks(ctx)`. Full reference: `framework-skills/api-context` § `ctx.content`.
+
+### Upstream text in `format()` renders as itself
+
+`content[]` carries the same data as `structuredContent`, so a string the tool did not author — a title, a description, a caller-supplied name — must read back unchanged when a client parses the Markdown. Interpolate it through `escapeMarkdownInline()` from `@cyanheads/mcp-ts-core/utils`. It escapes only what can parse as syntax: `snake_case`, `AT&T`, and `<=50` stay as written, while `*`, backticks, `[x](y)`, `<b>`, and a line-leading `- ` or `#` come back literally. Image and link fields render through `markdownImage(alt, url)` and `markdownLink(label, url)`: a logo URL shows as an image rather than as escaped text, and a non-`http(s)` URL falls back to literal `label (url)`.
+
+```typescript
+format: (r) => [{
+  type: 'text',
+  text: [
+    `## ${escapeMarkdownInline(r.team.name)}`,
+    markdownImage(`${r.team.name} logo`, r.team.logoUrl),
+    escapeMarkdownInline(r.team.bio),
+  ].join('\n\n'),
+}],
+```
+
+Never defang a value (`https[:]//`, HTML entities): that changes the data on one surface only. Markdown the tool authors — headings, `**Label:**`, list markers — stays live; escape what goes inside it. The escaped value reads back in a paragraph, after a label, and in a heading, list item, block quote, or table cell. Headings and table cells hold one line, so keep multi-line values out of them: the escaper keeps a value with line breaks in one paragraph, list item, or quote through hard breaks, and a heading or table row ends at the break.
 
 ### Capped lists must disclose truncation
 
@@ -484,7 +512,7 @@ async handler(input, ctx) {
 
 Alternatively, if the upstream total is known, `ctx.enrich.total(n)` (writes `totalCount`) also satisfies the lint rule.
 
-**Threshold bound** — when the upstream total is unknowable but the list is sorted by the cap key, the smallest shown value is a rigorous upper bound on all omitted items (Fagin Threshold Algorithm). Pass it as `ceiling`:
+**Threshold bound** — when the upstream total is unknowable but the list is sorted by the cap key, the smallest shown value is a rigorous upper bound on every item after the page (Fagin Threshold Algorithm). On a later page of a descending list it does not bound the items before the offset, which rank at or above the first item shown, so describe the field as covering the items after the page. Pass it as `ceiling`:
 
 ```ts
 // items is sorted descending by count; anything hidden has count ≤ items.at(-1).count
@@ -565,7 +593,7 @@ async handler(input, ctx) {
   const results = await search(input);
   if (results.length === 0) {
     ctx.enrich.notice(
-      `No items matched status="${input.status}" in project "${input.project}". `
+      `No items matched status="${escapeMarkdownInline(input.status)}" in project "${escapeMarkdownInline(input.project)}". `
         + `Try a broader status filter or verify the project name.`,
     );
   }
@@ -628,8 +656,8 @@ output: z.object({
 format: (result) => [{
   type: 'text',
   text: result.repos.map((repo) => [
-    `## ${repo.name}`,
-    `**ID:** ${repo.id}`,
+    `## ${escapeMarkdownInline(repo.name)}`,
+    `**ID:** ${escapeMarkdownInline(repo.id)}`,
     typeof repo.archived === 'boolean'
       ? `**Archived:** ${repo.archived ? 'Yes' : 'No'}`
       : '**Archived:** Not available',
@@ -680,6 +708,8 @@ export const fetchArticles = tool('fetch_articles', {
 ```
 
 **The declared `recovery` reaches the wire on its own.** When a failure whose `data.reason` names a contract entry leaves the handler without `data.recovery`, the framework sets `data.recovery.hint` to that entry's `recovery` — both client surfaces, the error log record, and `runToolContract` alike — whatever code it was thrown with. Pass `{ recovery: { hint: \`…${dynamic}…\` } }` when you need runtime context; a throw-site hint always wins. `ctx.recoveryFor(reason)` still resolves the entry into `{ recovery: { hint } }` for a hint that must ride the thrown error itself. The contract is the single source of truth — write the recovery once, lint validates it ≥5 words, the framework carries it to every failure with that reason.
+
+**Throw raw text.** The framework renders the message, the recovery hint, and `data.reason` into `content[]` through `escapeMarkdownInline()`, so a name like `A*p*` or an upstream message with a line-leading `- ` reads back exactly as `structuredContent.error` carries it. Backticks or backslashes added in the handler would show on both surfaces.
 
 **Baseline codes** (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. Wire-level behavior is identical when the contract is omitted, but you lose the type-checked `ctx.fail`, the `tools/list` advertisement, and conformance lint coverage — declare a contract whenever the tool has a domain-specific failure mode.
 
@@ -830,7 +860,7 @@ input: z.object({
 }),
 ```
 
-`toJSONSchema` emits only the inner schema for a preprocess pipe in both `io` modes, so the advertised `pattern` is unchanged; `''` parses to `undefined`, a real value still hits the validator, and a handler that tests the value (`input.d1 ?? default`, `if (input.d1)`) needs no extra guard. The key itself stays present (`'d1' in input` is `true`), so never test for the key or spread `input` into an upstream query. Because the advertised pattern still rejects `''`, keep the blank out of the `.describe()` text: "an empty string means unset" contradicts the schema a validating client reads. The blank is tolerated for form clients, not offered as input. The same holds for any spelling a preprocess normalizes — a `recid:` prefix, a case variant, a URL form: the advertised check states the canonical form, so the description offers only that form, or the check is widened to match what the description offers.
+`toJSONSchema` emits only the inner schema for a preprocess pipe in both `io` modes, so the advertised `pattern` is unchanged; `''` parses to `undefined`, a real value still hits the validator, and a handler that tests the value (`input.d1 ?? default`, `if (input.d1)`) needs no extra guard. The key itself stays present (`'d1' in input` is `true`), so never test for the key or spread `input` into an upstream query. Because the advertised pattern still rejects `''`, keep the blank out of the `.describe()` text: "an empty string means unset" contradicts the schema a validating client reads. The blank is tolerated for form clients, not offered as input. The same holds for any spelling a preprocess normalizes — a `recid:` prefix, a case variant, a URL form: the advertised check states the canonical form, so the description offers only that form, or the check is widened to match what the description offers. Wrapping a number or boolean field this way also takes it out of the framework's string-spelling repair, which never reaches a field routed through `z.preprocess()`: `limit: "50"` behind `blankAsUnset(z.number().optional())` stays rejected unless the wrapper itself turns a spelled value into the number or boolean it spells, under the same `String(n)` round-trip rule.
 
 **Required fields are different.** If a string field is required and must be non-empty to be meaningful, `.min(1)` is correct — the client shouldn't have submitted the form without filling it in.
 
@@ -862,7 +892,7 @@ const hits = items.filter((it) => {
 });
 if (hits.length === 0) {
   ctx.enrich.notice(
-    `No name matched "${input.nameContains}". Call the tool without a filter to browse the full list.`,
+    `No name matched "${escapeMarkdownInline(input.nameContains)}". Call the tool without a filter to browse the full list.`,
   );
 }
 return { items: hits };
