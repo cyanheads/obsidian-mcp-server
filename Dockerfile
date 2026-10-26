@@ -29,6 +29,11 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 # Copy the rest of the source code
 COPY . .
 
+# The skills a server publishes (`createApp({ skills: 'skills' })`) are read at
+# runtime from the application root. Created when the project has none, so the
+# production stage's copy below holds with or without one.
+RUN mkdir -p skills
+
 # Build the application
 RUN bun run build
 
@@ -135,6 +140,7 @@ COPY --from=deps /usr/src/app/node_modules ./node_modules
 
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
+COPY --from=build /usr/src/app/skills ./skills
 
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.
@@ -158,6 +164,7 @@ ENV MCP_HTTP_PORT=${PORT:-3010}
 # bind exposes the upstream OBSIDIAN_API_KEY to any caller that can reach the port.
 ENV MCP_HTTP_HOST="0.0.0.0"
 ENV MCP_TRANSPORT_TYPE="http"
+ENV MCP_SESSION_MODE="stateful"
 ENV MCP_LOG_LEVEL="info"
 ENV LOGS_DIR="/var/log/obsidian-mcp-server"
 

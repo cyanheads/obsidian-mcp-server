@@ -1,0 +1,30 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "obsidian-mcp-server",
+  "version": "3.7.1",
+  "description": "Read, write, search, and surgically edit Obsidian vault notes, tags, and frontmatter via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/obsidian-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/obsidian-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "stdio",
+    "streamable-http",
+    "obsidian",
+    "obsidian-vault",
+    "obsidian-md",
+    "pkm",
+    "knowledge-base",
+    "note-taking",
+    "ai-tools",
+    "typescript",
+    "bun"
+  ]
+}

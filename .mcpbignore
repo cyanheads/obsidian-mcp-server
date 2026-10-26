@@ -1,29 +1,37 @@
+# Paths `mcpb pack` leaves out of the bundle. It reads this file, not
+# .gitignore, so gitignored local files ship unless they are listed here.
+# Anchor every path with a leading "/": an unanchored name also strips the
+# same name inside node_modules/. Root skills/ ships on purpose — it holds the
+# skills this server publishes to installing agents.
 .env*
 .mcpregistry_*
 .DS_Store
 /.claude/
 /.agents/
-/.claude-plugin/
-/.codex-plugin/
-/.gemini/
-/.github/
-/.vscode/
 /framework-skills/
-/announcements/
-/docs/
-/logs/
-/.cache/
-/coverage/
 /src/
 /scripts/
 /tests/
-/AGENTS.md
+/docs/
+/changelog/
+/coverage/
+/logs/
+/.cache/
+/.github/
+/.vscode/
+/.gemini/
+/.claude-plugin/
+/.codex-plugin/
+/plugin.json
+/mcp.json
+/announcements/
 /CLAUDE.md
+/AGENTS.md
+/Dockerfile
 /.dockerignore
 /.gitattributes
 /.tsbuildinfo
 /devcheck.config.json
-/Dockerfile
 /bun.lock
 /bunfig.toml
 /wrangler.toml
