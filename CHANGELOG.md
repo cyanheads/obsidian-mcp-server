@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [3.7.2](changelog/3.7.x/3.7.2.md) — 2026-10-25
 
-Vault text in content[] (paths, tags, headings, frontmatter keys and values, command names, search terms) reads back as written under a CommonMark parse. mcp-ts-core 0.13.18 escapes error text, renders enrichment trailer strings as code spans, and adds the Agent Plugins root plugin.json and mcp.json.
+Vault text in content[] (paths, tags, headings, frontmatter keys and values, command names, search terms) reads back as written under a CommonMark parse. Adopts mcp-ts-core ^0.13.18, which escapes error text and renders enrichment trailer strings as code spans.
 
 ## [3.7.1](changelog/3.7.x/3.7.1.md) — 2026-10-24 · 🛡️ Security
 
