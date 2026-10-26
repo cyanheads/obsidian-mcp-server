@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-3.7.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-3.7.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/obsidian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/obsidian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/obsidian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -210,109 +210,36 @@ Agent-friendly output:
 
 ## Getting started
 
-Add the following to your MCP client configuration file. The Obsidian Local REST API plugin must be installed and enabled in your vault; see [Prerequisites](#prerequisites).
-
-```json
-{
-  "mcpServers": {
-    "obsidian-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["obsidian-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info",
-        "OBSIDIAN_API_KEY": "your-local-rest-api-key"
-      }
-    }
-  }
-}
-```
-
-Or with npx (no Bun required):
-
-```json
-{
-  "mcpServers": {
-    "obsidian-mcp-server": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "obsidian-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info",
-        "OBSIDIAN_API_KEY": "your-local-rest-api-key"
-      }
-    }
-  }
-}
-```
-
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "obsidian-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "MCP_TRANSPORT_TYPE=stdio",
-        "-e", "MCP_LOG_LEVEL=info",
-        "-e", "OBSIDIAN_API_KEY=your-local-rest-api-key",
-        "ghcr.io/cyanheads/obsidian-mcp-server:latest"
-      ]
-    }
-  }
-}
-```
-
-Inside a container, the default `OBSIDIAN_BASE_URL` (`http://127.0.0.1:27123`) is the container's own loopback. Add `-e OBSIDIAN_BASE_URL=http://host.docker.internal:27123` (Docker Desktop) or run with `--network host` (Linux) to reach the plugin on your host.
-
-For Streamable HTTP, set the transport and start the server:
+Add it to Claude Code:
 
 ```sh
-MCP_TRANSPORT_TYPE=http OBSIDIAN_API_KEY=... bun run start:http
-# Server listens at http://127.0.0.1:3010/mcp by default
+claude mcp add obsidian-mcp-server -e OBSIDIAN_API_KEY=your-api-key -- npx -y obsidian-mcp-server
 ```
+
+For other clients, add this to the MCP config file:
+
+```json
+{
+  "mcpServers": {
+    "obsidian-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "obsidian-mcp-server"],
+      "env": { "OBSIDIAN_API_KEY": "your-api-key" }
+    }
+  }
+}
+```
+
+Generate the key in Obsidian under **Settings → Community Plugins → Local REST API**, with the plugin set up as [Prerequisites](#prerequisites) describes. For Docker or a source build, see [Running the server](#running-the-server).
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin, v4.0.0 or later, enabled in your vault. Generate an API key under **Settings → Community Plugins → Local REST API** and set it as `OBSIDIAN_API_KEY`.
+- The [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin, v4.0.0 or later, enabled in your vault. Its API key is `OBSIDIAN_API_KEY`.
 - The server defaults to `http://127.0.0.1:27123`, so enable **"Non-encrypted (HTTP) Server"** in the plugin settings, or set `OBSIDIAN_BASE_URL=https://127.0.0.1:27124` for the always-on HTTPS port (its self-signed cert is accepted while `OBSIDIAN_VERIFY_SSL=false`, the default).
 - Periodic-note targets work natively on plugin v5.0.1 and earlier. From v5.0.2 they need the [periodic-notes API extension](https://github.com/coddingtonbear/obsidian-local-rest-api-periodic-notes); without it they fail with `periodic_unsupported`.
 - On plugin v4.x, heading section writes to a note with CRLF (Windows) line endings land mid-line: the plugin's markdown-patch 1.x engine misplaces them, and the server can't correct it. Plugin v5.0 and later handle CRLF notes.
 - Plugin v6.0 drops markdown-patch 1.x, which two table-row writes (`contentType: "json"`) still use: rows under a heading, and rows through a block ID on its own line below the table. On v6.0, target the table by an ID on its last row.
 - With `OBSIDIAN_DELETE_ELICITATION=true`, an MCP client that supports elicitation and renders its form, to use `obsidian_delete_note`. Every other tool, and the default delete, works without it.
-
-### Installation
-
-1. **Clone the repository:**
-
-   ```sh
-   git clone https://github.com/cyanheads/obsidian-mcp-server.git
-   ```
-
-2. **Navigate into the directory:**
-
-   ```sh
-   cd obsidian-mcp-server
-   ```
-
-3. **Install dependencies:**
-
-   ```sh
-   bun install
-   ```
-
-4. **Configure environment:**
-
-   ```sh
-   cp .env.example .env
-   # edit .env and set OBSIDIAN_API_KEY
-   ```
 
 ## Configuration
 
@@ -359,6 +286,16 @@ Three optional env vars limit which vault paths the tools can touch. Unset, read
 
 ### Local development
 
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/obsidian-mcp-server.git
+  cd obsidian-mcp-server && bun install
+  cp .env.example .env   # set OBSIDIAN_API_KEY
+  ```
+
 - **Build and run the production version:**
 
   ```sh
@@ -367,7 +304,7 @@ Three optional env vars limit which vault paths the tools can touch. Unset, read
 
   # Run the built server
   bun run start:stdio
-  # or
+  # or, listening at http://127.0.0.1:3010/mcp
   bun run start:http
   ```
 
@@ -382,11 +319,10 @@ Three optional env vars limit which vault paths the tools can touch. Unset, read
 ### Docker
 
 ```sh
-docker build -t obsidian-mcp-server .
-docker run --rm -e OBSIDIAN_API_KEY=your-key -p 3010:3010 obsidian-mcp-server
+docker run --rm -e OBSIDIAN_API_KEY=your-key -p 3010:3010 ghcr.io/cyanheads/obsidian-mcp-server:latest
 ```
 
-The image defaults to HTTP transport on `0.0.0.0`, stateful sessions, and logs in `/var/log/obsidian-mcp-server`. Point `OBSIDIAN_BASE_URL` at `http://host.docker.internal:27123` (Docker Desktop) or use `--network host` (Linux) to reach the plugin. OpenTelemetry peer dependencies are installed by default; build with `--build-arg OTEL_ENABLED=false` to omit them.
+The image defaults to HTTP transport on `0.0.0.0`, stateful sessions, and logs in `/var/log/obsidian-mcp-server`. Inside a container, the default `OBSIDIAN_BASE_URL` (`http://127.0.0.1:27123`) is the container's own loopback: point it at `http://host.docker.internal:27123` (Docker Desktop) or use `--network host` (Linux) to reach the plugin on your host. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "-e", "OBSIDIAN_API_KEY=your-key", "-e", "OBSIDIAN_BASE_URL=http://host.docker.internal:27123", "ghcr.io/cyanheads/obsidian-mcp-server:latest"]`. To build locally, `docker build -t obsidian-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 If the port is reachable from other machines, set `MCP_AUTH_MODE=jwt` (with `MCP_AUTH_SECRET_KEY`) or `oauth`. With the default `none`, every caller acts on your vault with your `OBSIDIAN_API_KEY`.
 
