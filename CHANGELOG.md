@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.7.2](changelog/3.7.x/3.7.2.md) — 2026-10-25
+
+Vault text in content[] (paths, tags, headings, frontmatter keys and values, command names, search terms) reads back as written under a CommonMark parse. mcp-ts-core 0.13.18 escapes error text, renders enrichment trailer strings as code spans, and adds the Agent Plugins root plugin.json and mcp.json.
+
 ## [3.7.1](changelog/3.7.x/3.7.1.md) — 2026-10-24 · 🛡️ Security
 
 Read-scope fixes: under OBSIDIAN_READ_PATHS, JSONLogic search runs in the server over readable notes only, active and periodic denials name the target rather than the resolved note, read-then-write tools write to the note they read, and instructions state the effective scope. A case-variant write fails as case_variant_exists.

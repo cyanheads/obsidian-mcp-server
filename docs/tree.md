@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-10-24 08:39:31
+Generated on: 2026-10-26 03:45:02
 
 ```text
 obsidian-mcp-server/
@@ -43,6 +43,8 @@ obsidian-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -157,6 +159,7 @@ obsidian-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── _shared/
+│   │           │   ├── markdown.ts
 │   │           │   ├── regex-safety.ts
 │   │           │   ├── schemas.ts
 │   │           │   └── suggest-paths.ts
@@ -262,7 +265,9 @@ obsidian-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
