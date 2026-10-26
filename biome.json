@@ -1,8 +1,3 @@
 {
-  "extends": ["@cyanheads/mcp-ts-core/biome"],
-  "markdown": {
-    "formatter": {
-      "enabled": false
-    }
-  }
+  "extends": ["@cyanheads/mcp-ts-core/biome"]
 }

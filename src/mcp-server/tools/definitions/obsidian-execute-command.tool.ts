@@ -8,6 +8,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { inlineCode } from './_shared/markdown.js';
 
 export const obsidianExecuteCommand = tool('obsidian_execute_command', {
   description:
@@ -43,7 +44,7 @@ export const obsidianExecuteCommand = tool('obsidian_execute_command', {
   format: (result) => [
     {
       type: 'text',
-      text: `**Executed \`${result.commandId}\`** (executed: ${result.executed})`,
+      text: `**Executed ${inlineCode(result.commandId)}** (executed: ${result.executed})`,
     },
   ],
 });

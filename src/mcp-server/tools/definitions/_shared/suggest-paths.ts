@@ -30,6 +30,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { conflict, JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
 import type { ObsidianService } from '@/services/obsidian/obsidian-service.js';
 import type { NoteTarget } from '@/services/obsidian/types.js';
+import { inlineCode } from './markdown.js';
 
 const MAX_SUGGESTIONS = 5;
 
@@ -123,7 +124,8 @@ export function discloseCaseSubstitution(
 ): string | undefined {
   if (fallback.requestedPath === undefined) return;
   const { requestedPath, resolvedPath } = fallback;
-  const notice = `\`${requestedPath}\` has no exact match; ${action} \`${resolvedPath}\`, the one file in that folder whose name matches it ignoring case. Write and delete tools match paths exactly — pass them \`${resolvedPath}\`.`;
+  const resolved = inlineCode(resolvedPath);
+  const notice = `${inlineCode(requestedPath)} has no exact match; ${action} ${resolved}, the one file in that folder whose name matches it ignoring case. Write and delete tools match paths exactly — pass them ${resolved}.`;
   ctx.enrich({ requestedPath });
   ctx.enrich.notice(notice);
   return notice;

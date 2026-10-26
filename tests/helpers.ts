@@ -17,6 +17,7 @@ import type { McpError } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import globToRegExp from 'glob-to-regexp';
 import jsonLogic from 'json-logic-js';
+import { Lexer, type Token } from 'marked';
 import { Headers, type HeadersInit, Response } from 'undici';
 import { afterEach, beforeEach, expect } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
@@ -28,6 +29,61 @@ import {
 import type { NoteTarget } from '@/services/obsidian/types.js';
 
 export const TEST_BASE_URL = 'https://obsidian.test';
+
+const NAMED_ENTITIES = new Map([
+  ['amp', '&'],
+  ['lt', '<'],
+  ['gt', '>'],
+  ['quot', '"'],
+]);
+
+/** Decodes the character references a `marked` text token keeps verbatim. */
+function decodeEntities(text: string): string {
+  return text.replace(/&(#[xX][0-9a-fA-F]+|#\d+|[a-z]+);/g, (entity, name: string) => {
+    if (name[1] === 'x' || name[1] === 'X') {
+      return String.fromCodePoint(Number.parseInt(name.slice(2), 16));
+    }
+    if (name.startsWith('#')) return String.fromCodePoint(Number(name.slice(1)));
+    return NAMED_ENTITIES.get(name) ?? entity;
+  });
+}
+
+/** Block tokens whose `tokens` are blocks, joined line by line rather than inline. */
+const BLOCK_CONTAINERS = new Set(['blockquote', 'list_item']);
+
+function tokenText(token: Token): string {
+  switch (token.type) {
+    case 'space':
+      return '';
+    case 'br':
+      return '\n';
+    case 'code':
+    case 'codespan':
+    case 'escape':
+    case 'html':
+      return token.text;
+    case 'list':
+      return token.items.map(tokenText).join('\n');
+  }
+  if ('tokens' in token && token.tokens) {
+    return token.tokens.map(tokenText).join(BLOCK_CONTAINERS.has(token.type) ? '\n' : '');
+  }
+  return 'text' in token ? decodeEntities(token.text) : '';
+}
+
+/**
+ * The text a Markdown reader sees in `markdown`, one line per block: lexed by
+ * `marked` (the CommonMark/GFM parser this server already depends on), markup
+ * dropped, escapes and character references resolved, a hard break read as a
+ * line break. `content[]` escapes upstream and error text, so this reads back
+ * exactly what `structuredContent` carries.
+ */
+export function markdownText(markdown: string): string {
+  return Lexer.lex(markdown)
+    .filter((token) => token.type !== 'space')
+    .map(tokenText)
+    .join('\n');
+}
 
 /**
  * Build a stub upstream response. `ObsidianService` is typed against undici's

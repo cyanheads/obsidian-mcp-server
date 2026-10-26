@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { scanHeadings } from '@/services/obsidian/section-extractor.js';
 import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schemas.js';
@@ -247,9 +248,9 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
     {
       type: 'text',
       text: [
-        `**${result.created ? 'Created' : 'Wrote'} ${result.path}**`,
+        `**${result.created ? 'Created' : 'Wrote'} ${escapeMarkdownInline(result.path)}**`,
         `*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`,
-        `*Section targeted:* ${result.sectionTargeted}${result.sectionTarget ? ` → ${result.sectionTarget}` : ''}`,
+        `*Section targeted:* ${result.sectionTargeted}${result.sectionTarget ? ` → ${escapeMarkdownInline(result.sectionTarget)}` : ''}`,
         `*Created:* ${result.created}`,
       ].join('\n'),
     },

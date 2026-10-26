@@ -12,8 +12,15 @@
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
-import { decodeCursor, encodeCursor, paginateArray } from '@cyanheads/mcp-ts-core/utils';
+import {
+  decodeCursor,
+  encodeCursor,
+  escapeMarkdownInline,
+  markdown,
+  paginateArray,
+} from '@cyanheads/mcp-ts-core/utils';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { inlineCode } from './_shared/markdown.js';
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
@@ -361,7 +368,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
         const page = paginate(clipped, input.cursor, ctx);
         if (page.hits.length === 0) {
           ctx.enrich.notice(
-            `No matches for "${input.query}"${prefix ? ` under prefix "${prefix}"` : ''}. Try broader terms, a different mode, or check that the path/filter is correct.`,
+            `No matches for ${inlineCode(input.query)}${prefix ? ` under prefix ${inlineCode(prefix)}` : ''}. Try broader terms, a different mode, or check that the path/filter is correct.`,
           );
         }
         return { result: { mode: 'text' as const, ...page } };
@@ -417,7 +424,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       const page = paginate(allowed, input.cursor, ctx);
       if (page.hits.length === 0) {
         ctx.enrich.notice(
-          `No Omnisearch matches for "${input.query}". Try broader terms, fewer exclusions, or switch to text mode.`,
+          `No Omnisearch matches for ${inlineCode(input.query)}. Try broader terms, fewer exclusions, or switch to text mode.`,
         );
       }
       return {
@@ -440,7 +447,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
         );
       }
       if (result.nextCursor) {
-        lines.push(`_Next page cursor: \`${result.nextCursor}\`_`);
+        lines.push(`_Next page cursor: ${inlineCode(result.nextCursor)}_`);
       }
       lines.push('');
       if (result.mode === 'text') {
@@ -448,32 +455,32 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
           const trunc = h.truncated
             ? ` — truncated, showing first ${h.matches.length} of ${h.totalMatches} locations`
             : '';
-          lines.push(`### ${h.filename}${trunc}`);
+          lines.push(`### ${escapeMarkdownInline(h.filename)}${trunc}`);
           for (const m of h.matches) {
             lines.push(
               `match at context[${m.match.contextStart}–${m.match.contextEnd}] · subject[${m.match.start}–${m.match.end}]`,
             );
-            lines.push(...fenced(m.context));
+            lines.push(fenced(m.context));
           }
         }
       } else if (result.mode === 'omnisearch') {
         for (const h of result.hits) {
-          lines.push(`### ${h.filename} (score: ${h.score.toFixed(2)})`);
+          lines.push(`### ${escapeMarkdownInline(h.filename)} (score: ${h.score.toFixed(2)})`);
           if (h.foundWords.length > 0) {
-            lines.push(`**Matched:** ${h.foundWords.map((w) => `\`${w}\``).join(', ')}`);
+            lines.push(`**Matched:** ${h.foundWords.map((w) => inlineCode(w)).join(', ')}`);
           }
           if (h.matches.length > 0) {
             lines.push(
-              `**Offsets:** ${h.matches.map((mm) => `\`${mm.match}\` @ ${mm.offset}`).join(', ')}`,
+              `**Offsets:** ${h.matches.map((mm) => `${inlineCode(mm.match)} @ ${mm.offset}`).join(', ')}`,
             );
           }
-          if (h.excerpt) lines.push(...fenced(h.excerpt));
+          if (h.excerpt) lines.push(fenced(h.excerpt));
         }
       } else {
         for (const h of result.hits) {
-          lines.push(`### ${h.filename}`);
+          lines.push(`### ${escapeMarkdownInline(h.filename)}`);
           lines.push(`result:`);
-          lines.push(...fenced(safeJsonStringify(h.result), 'json'));
+          lines.push(fenced(safeJsonStringify(h.result), 'json'));
         }
       }
       return [{ type: 'text', text: lines.join('\n') }];
@@ -550,17 +557,11 @@ function clipMatches<T extends { matches: unknown[] }>(
  * structure. This is the single escaping boundary for all three: the payload
  * is emitted byte-for-byte (clipping it would put `content[]` back out of
  * parity with `structuredContent` — see #97) and only the delimiter around it
- * adapts, sized past the longest backtick run in the payload.
+ * adapts, sized past the longest backtick run in the payload by the framework's
+ * `MarkdownBuilder.codeBlock`.
  */
-function fenced(body: string, lang = 'text'): string[] {
-  /**
-   * Reduced rather than spread into `Math.max` — a note that is mostly
-   * backticks yields more runs than the engine's argument limit, and arbitrary
-   * vault text is precisely what this function is for.
-   */
-  const longestRun = (body.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
-  const fence = '`'.repeat(Math.max(3, longestRun + 1));
-  return [`${fence}${lang}`, body, fence];
+function fenced(body: string, lang = 'text'): string {
+  return markdown().codeBlock(body, lang).build();
 }
 
 function safeJsonStringify(v: unknown): string {

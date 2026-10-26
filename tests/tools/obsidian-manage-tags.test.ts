@@ -9,7 +9,12 @@ import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testi
 import { describe, expect, it } from 'vitest';
 import { obsidianManageTags } from '@/mcp-server/tools/definitions/obsidian-manage-tags.tool.js';
 import type { NoteTarget } from '@/services/obsidian/types.js';
-import { installMovingTargetVault, MOVING_TARGET_NOTES, setupHarness } from '../helpers.js';
+import {
+  installMovingTargetVault,
+  MOVING_TARGET_NOTES,
+  markdownText,
+  setupHarness,
+} from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -341,11 +346,17 @@ describe('obsidian_manage_tags / refuses an unsafe frontmatter block', () => {
     });
 
     expect(res.isError).toBe(true);
-    const error = (res.structuredContent as { error: { code: number; data: { reason: string } } })
-      .error;
+    const error = (
+      res.structuredContent as {
+        error: { code: number; message: string; data: { reason: string } };
+      }
+    ).error;
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(error.data.reason).toBe('frontmatter_invalid');
-    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    const text = markdownText(
+      res.content.map((b) => (b as { text?: string }).text ?? '').join('\n'),
+    );
+    expect(text).toContain(error.message);
     expect(text).toContain('not safely editable');
     expect(text).toContain(declaredRecovery('frontmatter_invalid'));
     expect(puts).toBe(0);

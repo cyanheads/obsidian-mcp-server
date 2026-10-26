@@ -15,7 +15,13 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { contractErrorOf, makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
+import {
+  contractErrorOf,
+  makeTestConfig,
+  markdownText,
+  mockResponse,
+  setupHarness,
+} from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -222,8 +228,9 @@ describe('obsidian_open_in_ui', () => {
         requestedPath: 'MyNote.md',
         notice,
       });
-      expect((res.content.at(-1) as { text: string }).text).toBe(
-        `\n\n**requestedPath:** MyNote.md\n> ${notice}`,
+      // The notice is authored Markdown, so its code spans read as their text.
+      expect(markdownText((res.content.at(-1) as { text: string }).text)).toBe(
+        `requestedPath: MyNote.md\n${notice.replaceAll('`', '')}`,
       );
     },
   );

@@ -7,8 +7,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { deleteFrontmatterKey } from '@/services/obsidian/frontmatter-ops.js';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { inlineCode } from './_shared/markdown.js';
 import { TargetSchema } from './_shared/schemas.js';
 
 export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
@@ -242,7 +244,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
         {
           type: 'text',
           text: [
-            `**Frontmatter ${result.operation} \`${result.key}\` in ${result.path}**`,
+            `**Frontmatter ${result.operation} ${inlineCode(result.key)} in ${escapeMarkdownInline(result.path)}**`,
             `*Exists:* ${result.exists}`,
             '*Value:*',
             valueStr,
@@ -252,7 +254,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
     }
     const fmKeys = Object.keys(result.frontmatter);
     const lines = [
-      `**Frontmatter ${result.operation} \`${result.key}\` in ${result.path}**`,
+      `**Frontmatter ${result.operation} ${inlineCode(result.key)} in ${escapeMarkdownInline(result.path)}**`,
       `*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`,
       '',
       `**Frontmatter (${fmKeys.length} keys after change)**`,
@@ -261,7 +263,7 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
       lines.push('_(empty)_');
     } else {
       for (const k of fmKeys) {
-        lines.push(`- \`${k}\`: ${formatValue(result.frontmatter[k])}`);
+        lines.push(`- ${inlineCode(k)}: ${formatValue(result.frontmatter[k])}`);
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];
@@ -270,6 +272,6 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
 
 function formatValue(v: unknown): string {
   if (v === null || v === undefined) return '`null`';
-  if (typeof v === 'string') return v;
-  return `\`${JSON.stringify(v)}\``;
+  if (typeof v === 'string') return escapeMarkdownInline(v);
+  return inlineCode(JSON.stringify(v));
 }

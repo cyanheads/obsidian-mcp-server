@@ -13,6 +13,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import type { NoteTarget } from '@/services/obsidian/types.js';
 import { discloseCaseSubstitution, withCaseFallback } from './_shared/suggest-paths.js';
@@ -159,7 +160,7 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
     {
       type: 'text',
       text: [
-        `**Opened ${result.path}**`,
+        `**Opened ${escapeMarkdownInline(result.path)}**`,
         `*Opened:* ${result.opened}`,
         `*Created if missing:* ${result.createdIfMissing}`,
       ].join('\n'),

@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import { wikilinkCloser } from '@/services/obsidian/frontmatter-ops.js';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import {
@@ -13,6 +14,7 @@ import {
   extractSection,
   type SectionExtraction,
 } from '@/services/obsidian/section-extractor.js';
+import { inlineCode } from './_shared/markdown.js';
 import { SectionSchema, TargetSchema } from './_shared/schemas.js';
 import { discloseCaseSubstitution, withCaseFallback } from './_shared/suggest-paths.js';
 
@@ -323,7 +325,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     const { candidates, sectionTarget, value } = extracted;
     if (candidates) {
       const repeatedPath = candidates.every((c) => c === sectionTarget);
-      const headingNotice = `Heading \`${input.section.target}\` is ambiguous — ${candidates.length} headings share that name; read \`${sectionTarget}\`. See \`candidates\` for the rest.${repeatedPath ? ' Every one has the same full path, so the write tools reject it with `ambiguous_section`.' : ''}`;
+      const headingNotice = `Heading ${inlineCode(input.section.target)} is ambiguous — ${candidates.length} headings share that name; read ${inlineCode(String(sectionTarget))}. See \`candidates\` for the rest.${repeatedPath ? ' Every one has the same full path, so the write tools reject it with `ambiguous_section`.' : ''}`;
       ctx.enrich.notice(caseNotice ? `${caseNotice} ${headingNotice}` : headingNotice);
     }
     return {
@@ -341,31 +343,27 @@ export const obsidianGetNote = tool('obsidian_get_note', {
   },
 
   format: ({ result }) => {
+    const header = `**${escapeMarkdownInline(result.path)}** (format: ${result.format})`;
     if (result.format === 'content') {
-      return [
-        {
-          type: 'text',
-          text: `**${result.path}** (format: ${result.format})\n\n${result.content}`,
-        },
-      ];
+      return [{ type: 'text', text: `${header}\n\n${result.content}` }];
     }
     if (result.format === 'full') {
       const lines = [
-        `**${result.path}** (format: ${result.format})`,
-        `*Tags:* ${result.tags.length > 0 ? result.tags.join(', ') : '(none)'}`,
+        header,
+        `*Tags:* ${result.tags.length > 0 ? result.tags.map(escapeMarkdownInline).join(', ') : '(none)'}`,
         `*Stat:* ctime=${result.stat.ctime} mtime=${result.stat.mtime} size=${result.stat.size}`,
       ];
       const fmKeys = Object.keys(result.frontmatter);
       if (fmKeys.length > 0) {
         lines.push('', '**Frontmatter**');
         for (const k of fmKeys) {
-          lines.push(`- \`${k}\`: ${stringifyValue(result.frontmatter[k])}`);
+          lines.push(`- ${inlineCode(k)}: ${inlineValue(result.frontmatter[k])}`);
         }
       }
       if (result.outgoingLinks && result.outgoingLinks.length > 0) {
         lines.push('', `**Outgoing links (${result.outgoingLinks.length})**`);
         for (const l of result.outgoingLinks) {
-          lines.push(`- [${l.type}] ${l.target}`);
+          lines.push(`- [${l.type}] ${escapeMarkdownInline(l.target)}`);
         }
       }
       lines.push('', '**Content**', result.content);
@@ -373,45 +371,55 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     }
     if (result.format === 'document-map') {
       const lines = [
-        `**${result.path}** (format: ${result.format})`,
+        header,
         '',
         `**Headings (${result.headings.length})**`,
-        ...result.headings.map((h) => `- ${h}`),
+        ...result.headings.map((h) => `- ${escapeMarkdownInline(h)}`),
         '',
         `**Blocks (${result.blocks.length})**`,
-        ...result.blocks.map((b) => `- ^${b}`),
+        ...result.blocks.map((b) => `- ^${escapeMarkdownInline(b)}`),
         '',
         `**Frontmatter fields (${result.frontmatterFields.length})**`,
-        ...result.frontmatterFields.map((f) => `- ${f}`),
+        ...result.frontmatterFields.map((f) => `- ${escapeMarkdownInline(f)}`),
       ];
       return [{ type: 'text', text: lines.join('\n') }];
     }
-    // valueText: heading/block sections; valueJson: frontmatter sections.
+    // valueText: heading/block sections (note body, raw); valueJson: frontmatter sections.
     const value =
       result.valueText !== undefined
         ? result.valueText
         : result.valueJson !== undefined
-          ? stringifyValue(result.valueJson)
+          ? blockValue(result.valueJson)
           : '_(empty)_';
     const lines = [
-      `**${result.path}** (format: ${result.format})`,
-      `*Section:* ${result.section.type} → ${result.section.target}`,
+      header,
+      `*Section:* ${result.section.type} → ${escapeMarkdownInline(result.section.target)}`,
     ];
     if (result.sectionTarget !== undefined) {
-      lines.push(`*Resolved:* ${result.sectionTarget}`);
+      lines.push(`*Resolved:* ${escapeMarkdownInline(result.sectionTarget)}`);
     }
     if (result.candidates && result.candidates.length > 0) {
-      lines.push(`*Candidates:* ${result.candidates.join(', ')}`);
+      lines.push(`*Candidates:* ${result.candidates.map(escapeMarkdownInline).join(', ')}`);
     }
     lines.push('', '**Value:**', value);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
 
-function stringifyValue(v: unknown): string {
+/** A frontmatter section's value as its own block: a string as escaped text, anything else as fenced JSON. */
+function blockValue(v: unknown): string {
+  if (v === null) return '(empty)';
+  if (typeof v === 'string') return escapeMarkdownInline(v);
+  return markdown()
+    .codeBlock(JSON.stringify(v, null, 2), 'json')
+    .build();
+}
+
+/** A frontmatter value in a list item: a string as escaped text, anything else as its JSON in a code span. */
+function inlineValue(v: unknown): string {
   if (v === null || v === undefined) return '(empty)';
-  if (typeof v === 'string') return v;
-  return JSON.stringify(v, null, 2);
+  if (typeof v === 'string') return escapeMarkdownInline(v);
+  return inlineCode(JSON.stringify(v));
 }
 
 /**

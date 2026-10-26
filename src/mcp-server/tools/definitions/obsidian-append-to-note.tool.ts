@@ -9,6 +9,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { ContentTypeSchema, SectionSchema, TargetSchema } from './_shared/schemas.js';
 import { withCaseVariantNamed } from './_shared/suggest-paths.js';
@@ -220,7 +221,7 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
 
   format: (result) => {
     const action = result.created ? 'Created' : 'Appended to';
-    const lines = [`**${action} ${result.path}**`];
+    const lines = [`**${action} ${escapeMarkdownInline(result.path)}**`];
     if (result.created) {
       lines.push(
         '*Note:* this file did not exist before — your content is now the entire file. If you expected to add to existing content, double-check the path.',
@@ -229,7 +230,7 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
     lines.push(`*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`);
     lines.push(`*Created:* ${result.created}`);
     lines.push(
-      `*Section targeted:* ${result.sectionTargeted}${result.sectionTarget ? ` → ${result.sectionTarget}` : ''}`,
+      `*Section targeted:* ${result.sectionTargeted}${result.sectionTarget ? ` → ${escapeMarkdownInline(result.sectionTarget)}` : ''}`,
     );
     return [{ type: 'text', text: lines.join('\n') }];
   },

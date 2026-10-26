@@ -12,6 +12,7 @@ import {
   expectLinearCpu,
   installMovingTargetVault,
   MOVING_TARGET_NOTES,
+  markdownText,
   noteJson,
   repeatKey,
   servePluginVersion,
@@ -857,8 +858,9 @@ describe('obsidian_get_note / case-insensitive fallback', () => {
       expect(structured.result.path).toBe(CANONICAL);
       expect(structured.requestedPath).toBe(REQUESTED);
       expect(structured.notice).toBe(CASE_NOTICE);
-      expect((res.content.at(-1) as { text: string }).text).toBe(
-        `\n\n**requestedPath:** ${REQUESTED}\n> ${CASE_NOTICE}`,
+      // The notice is authored Markdown, so its code spans read as their text.
+      expect(markdownText((res.content.at(-1) as { text: string }).text)).toBe(
+        `requestedPath: ${REQUESTED}\n${CASE_NOTICE.replaceAll('`', '')}`,
       );
     },
   );
@@ -883,8 +885,8 @@ describe('obsidian_get_note / case-insensitive fallback', () => {
     });
     expect(structured.requestedPath).toBe(REQUESTED);
     expect(structured.notice).toBe(`${CASE_NOTICE} ${DUP_NOTICE}`);
-    expect((res.content.at(-1) as { text: string }).text).toBe(
-      `\n\n**requestedPath:** ${REQUESTED}\n> ${CASE_NOTICE} ${DUP_NOTICE}`,
+    expect(markdownText((res.content.at(-1) as { text: string }).text)).toBe(
+      `requestedPath: ${REQUESTED}\n${`${CASE_NOTICE} ${DUP_NOTICE}`.replaceAll('`', '')}`,
     );
   });
 
@@ -1084,13 +1086,14 @@ describe('obsidian_get_note / includeLinks', () => {
     expect(structured.result.outgoingLinks?.map((l) => l.target)).toEqual(
       ESCAPED_PIPE_FORMS.map(([, target]) => target),
     );
-    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    const text = markdownText(
+      res.content.map((b) => (b as { text?: string }).text ?? '').join('\n'),
+    );
     expect(text).toContain(
       [
-        '**Outgoing links (6)**',
-        ...ESCAPED_PIPE_FORMS.map(([, target]) => `- [wikilink] ${target}`),
-        '',
-        '**Content**',
+        'Outgoing links (6)',
+        ...ESCAPED_PIPE_FORMS.map(([, target]) => `[wikilink] ${target}`),
+        'Content',
       ].join('\n'),
     );
   });
@@ -1559,6 +1562,34 @@ describe('obsidian_get_note / format()', () => {
     );
   });
 
+  /**
+   * A frontmatter section's value is vault data, not note body: a string that
+   * looks like Markdown structure, and an object holding link or emphasis
+   * syntax, read back as written rather than as a heading, rule, or link.
+   */
+  it.each([
+    ['a heading-like string', '# not heading', '# not heading'],
+    ['a rule-like string', '---', '---'],
+    ['an emphasis string', '*starred* value', '*starred* value'],
+    [
+      'an object',
+      { link: '[link](x)', em: '*x*' },
+      JSON.stringify({ link: '[link](x)', em: '*x*' }, null, 2),
+    ],
+  ])('renders a frontmatter section holding %s as written', (_label, valueJson, readBack) => {
+    const blocks = obsidianGetNote.format!({
+      result: {
+        format: 'section',
+        path: 'A.md',
+        section: { type: 'frontmatter', target: 'k' },
+        valueJson,
+      },
+    });
+    expect(markdownText((blocks[0] as { text: string }).text)).toBe(
+      ['A.md (format: section)\nSection: frontmatter → k', 'Value:', readBack].join('\n'),
+    );
+  });
+
   /** A heading section carries the resolved locator even with nothing to disambiguate. */
   it('renders the resolved locator for a heading section with no collision', () => {
     const blocks = obsidianGetNote.format!({
@@ -1709,5 +1740,43 @@ describe('obsidian_get_note / document-map resolves an active or periodic target
       data: { reason: 'path_forbidden', path: '(active file)' },
     });
     expect(vault.requests).toEqual(['GET /active/']);
+  });
+});
+
+/**
+ * Paths, tags, and frontmatter carry Markdown syntax often enough (`_drafts/`,
+ * `*`, `[x]`); `content[]` has to read back the values `structuredContent`
+ * carries rather than render them as emphasis or links.
+ */
+describe('obsidian_get_note / content[] reads back vault text', () => {
+  const PATH = '_drafts/*idea* [1].md';
+
+  it('renders the path, tags, and frontmatter of a full read as written', async () => {
+    harness
+      .current()
+      .pool.intercept({ path: `/vault/${encodeURI(PATH)}`, method: 'GET' })
+      .reply(
+        200,
+        {
+          ...noteJson(PATH, 'body'),
+          frontmatter: { 'a`b': '*not emphasis*', list: ['x', 'y'] },
+          tags: ['_wip'],
+        },
+        { headers: { 'content-type': 'application/json' } },
+      );
+
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'full',
+      target: { type: 'path', path: PATH },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const text = markdownText(
+      res.content.map((b) => (b as { text?: string }).text ?? '').join('\n'),
+    );
+    expect(text).toContain(`${PATH} (format: full)`);
+    expect(text).toContain('Tags: _wip');
+    expect(text).toContain('a`b: *not emphasis*');
+    expect(text).toContain('list: ["x","y"]');
   });
 });

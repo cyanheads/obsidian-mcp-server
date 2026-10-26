@@ -24,7 +24,9 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import { getObsidianService, type ObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { inlineCode } from './_shared/markdown.js';
 import { nameRegexSafetyIssue } from './_shared/regex-safety.js';
 
 const DEFAULT_DEPTH = 2;
@@ -236,7 +238,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
   },
 
   format: (result) => {
-    const headerName = result.path === '' ? '(vault root)' : result.path;
+    const headerName = result.path === '' ? '(vault root)' : escapeMarkdownInline(result.path);
     const meta = [
       `${result.totals.entries} entries`,
       `${result.totals.files} files, ${result.totals.directories} directories`,
@@ -244,9 +246,9 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
     ];
     const filterParts: string[] = [];
     if (result.appliedFilters.extension)
-      filterParts.push(`extension=\`${result.appliedFilters.extension}\``);
+      filterParts.push(`extension=${inlineCode(result.appliedFilters.extension)}`);
     if (result.appliedFilters.nameRegex)
-      filterParts.push(`nameRegex=\`${result.appliedFilters.nameRegex}\``);
+      filterParts.push(`nameRegex=${inlineCode(result.appliedFilters.nameRegex)}`);
     if (filterParts.length) meta.push(`filters: ${filterParts.join(', ')}`);
 
     const lines = [`**${headerName}** — ${meta.join(' · ')}`];
@@ -254,9 +256,12 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
     if (result.entries.length === 0) {
       lines.push('', '_(empty)_');
     } else {
-      lines.push('', TYPE_LEGEND, '```');
-      lines.push(...renderTree(result.entries));
-      lines.push('```');
+      // Sized past any backtick run in an entry name, so no name can close the block.
+      lines.push(
+        '',
+        TYPE_LEGEND,
+        markdown().codeBlock(renderTree(result.entries).join('\n')).build(),
+      );
     }
 
     if (result.excluded) {

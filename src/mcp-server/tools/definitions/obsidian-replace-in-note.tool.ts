@@ -8,8 +8,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { frontmatterParseError, splice } from '@/services/obsidian/frontmatter-ops.js';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { inlineCode } from './_shared/markdown.js';
 import { nameRegexSafetyIssue } from './_shared/regex-safety.js';
 import { TargetSchema } from './_shared/schemas.js';
 
@@ -331,15 +333,19 @@ export const obsidianReplaceInNote = tool('obsidian_replace_in_note', {
 
   format: (result) => {
     const lines = [
-      `**Replaced in ${result.path}**`,
+      `**Replaced in ${escapeMarkdownInline(result.path)}**`,
       `*Total replacements:* ${result.totalReplacements}`,
       `*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`,
       '',
       '**Per replacement**',
     ];
     for (const r of result.perReplacement) {
+      // A code span reads a line break back as a space; escaped text keeps it.
+      const search = /[\r\n]/.test(r.search)
+        ? escapeMarkdownInline(r.search)
+        : inlineCode(r.search);
       lines.push(
-        `- \`${r.search}\` → ${r.count} match${r.count === 1 ? '' : 'es'} (body ${r.bodyCount}, frontmatter ${r.frontmatterCount})`,
+        `- ${search} → ${r.count} match${r.count === 1 ? '' : 'es'} (body ${r.bodyCount}, frontmatter ${r.frontmatterCount})`,
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];

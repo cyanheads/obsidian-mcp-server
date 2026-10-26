@@ -15,6 +15,7 @@ import {
   type DynamicReply,
   documentMapV2,
   instructionOf,
+  markdownText,
   noteJson,
   repeatKey,
   servePluginVersion,
@@ -167,7 +168,7 @@ describe('obsidian_append_to_note (case variant on a case-insensitive filesystem
       existingPath: 'Notes/case.md',
       recovery: { hint: contractRecovery },
     });
-    const text = textOf(res);
+    const text = markdownText(textOf(res));
     expect(text).toContain("Note 'Notes/case.md' already exists");
     expect(text).toContain(contractRecovery);
     expect(text).not.toContain('Internal Server Error');

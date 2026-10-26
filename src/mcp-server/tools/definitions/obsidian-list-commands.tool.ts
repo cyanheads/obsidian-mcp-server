@@ -9,7 +9,9 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { inlineCode } from './_shared/markdown.js';
 import { nameRegexSafetyIssue } from './_shared/regex-safety.js';
 
 export const obsidianListCommands = tool('obsidian_list_commands', {
@@ -94,12 +96,14 @@ export const obsidianListCommands = tool('obsidian_list_commands', {
   format: (result) => {
     const activeRegex = result.appliedFilters?.nameRegex;
     if (result.commands.length === 0) {
-      const filterNote = activeRegex ? ` matching \`${activeRegex}\`` : '';
+      const filterNote = activeRegex ? ` matching ${inlineCode(activeRegex)}` : '';
       return [{ type: 'text', text: `_No commands available${filterNote}._` }];
     }
-    const filterSuffix = activeRegex ? ` · nameRegex=\`${activeRegex}\`` : '';
+    const filterSuffix = activeRegex ? ` · nameRegex=${inlineCode(activeRegex)}` : '';
     const lines = [`**${result.commands.length} commands**${filterSuffix}`, ''];
-    for (const c of result.commands) lines.push(`- \`${c.id}\` — ${c.name}`);
+    for (const c of result.commands) {
+      lines.push(`- ${inlineCode(c.id)} — ${escapeMarkdownInline(c.name)}`);
+    }
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

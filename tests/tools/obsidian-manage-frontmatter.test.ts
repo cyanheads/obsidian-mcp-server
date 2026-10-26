@@ -13,6 +13,7 @@ import {
   installMovingTargetVault,
   instructionOf,
   MOVING_TARGET_NOTES,
+  markdownText,
   servePluginVersion,
   setupHarness,
 } from '../helpers.js';
@@ -304,11 +305,17 @@ describe('obsidian_manage_frontmatter / delete refuses an unsafe frontmatter blo
     });
 
     expect(res.isError).toBe(true);
-    const error = (res.structuredContent as { error: { code: number; data: { reason: string } } })
-      .error;
+    const error = (
+      res.structuredContent as {
+        error: { code: number; message: string; data: { reason: string } };
+      }
+    ).error;
     expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(error.data.reason).toBe('frontmatter_invalid');
-    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    const text = markdownText(
+      res.content.map((b) => (b as { text?: string }).text ?? '').join('\n'),
+    );
+    expect(text).toContain(error.message);
     expect(text).toContain('not safely editable');
     expect(text).toContain(declaredRecovery('frontmatter_invalid'));
     expect(puts).toBe(0);

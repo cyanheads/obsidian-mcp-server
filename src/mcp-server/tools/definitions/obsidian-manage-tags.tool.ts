@@ -11,8 +11,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { listTagsFromContent, reconcileTags } from '@/services/obsidian/frontmatter-ops.js';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { inlineCode } from './_shared/markdown.js';
 import { TargetSchema } from './_shared/schemas.js';
 
 const LocationSchema = z
@@ -254,7 +256,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
   format: ({ result }) => {
     if (result.operation === 'list') {
       const lines = [
-        `**Tags (operation: ${result.operation}) in ${result.path}**`,
+        `**Tags (operation: ${result.operation}) in ${escapeMarkdownInline(result.path)}**`,
         `*Frontmatter (${result.tags.frontmatter.length}):* ${formatTags(result.tags.frontmatter)}`,
         `*Inline (${result.tags.inline.length}):* ${formatTags(result.tags.inline)}`,
         `*All (${result.tags.all.length}):* ${formatTags(result.tags.all)}`,
@@ -262,7 +264,7 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       return [{ type: 'text', text: lines.join('\n') }];
     }
     const lines = [
-      `**${result.operation === 'add' ? 'Added tags to' : 'Removed tags from'} ${result.path}** (operation: ${result.operation})`,
+      `**${result.operation === 'add' ? 'Added tags to' : 'Removed tags from'} ${escapeMarkdownInline(result.path)}** (operation: ${result.operation})`,
       `*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`,
       `*Applied (${result.applied.length}):* ${formatTags(result.applied)}`,
       `*Skipped (${result.skipped.length}):* ${formatTags(result.skipped)}`,
@@ -274,5 +276,5 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
 
 function formatTags(tags: string[]): string {
   if (tags.length === 0) return '_(none)_';
-  return tags.map((t) => `\`#${t}\``).join(' ');
+  return tags.map((t) => inlineCode(`#${t}`)).join(' ');
 }

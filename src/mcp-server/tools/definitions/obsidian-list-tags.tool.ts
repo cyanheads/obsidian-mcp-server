@@ -13,6 +13,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { inlineCode } from './_shared/markdown.js';
 import { nameRegexSafetyIssue } from './_shared/regex-safety.js';
 
 /** Bounded so the first exploratory call cannot return the whole tag distribution. */
@@ -185,7 +186,7 @@ export const obsidianListTags = tool('obsidian_list_tags', {
     const lines = [`**${result.tags.length} tags**${suffix ? ` · ${suffix}` : ''}`];
     if (result.tags.length > 0) {
       lines.push('');
-      for (const t of result.tags) lines.push(`- \`#${t.name}\` (${t.count})`);
+      for (const t of result.tags) lines.push(`- ${inlineCode(`#${t.name}`)} (${t.count})`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },
@@ -198,7 +199,7 @@ function describeFilters(filters: {
   limit?: number | undefined;
 }): string {
   const parts: string[] = [];
-  if (filters.nameRegex) parts.push(`nameRegex=\`${filters.nameRegex}\``);
+  if (filters.nameRegex) parts.push(`nameRegex=${inlineCode(filters.nameRegex)}`);
   if (filters.minCount !== undefined) parts.push(`minCount=${filters.minCount}`);
   if (filters.limit !== undefined) parts.push(`limit=${filters.limit}`);
   return parts.join(' · ');

@@ -13,6 +13,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { type Context, inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getObsidianService, type ObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { TargetSchema } from './_shared/schemas.js';
 import { findSimilarPaths } from './_shared/suggest-paths.js';
@@ -273,7 +274,7 @@ export function buildDeleteNoteTool({ elicitation }: { elicitation: boolean }) {
     format: (result) => [
       {
         type: 'text',
-        text: `**Deleted ${result.path}** (size: ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes)`,
+        text: `**Deleted ${escapeMarkdownInline(result.path)}** (size: ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes)`,
       },
     ],
   });

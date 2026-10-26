@@ -8,6 +8,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 import {
   ContentTypeSchema,
@@ -193,9 +194,9 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
     {
       type: 'text',
       text: [
-        `**Patched ${result.path}**`,
+        `**Patched ${escapeMarkdownInline(result.path)}**`,
         `*Operation:* ${result.operation}`,
-        `*Section:* ${result.section.type} → ${result.section.target}`,
+        `*Section:* ${result.section.type} → ${escapeMarkdownInline(result.section.target)}`,
         `*Size:* ${result.previousSizeInBytes} → ${result.currentSizeInBytes} bytes`,
       ].join('\n'),
     },
