@@ -835,14 +835,12 @@ describe('OBSIDIAN_DENY_PATHS — denials', () => {
     'names a resolved note by its target label: %s',
     (label) => {
       const p = new PathPolicy(cfg(DENY));
-      for (const err of [
-        thrownBy(() => p.assertReadable('Private/secret.md', label)),
-        thrownBy(() => p.assertWritable('Private/secret.md', label)),
-      ]) {
-        expect(err.message).toMatch(
-          new RegExp(
-            `^Target '${label.replace(/[()]/g, '\\$&')}' resolves to a note that is not (readable|writable): withheld by OBSIDIAN_DENY_PATHS \\(subreason denied_path\\)\\.$`,
-          ),
+      for (const [op, err] of [
+        ['readable', thrownBy(() => p.assertReadable('Private/secret.md', label))],
+        ['writable', thrownBy(() => p.assertWritable('Private/secret.md', label))],
+      ] as const) {
+        expect(err.message).toBe(
+          `Target '${label}' resolves to a note that is not ${op}: withheld by OBSIDIAN_DENY_PATHS (subreason denied_path).`,
         );
         expect(err.data).toMatchObject({ path: label, subreason: 'denied_path' });
         expect(err.data).not.toHaveProperty('activeScope');

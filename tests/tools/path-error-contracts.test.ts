@@ -369,11 +369,9 @@ describe('path_forbidden on a target resolving into OBSIDIAN_DENY_PATHS names th
     const requests = installTargetUpstream({ denyPaths: DENY_PATHS }, 'Private/secret.md');
     const { error, text } = await denialOf(tool, input);
     expect(error).toMatchObject({ code: JsonRpcErrorCode.Forbidden, data: { path: label } });
-    expect(error.message).toMatch(
-      new RegExp(
-        `^Target '${label.replace(/[()]/g, '\\$&')}' resolves to a note that is not (readable|writable): withheld by OBSIDIAN_DENY_PATHS \\(subreason denied_path\\)\\.$`,
-      ),
-    );
+    const withheld = (op: string) =>
+      `Target '${label}' resolves to a note that is not ${op}: withheld by OBSIDIAN_DENY_PATHS (subreason denied_path).`;
+    expect([withheld('readable'), withheld('writable')]).toContain(error.message);
     expectWithheldEnvelope(error, text);
     for (const hidden of ['secret', 'Private']) {
       expect(JSON.stringify(error)).not.toContain(hidden);
