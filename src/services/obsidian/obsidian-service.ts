@@ -196,10 +196,11 @@ const CONTENT_BATCH_BYTES = 32 * 1024 * 1024;
 const BODY_READ_CONCURRENCY = 32;
 
 /**
- * Wall-clock ceiling on one scoped JSONLogic search: the context fetch, every
- * body read with its retries, and the evaluation. One deadline for the whole
- * search, not one per request, so a search over a broad scope answers or fails
- * inside the 60 s an MCP client waits for a response by default.
+ * Wall-clock ceiling on one scoped text or JSONLogic search: its upstream
+ * search, every body read with its retries, and the matching or evaluation.
+ * One deadline for the whole search, not one per request, so a search over a
+ * broad scope answers or fails inside the 60 s an MCP client waits for a
+ * response by default.
  */
 const SCOPED_SEARCH_DEADLINE_MS = 45_000;
 
@@ -416,9 +417,9 @@ export class ObsidianService {
   #walkChars = 0;
 
   /**
-   * The queue every note-body read of a scoped JSONLogic search waits in, so
-   * {@link BODY_READ_CONCURRENCY} bounds the reads in flight across concurrent
-   * searches rather than per search.
+   * The queue every note-body read of a scoped text or JSONLogic search waits
+   * in, so {@link BODY_READ_CONCURRENCY} bounds the reads in flight across
+   * concurrent searches rather than per search.
    */
   readonly #bodyReads = createPacer({
     name: 'obsidian-note-bodies',
