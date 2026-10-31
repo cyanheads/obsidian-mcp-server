@@ -15,6 +15,7 @@ const ENV_KEYS = [
   'OBSIDIAN_ENABLE_COMMANDS',
   'OBSIDIAN_READ_PATHS',
   'OBSIDIAN_WRITE_PATHS',
+  'OBSIDIAN_DENY_PATHS',
   'OBSIDIAN_READ_ONLY',
   'OBSIDIAN_DELETE_ELICITATION',
   'OBSIDIAN_OMNISEARCH_URL',
@@ -45,6 +46,7 @@ describe('getServerConfig', () => {
       writePaths: undefined,
       readOnly: false,
     });
+    expect(config.denyPaths).toBeUndefined();
   });
 
   it('coerces "true"/"1" to boolean true', () => {
@@ -187,6 +189,58 @@ describe('OBSIDIAN_READ_PATHS / OBSIDIAN_WRITE_PATHS — separator parity with P
     vi.stubEnv('OBSIDIAN_READ_PATHS', 'foo/bar,foo\\bar,FOO\\BAR');
     expect(getServerConfig().readPaths).toEqual(['foo/bar']);
   });
+});
+
+/**
+ * A prefix is stored in the form a vault path reaches the plugin in: no empty
+ * or `.` segments, NFC. Kept verbatim, `./private` or `Journal//Therapy` names
+ * a prefix no vault path matches — a refusal for an allowlist, and a deny
+ * entry that denies nothing.
+ */
+describe('path lists — stored the way vault paths reach the plugin', () => {
+  it('drops `.` segments and collapses repeated separators', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', './Private,Journal//Therapy,a/./b\\\\c/');
+    expect(getServerConfig().readPaths).toEqual(['private', 'journal/therapy', 'a/b/c']);
+  });
+
+  it('stores an NFD spelling as NFC, deduplicating the two', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_WRITE_PATHS', `${'Café'.normalize('NFD')},${'café'.normalize('NFC')}`);
+    expect(getServerConfig().writePaths).toEqual(['café'.normalize('NFC')]);
+  });
+
+  it.each([['.'], ['./'], ['./.']])('rejects %j, which names the vault root', (value) => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_DENY_PATHS', value);
+    expect(() => getServerConfig()).toThrow(/OBSIDIAN_DENY_PATHS.*vault root/);
+  });
+});
+
+describe('OBSIDIAN_DENY_PATHS', () => {
+  it('parses with the allowlist parser', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_DENY_PATHS', ' Private/ ,, Journal\\Therapy,private');
+    expect(getServerConfig().denyPaths).toEqual(['private', 'journal/therapy']);
+  });
+
+  it('treats empty, whitespace-only, and placeholder values as unset', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    for (const value of ['', '   ', `\${user_config.OBSIDIAN_DENY_PATHS}`]) {
+      resetServerConfig();
+      vi.stubEnv('OBSIDIAN_DENY_PATHS', value);
+      expect(getServerConfig().denyPaths, value).toBeUndefined();
+    }
+  });
+
+  it.each([[',,'], ['/private'], ['notes/../private']])(
+    'rejects %j, naming the variable',
+    (value) => {
+      vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+      vi.stubEnv('OBSIDIAN_DENY_PATHS', value);
+      expect(() => getServerConfig()).toThrow(/OBSIDIAN_DENY_PATHS/);
+    },
+  );
 });
 
 /**

@@ -174,13 +174,16 @@ export function v2Instruction(
  * `content` reduced as markdown-patch 2.0 reduces a plain heading write before
  * placing it: line endings read as `\n`, leading blank lines and all trailing
  * whitespace dropped, first-line indentation kept (`canonicalFragment` in
- * markdown-patch 2.0.0, less the one line ending it then adds).
+ * markdown-patch 2.0.0, less the one line ending it then adds). The trailing
+ * trim is `trimEnd()`, which drops exactly what 2.0's `/\s+$/` does; on Node
+ * that regex backtracks across every whitespace run that does not end the
+ * content, in time quadratic in the run.
  */
 export function canonicalContent(content: string): string {
   return content
     .replace(/\r\n?/g, '\n')
     .replace(/^(?:[^\S\n]*\n)+/, '')
-    .replace(/\s+$/, '');
+    .trimEnd();
 }
 
 function parseJsonContent(content: string): unknown {

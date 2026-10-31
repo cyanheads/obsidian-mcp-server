@@ -28,11 +28,20 @@ const DEFAULT_MATCHES_PER_HIT = 10;
 /** Omnisearch's hardwired upstream cap — pagination/limit params are ignored. */
 const OMNISEARCH_UPSTREAM_CAP = 50;
 
+/** Why an omnisearch result may be missing matches its 50-hit cap cut. */
+const OMNISEARCH_TRUNCATIONS = {
+  cap_reached: `Omnisearch returned its ${OMNISEARCH_UPSTREAM_CAP}-hit cap, so more matches may exist. Narrow with \`path:\`, \`ext:\`, or more plain terms, which Omnisearch applies before the cap.`,
+  filtered_after_cap: `Omnisearch keeps its top ${OMNISEARCH_UPSTREAM_CAP} matches before it applies quoted terms and \`-exclusion\` terms, so matches past the cap were never checked. Narrow with \`path:\`, \`ext:\`, or more plain terms, which apply before the cap, or rerun without the quoted and excluded terms to see whether the cap was reached.`,
+  read_scope: `Omnisearch keeps its top ${OMNISEARCH_UPSTREAM_CAP} matches across the whole vault before the read scope filters them, so readable matches may be missing. Add a \`path:\` term naming a readable folder, which Omnisearch applies before the cap.`,
+} as const;
+
+type OmnisearchTruncation = keyof typeof OMNISEARCH_TRUNCATIONS;
+
 const CursorSchema = z
   .string()
   .optional()
   .describe(
-    'Opaque cursor from a prior response. Omit for the first page. Page size is server-determined; do not assume a fixed value. Under OBSIDIAN_READ_PATHS, later `jsonlogic` pages come from the hit list the first page computed.',
+    'Opaque cursor from a prior response. Omit for the first page. Page size is server-determined; do not assume a fixed value. Under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS, later `jsonlogic` pages come from the hit list the first page computed.',
   );
 
 const TextHitSchema = z
@@ -97,7 +106,11 @@ const OmnisearchHitSchema = z
   .object({
     filename: z.string().describe('Vault-relative path of the matching note.'),
     basename: z.string().describe('Note basename without extension.'),
-    score: z.number().describe('BM25 relevance score. Higher is more relevant.'),
+    score: z
+      .number()
+      .describe(
+        'BM25 relevance score. Higher is more relevant. Omnisearch computes it over the whole vault, so under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS notes outside the scope still move it.',
+      ),
     foundWords: z
       .array(z.string())
       .describe(
@@ -137,24 +150,24 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
     : 'Search the vault by text tokens or JSONLogic predicate. Pick the mode that matches the query shape. Results paginate via opaque cursors: omit `cursor` for the first page, then pass `nextCursor` from the prior response. Text-mode hits additionally clip per file at `maxMatchesPerHit` match locations.';
 
   const textModeDescription =
-    '`text` splits `query` on whitespace and requires every token, each matched case-insensitively as a substring of the filename or note body. Quotes are literal characters, not a phrase operator. Each hit returns match locations with surrounding context windows; tokens that sit close together, such as the words of a phrase, share one location.';
+    '`text` splits `query` on spaces and requires every token, each matched case-insensitively as a substring of the filename or note body; a tab or line break stays part of its token. Quotes are literal characters, not a phrase operator. Each hit returns match locations with surrounding context windows; tokens that sit close together, such as the words of a phrase, share one location.';
 
   const jsonlogicModeDescription =
-    '`jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, `stat.{ctime,mtime,size}`, and `links`, `backlinks`, and `unresolvedLinks` (on plugin versions that provide them; under OBSIDIAN_READ_PATHS, readable entries only), plus `glob` and `regexp` operators — both take their arguments as `[PATTERN, VALUE]`, so the pattern comes first and the `{"var": ...}` reference second.';
+    '`jsonlogic` evaluates a JSONLogic tree against each note, with `var` paths into `path`, `content`, `frontmatter.<key>`, `tags`, `stat.{ctime,mtime,size}`, and `links`, `backlinks`, and `unresolvedLinks` (on plugin versions that provide them; not under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS, where a tree that reads them is rejected), plus `glob` and `regexp` operators — both take their arguments as `[PATTERN, VALUE]`, so the pattern comes first and the `{"var": ...}` reference second.';
 
   const inputSchema = z.object({
     mode: z
       .enum(modeEnum)
       .describe(
         omnisearchReachable
-          ? `Which search algorithm to run. ${textModeDescription} ${jsonlogicModeDescription} \`omnisearch\` runs a BM25-ranked query via the Omnisearch plugin — supports quoted phrases, \`-exclusion\`, \`path:\` / \`ext:\` filters, typo tolerance, and PDF/OCR (with Text Extractor); upstream caps results at 50.`
+          ? `Which search algorithm to run. ${textModeDescription} ${jsonlogicModeDescription} \`omnisearch\` runs a BM25-ranked query via the Omnisearch plugin — supports quoted phrases, \`-exclusion\`, \`path:\` / \`ext:\` filters, typo tolerance, and PDF/OCR (with Text Extractor). Omnisearch keeps its top ${OMNISEARCH_UPSTREAM_CAP} matches, applying \`path:\` and \`ext:\` before that cap and quoted phrases and \`-exclusion\` after the cap (see \`truncated\`).`
           : `Which search algorithm to run. ${textModeDescription} ${jsonlogicModeDescription}`,
       ),
     query: z
       .string()
       .optional()
       .describe(
-        'The query string. Required for `text` and `omnisearch` modes; ignored in `jsonlogic` mode (use `logic` instead — this field must be a string, so passing a JSONLogic tree here is rejected). In `text` mode it is split on whitespace and every token must appear; quotes stay part of the tokens, so a quoted phrase matches nothing unless the note contains the quote characters.',
+        'The query string. Required for `text` and `omnisearch` modes; ignored in `jsonlogic` mode (use `logic` instead — this field must be a string, so passing a JSONLogic tree here is rejected). In `text` mode it is split on spaces and every token must appear; quotes stay part of the tokens, so a quoted phrase matches nothing unless the note contains the quote characters.',
       ),
     logic: z
       .record(z.string(), z.unknown())
@@ -237,7 +250,13 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       truncated: z
         .boolean()
         .describe(
-          "True when the upstream returned exactly 50 raw hits (Omnisearch's hardwired cap); more matches may exist that are not retrievable. Narrow the query to surface additional results.",
+          `True whenever Omnisearch's ${OMNISEARCH_UPSTREAM_CAP}-hit cap may have cut matches that are not retrievable: when it returned ${OMNISEARCH_UPSTREAM_CAP} or more; when the query holds quoted terms or \`-exclusion\` terms, which Omnisearch applies after its cap; and always under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS, where the cap ranks the whole vault before the read scope filters it, so which readable notes make it depends on notes outside the scope. Narrow with \`path:\`, \`ext:\`, or more plain terms, which Omnisearch applies before its cap.`,
+        ),
+      truncatedReason: z
+        .enum(['cap_reached', 'filtered_after_cap', 'read_scope'])
+        .optional()
+        .describe(
+          'Why `truncated` is true, present only then: `cap_reached` (Omnisearch returned its cap), `filtered_after_cap` (quoted or `-exclusion` terms filtered after the cap), `read_scope` (the cap ran over the whole vault before the read scope filtered it).',
         ),
     })
     .describe('Omnisearch BM25 results.');
@@ -273,15 +292,15 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       code: JsonRpcErrorCode.ValidationError,
       when: '`query` is missing for `text` or `omnisearch` mode (required for both).',
       recovery:
-        'Pass `query` — whitespace-separated tokens, all required, for text mode, or BM25 query syntax (quoted phrases, `-exclusion`, `path:` / `ext:` filters) for omnisearch.',
+        'Pass `query` — space-separated tokens, all required, for text mode, or BM25 query syntax (quoted phrases, `-exclusion`, `path:` / `ext:` filters) for omnisearch.',
     },
     {
       reason: 'context_length_too_large',
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The Local REST API exhausted its string capacity building one context window per match, so the whole text search failed.',
+      when: "The matches would make a response longer than one can be, so the whole text search failed: the Local REST API runs out of string capacity serializing them, or, under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS, the readable notes' matches alone would pass the same ceiling. Each match costs its context window plus about 150 characters of offsets and framing.",
       recovery:
-        'Lower `contextLength`, or narrow the query so fewer notes match. The ceiling is the product of the two, so a broad query fails at a much smaller window than a narrow one does.',
+        'Narrow the query so fewer notes match, and drop very common tokens: every occurrence of each token in a matching note is a match costing about 150 characters beside its window, so a token like `the` can fail even at `contextLength` 0. Lowering `contextLength` helps only while the windows, about twice `contextLength` each, dominate that cost.',
     },
     {
       reason: 'logic_required',
@@ -302,17 +321,33 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       reason: 'logic_too_costly',
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
-      when: "With OBSIDIAN_READ_PATHS set, the server evaluates the JSONLogic tree itself, and the tree passed a bound: nesting deeper than 1,000 levels, more than a work budget, or more than 10 s of evaluation. One work budget is per note — the size of values built by `merge`, `cat`, `map`, and array literals while evaluating that note, up to the note's own size plus 10,000,000 units — and one is per search: 10,000,000 units across every note for returned results, where a result whose JSON is at most 1,024 characters is free and a larger one pays for what it holds beyond its own note.",
+      when: "With OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS set, the server evaluates the JSONLogic tree itself, and the tree passed a bound: nesting deeper than 1,000 levels, more than a work budget, more than 10 s of evaluation, or more than 45 s for the whole search, reading the readable notes included. One work budget is per note — the size of values built by `merge`, `cat`, `map`, and array literals while evaluating that note, up to the note's own size plus 10,000,000 units — and one is per search: 10,000,000 units across every note for returned results, where a result whose JSON is at most 1,024 characters is free and a larger one pays for what it holds beyond its own note.",
       recovery:
         "Simplify the tree: nest fewer levels, avoid building arrays or strings many times a note's size with `merge`, `cat`, `map`, or `reduce`, return values drawn from the note rather than large built values or constants, and prefer a simpler `regexp` pattern.",
+    },
+    {
+      reason: 'text_search_too_costly',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'With OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS set, the server runs text mode itself, reading every readable note whose path or body holds each token, and reading and matching them took more than 45 s.',
+      recovery:
+        'Add rarer tokens, which every candidate note must contain, so fewer readable notes are read, or ask the operator to narrow OBSIDIAN_READ_PATHS or extend OBSIDIAN_DENY_PATHS.',
+    },
+    {
+      reason: 'link_fields_unavailable',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'With OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS set, the JSONLogic tree names `links`, `backlinks`, or `unresolvedLinks` in a `var`. Scoped searches leave these fields out, since Obsidian resolves each link across the whole vault, notes outside the scope included; a computed `var` key reads them as null.',
+      recovery:
+        'Find backlinks by body text: `{"regexp": ["\\\\[\\\\[Target Note(\\\\\\\\?\\\\||#|\\\\]\\\\])", {"var": "content"}]}` matches every readable note that wikilinks or embeds `Target Note`. For a note\'s outgoing links, call `obsidian_get_note` with `includeLinks: true`.',
     },
     {
       reason: 'note_too_deep',
       thrownBy: 'service',
       code: JsonRpcErrorCode.SerializationError,
-      when: 'With OBSIDIAN_READ_PATHS set, a readable note holds data, usually a frontmatter value, nested deeper than the server can hand to its evaluator (about 3,500 levels under Node, more under Bun).',
+      when: 'With OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS set, a readable note holds data, usually a frontmatter value, nested deeper than the server can hand to its evaluator (about 3,500 levels under Node, more under Bun).',
       recovery:
-        'Flatten the deeply nested value, usually a frontmatter field, in the note the message names, or ask the operator to leave that note out of OBSIDIAN_READ_PATHS; no scoped jsonlogic search runs while it is readable.',
+        'Flatten the deeply nested value, usually a frontmatter field, in the note the message names, or ask the operator to leave that note out of OBSIDIAN_READ_PATHS or add it to OBSIDIAN_DENY_PATHS; no scoped jsonlogic search runs while it is readable.',
     },
     {
       reason: 'omnisearch_unreachable',
@@ -414,12 +449,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       }
       ctx.enrich.echo(input.query);
       const raw = await svc.searchOmnisearch(ctx, input.query);
-      /**
-       * Compute `truncated` against the raw upstream array, before path-policy
-       * filtering — a filtered-down set legitimately under 50 should not be
-       * reported as truncated.
-       */
-      const truncated = raw.length >= OMNISEARCH_UPSTREAM_CAP;
+      const truncatedReason = omnisearchTruncation(input.query, raw.length, policy.restrictsReads);
       const allowed = policy.filterReadable(raw);
       const page = paginate(allowed, input.cursor, ctx);
       if (page.hits.length === 0) {
@@ -431,7 +461,8 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
         result: {
           mode: 'omnisearch' as const,
           ...page,
-          truncated,
+          truncated: truncatedReason !== undefined,
+          ...(truncatedReason ? { truncatedReason } : {}),
         },
       };
     },
@@ -441,9 +472,9 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       const pageInfo = `${result.hits.length} on this page · ${result.totalCount} total`;
       const cursorInfo = result.nextCursor ? ' · more available' : '';
       lines.push(`**Search (${result.mode}) — ${pageInfo}${cursorInfo}**`);
-      if (result.mode === 'omnisearch' && result.truncated) {
+      if (result.mode === 'omnisearch' && result.truncatedReason) {
         lines.push(
-          `_Upstream returned the full ${OMNISEARCH_UPSTREAM_CAP}-hit cap; more matches may exist. Narrow the query to surface them._`,
+          `_Truncated (${result.truncatedReason}): ${OMNISEARCH_TRUNCATIONS[result.truncatedReason]}_`,
         );
       }
       if (result.nextCursor) {
@@ -531,6 +562,44 @@ function paginate<T>(
  */
 function requestContext(ctx: Context): RequestContext {
   return ctx as unknown as RequestContext;
+}
+
+/**
+ * Why Omnisearch's 50-hit cap may have cut matches from a result, or
+ * `undefined` when the result is complete. Under a read scope the cap ranks
+ * the whole vault before the scope filters it, so only out-of-scope notes
+ * could tell whether it cut a readable match: the result is never called
+ * complete there. Otherwise a full cap, or a query Omnisearch filters after
+ * the cap (`filteredAfterCap`), leaves it unknown.
+ */
+function omnisearchTruncation(
+  query: string,
+  upstreamHits: number,
+  readScoped: boolean,
+): OmnisearchTruncation | undefined {
+  if (readScoped) return 'read_scope';
+  if (upstreamHits >= OMNISEARCH_UPSTREAM_CAP) return 'cap_reached';
+  if (filteredAfterCap(query)) return 'filtered_after_cap';
+  return;
+}
+
+/**
+ * True when Omnisearch (1.31.0) may filter `query`'s results after its cap:
+ * it applies quoted terms (any `"`, or a term opening with `'`, which its
+ * parser reads as a quoted phrase) and `-exclusion` terms once it has kept
+ * its top 50, while `path:`, `ext:`, and `-path:` apply before. Read
+ * generously: a query that might be filtered after the cap counts as one that
+ * is.
+ */
+function filteredAfterCap(query: string): boolean {
+  if (query.includes('"')) return true;
+  return query
+    .split(/\s+/)
+    .some(
+      (term) =>
+        term.startsWith("'") ||
+        (term.length > 1 && term.startsWith('-') && !/^-(?:path|ext):/i.test(term)),
+    );
 }
 
 function clipMatches<T extends { matches: unknown[] }>(

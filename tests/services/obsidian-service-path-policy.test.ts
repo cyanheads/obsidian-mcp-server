@@ -6,11 +6,12 @@
  * @module tests/services/obsidian-service-path-policy.test
  */
 
+import { Worker } from 'node:worker_threads';
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { Headers } from 'undici';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import { obsidianGetNote } from '@/mcp-server/tools/definitions/obsidian-get-note.tool.js';
 import {
@@ -18,7 +19,18 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
+import { PathPolicy } from '@/services/obsidian/path-policy.js';
 import type { NoteTarget } from '@/services/obsidian/types.js';
+import {
+  CAPTURE_QUERIES,
+  type CaptureName,
+  loadCapture,
+  loadRuleCaptures,
+  PROBE_BODY,
+  PROBE_PATH,
+  type RawHit,
+  simulateSimpleSearch,
+} from '../fixtures/simple-search/simulate.js';
 import {
   deepNoteFetch,
   jsonLogicVault,
@@ -27,6 +39,7 @@ import {
   mockResponse,
   NON_PATH_TARGETS,
   rejectionOf,
+  type VaultNote,
 } from '../helpers.js';
 
 let ctx: Context;
@@ -39,6 +52,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setObsidianService(undefined);
+  vi.restoreAllMocks();
 });
 
 function buildService(
@@ -395,23 +409,19 @@ describe('searchJsonLogic — OBSIDIAN_READ_PATHS evaluates over readable notes 
     { path: 'Private/p.md', links: ['Work/a.md'] },
   ];
 
-  /** A note context with the given link fields, as the plugin's `{ var: '' }` returns it. */
-  const context = (
-    path: string,
-    links: { links: string[]; backlinks: string[]; unresolvedLinks: string[] },
-  ) => ({
+  /** A note context as the plugin's `{ var: '' }` returns it, link fields included. */
+  const context = (path: string) => ({
     tags: [],
     frontmatter: {},
     stat: { ctime: 0, mtime: 0, size: 0 },
     path,
     content: '',
-    ...links,
   });
 
   /**
    * An upstream that ignores whatever tree it is sent and returns every
    * note's context, plus a field naming an out-of-scope note: the read-scope
-   * filter, not the guard, must keep out-of-scope notes and link entries out.
+   * filter, not the guard, must keep out-of-scope notes out.
    */
   function guardIgnoringService(config: Partial<ServerConfig>) {
     const fetchImpl: ObsidianFetch = async () =>
@@ -420,11 +430,10 @@ describe('searchJsonLogic — OBSIDIAN_READ_PATHS evaluates over readable notes 
           NOTES.map((n) => ({
             filename: n.path,
             result: {
-              ...context(n.path, {
-                links: n.links,
-                backlinks: NOTES.filter((m) => m.links.includes(n.path)).map((m) => m.path),
-                unresolvedLinks: n.unresolvedLinks ?? [],
-              }),
+              ...context(n.path),
+              links: n.links,
+              backlinks: NOTES.filter((m) => m.links.includes(n.path)).map((m) => m.path),
+              unresolvedLinks: n.unresolvedLinks ?? [],
               extra: ['Private/p.md'],
             },
           })),
@@ -434,29 +443,17 @@ describe('searchJsonLogic — OBSIDIAN_READ_PATHS evaluates over readable notes 
     return new ObsidianService(makeTestConfig(config), fetchImpl);
   }
 
-  it('gates the fetched contexts with the read scope, write paths included', async () => {
+  it('gates the fetched contexts with the read scope, write paths included, and drops their link fields', async () => {
     const svc = guardIgnoringService({ readPaths: ['work'], writePaths: ['drafts'] });
     expect(await svc.searchJsonLogic(ctx, { var: '' })).toEqual([
-      {
-        filename: 'Work/a.md',
-        result: context('Work/a.md', {
-          links: ['Drafts/d.md'],
-          backlinks: ['Drafts/d.md'],
-          unresolvedLinks: ['drafts/new'],
-        }),
-      },
-      {
-        filename: 'Drafts/d.md',
-        result: context('Drafts/d.md', {
-          links: ['Work/a.md'],
-          backlinks: ['Work/a.md'],
-          unresolvedLinks: [],
-        }),
-      },
+      { filename: 'Work/a.md', result: context('Work/a.md') },
+      { filename: 'Drafts/d.md', result: context('Drafts/d.md') },
     ]);
+    // A computed key reaches no link field either: it reads null, so no note is a hit.
+    expect(await svc.searchJsonLogic(ctx, { var: { cat: ['back', 'links'] } })).toEqual([]);
   });
 
-  it('fetches note bodies for readable notes only, in batches of at most 32 MiB', async () => {
+  it('reads each readable body with one GET /vault/{path}, none out of scope, however many batches they span', async () => {
     const big = 'a'.repeat(17 * 1024 * 1024);
     const vault = jsonLogicVault([
       { path: 'Work/one.md', content: `${big}1` },
@@ -473,13 +470,208 @@ describe('searchJsonLogic — OBSIDIAN_READ_PATHS evaluates over readable notes 
       { filename: 'Work/two.md', result: 'Work/two.md:2' },
       { filename: 'Work/empty.md', result: 'Work/empty.md:' },
     ]);
-    // Contexts without bodies, then one body fetch per batch, each naming only readable paths.
-    expect(vault.bodies).toHaveLength(3);
+    // One context search without bodies, then one read per readable note, in vault order.
+    expect(vault.requests).toEqual([
+      'POST /search/',
+      'GET /vault/Work/one.md',
+      'GET /vault/Work/two.md',
+      'GET /vault/Work/empty.md',
+    ]);
     expect(vault.bodies[0]).not.toContain('"content"');
-    const requested = vault.bodies
-      .slice(1)
-      .map((b) => (JSON.parse(b) as { if: [{ in: [unknown, string[]] }] }).if[0].in[1]);
-    expect(requested).toEqual([['Work/one.md'], ['Work/two.md', 'Work/empty.md']]);
+  });
+
+  /** Spy on every JSONLogic worker: the instances that took a batch, what each took, and which were terminated. */
+  function spyOnWorkers() {
+    const post = vi.spyOn(Worker.prototype, 'postMessage');
+    const terminate = vi.spyOn(Worker.prototype, 'terminate');
+    return {
+      batches: () =>
+        post.mock.calls.map(([request]) =>
+          (request as { notes: Array<{ path: string }> }).notes.map((n) => n.path),
+        ),
+      workers: () => new Set(post.mock.contexts),
+      terminated: () => new Set(terminate.mock.contexts),
+    };
+  }
+
+  it('evaluates every batch of a search on one worker, terminated when the search answers', async () => {
+    const big = 'a'.repeat(17 * 1024 * 1024);
+    const vault = jsonLogicVault([
+      { path: 'Work/one.md', content: `${big}1` },
+      { path: 'Work/two.md', content: `${big}2` },
+      { path: 'Work/three.md', content: 'three' },
+    ]);
+    const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), vault.fetchImpl);
+    const workers = spyOnWorkers();
+    expect(await svc.searchJsonLogic(ctx, { in: ['three', { var: 'content' }] })).toEqual([
+      { filename: 'Work/three.md', result: true },
+    ]);
+    expect(workers.batches()).toEqual([['Work/one.md'], ['Work/two.md', 'Work/three.md']]);
+    expect(workers.workers().size).toBe(1);
+    expect(workers.terminated()).toEqual(workers.workers());
+  });
+
+  it('reads the next batch only once the current one has been evaluated, and none after it fails', async () => {
+    const big = 'a'.repeat(17 * 1024 * 1024);
+    const vault = jsonLogicVault([
+      { path: 'Work/one.md', content: `${big}1` },
+      { path: 'Work/two.md', content: `${big}2` },
+      { path: 'Work/three.md', content: 'three' },
+    ]);
+    const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), vault.fetchImpl);
+    const workers = spyOnWorkers();
+    // An uncompilable pattern on the first batch's note fails the search there.
+    const logic = {
+      if: [
+        { '==': [{ var: 'path' }, 'Work/one.md'] },
+        { regexp: ['(', { var: 'content' }] },
+        false,
+      ],
+    };
+    const err = await rejectionOf<McpError>(svc.searchJsonLogic(ctx, logic));
+    expect(err.data).toMatchObject({ reason: 'logic_invalid' });
+    expect(vault.requests).toEqual(['POST /search/', 'GET /vault/Work/one.md']);
+    expect(workers.terminated()).toEqual(workers.workers());
+  });
+
+  it('evaluates a note gone by the time its body is read with an empty body', async () => {
+    const vault = jsonLogicVault([
+      { path: 'Work/kept.md', content: 'alpha' },
+      { path: 'Work/gone.md', content: 'alpha' },
+    ]);
+    // The note is deleted between the context search and the read of its body.
+    const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), async (url, init) => {
+      const res = await vault.fetchImpl(url, init);
+      if (vault.requests.length === 1) vault.remove('Work/gone.md');
+      return res;
+    });
+    expect(
+      await svc.searchJsonLogic(ctx, { cat: [{ var: 'path' }, '=', { var: 'content' }] }),
+    ).toEqual([
+      { filename: 'Work/kept.md', result: 'Work/kept.md=alpha' },
+      { filename: 'Work/gone.md', result: 'Work/gone.md=' },
+    ]);
+  });
+
+  it("hands a tree each body exactly as the plugin's search would: CRLF and non-ASCII text intact", async () => {
+    const body = '---\r\ntitle: Ünïcödé ✓\r\n---\r\nemoji 🧪 and 漢字\r\nlast';
+    const vault = jsonLogicVault([{ path: 'Work/text.md', content: body }]);
+    const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), vault.fetchImpl);
+    expect(await svc.searchJsonLogic(ctx, { var: 'content' })).toEqual([
+      { filename: 'Work/text.md', result: body },
+    ]);
+  });
+
+  it('fails any other body read typed, and stops reading once it has', async () => {
+    const vault = jsonLogicVault(
+      Array.from({ length: 400 }, (_, i) => ({ path: `Work/n${i}.md`, content: 'x' })),
+    );
+    const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), async (url, init) => {
+      if (new URL(url).pathname === '/vault/Work/n0.md') {
+        vault.requests.push('GET /vault/Work/n0.md');
+        return mockResponse('{"message":"denied"}', {
+          status: 403,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return vault.fetchImpl(url, init);
+    });
+    const err = await rejectionOf<McpError>(svc.searchJsonLogic(ctx, { var: 'content' }));
+    expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
+    expect(err.message).toBe(
+      'Obsidian Local REST API forbids this request. Check the plugin permissions.',
+    );
+    // Every read it started had settled when it failed: none is dispatched afterwards.
+    const reads = vault.requests.length;
+    expect(reads).toBeLessThan(400);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(vault.requests).toHaveLength(reads);
+  });
+
+  it("rethrows the caller's cancellation mid-read rather than answering, and reads nothing after it", async () => {
+    const controller = new AbortController();
+    const vault = jsonLogicVault(
+      Array.from({ length: 40 }, (_, i) => ({ path: `Work/n${i}.md`, content: 'x' })),
+    );
+    // Cancelled as the first body is requested.
+    const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), (url, init) => {
+      const res = vault.fetchImpl(url, init);
+      if (vault.requests.length === 2) controller.abort();
+      return res;
+    });
+    const err = await rejectionOf(
+      svc.searchJsonLogic(createMockContext({ signal: controller.signal }), {
+        in: ['x', { var: 'content' }],
+      }),
+    );
+    expect(err).toBe(controller.signal.reason);
+    expect(vault.requests).toHaveLength(2);
+  });
+
+  describe('one deadline for every request a search makes', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** A vault whose body reads never answer until their signal aborts. */
+    function stalledBodies(count: number) {
+      const vault = jsonLogicVault(
+        Array.from({ length: count }, (_, i) => ({ path: `Work/n${i}.md`, content: 'x' })),
+      );
+      const fetchImpl: ObsidianFetch = (url, init) => {
+        if (new URL(url).pathname.startsWith('/vault/')) {
+          vault.requests.push(`GET ${new URL(url).pathname}`);
+          return new Promise((_, reject) => {
+            init.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          });
+        }
+        return vault.fetchImpl(url, init);
+      };
+      return {
+        vault,
+        svc: new ObsidianService(makeTestConfig({ readPaths: ['work'] }), fetchImpl),
+      };
+    }
+
+    it('fails a search still reading bodies at 45 s with logic_too_costly, whatever the request count', async () => {
+      vi.useFakeTimers();
+      const { vault, svc } = stalledBodies(100);
+      let settled = false;
+      const run = svc.searchJsonLogic(ctx, { in: ['x', { var: 'content' }] }).finally(() => {
+        settled = true;
+      });
+      run.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(44_999);
+      expect(settled).toBe(false);
+      // At most 32 reads are in flight at once, and the deadline stops them all together.
+      expect(vault.requests.filter((r) => r.startsWith('GET'))).toHaveLength(32);
+      await vi.advanceTimersByTimeAsync(1);
+      const err = await rejectionOf<McpError>(run);
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data).toMatchObject({ reason: 'logic_too_costly' });
+      expect(err.message).toBe(
+        'The scoped JSONLogic search ran past 45 s reading and evaluating the readable notes.',
+      );
+      expect(vault.requests.filter((r) => r.startsWith('GET'))).toHaveLength(32);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("keeps the caller's cancellation a cancellation once the deadline is armed", async () => {
+      vi.useFakeTimers();
+      const { svc } = stalledBodies(3);
+      const controller = new AbortController();
+      const run = rejectionOf(
+        svc.searchJsonLogic(createMockContext({ signal: controller.signal }), {
+          in: ['x', { var: 'content' }],
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      controller.abort();
+      expect(await run).toBe(controller.signal.reason);
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 
   /** `count` readable notes, `Work/n000.md` on, tagged `x`, plus one out-of-scope note. */
@@ -585,15 +777,443 @@ describe('searchJsonLogic — OBSIDIAN_READ_PATHS evaluates over readable notes 
     expect(vault.bodies).toEqual([]);
   });
 
-  it('drops write-path notes and links under OBSIDIAN_READ_ONLY', async () => {
+  it('drops write-path notes under OBSIDIAN_READ_ONLY', async () => {
     const svc = guardIgnoringService({
       readPaths: ['work'],
       writePaths: ['drafts'],
       readOnly: true,
     });
-    expect(
-      await svc.searchJsonLogic(ctx, { cat: [{ var: 'path' }, ' → ', { var: 'links' }] }),
-    ).toEqual([{ filename: 'Work/a.md', result: 'Work/a.md → ' }]);
+    expect(await svc.searchJsonLogic(ctx, { var: 'path' })).toEqual([
+      { filename: 'Work/a.md', result: 'Work/a.md' },
+    ]);
+  });
+
+  it.each([
+    ['{"var": "links"}', { var: 'links' }, 'links'],
+    ['{"var": "backlinks.0"}', { var: 'backlinks.0' }, 'backlinks'],
+    ['{"var": ["unresolvedLinks", []]}', { var: ['unresolvedLinks', []] }, 'unresolvedLinks'],
+    [
+      'a backlinks test nested in a content tree',
+      { and: [{ in: ['x', { var: 'content' }] }, { in: ['Work/a.md', { var: 'backlinks' }] }] },
+      'backlinks',
+    ],
+  ])(
+    'rejects %s with link_fields_unavailable before any upstream request',
+    async (_label, logic, field) => {
+      const vault = jsonLogicVault([{ path: 'Work/a.md', content: 'x', links: ['Work/a.md'] }]);
+      const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), vault.fetchImpl);
+      const err = await rejectionOf<McpError>(svc.pageJsonLogic(ctx, logic, undefined, 50));
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data).toEqual({ reason: 'link_fields_unavailable' });
+      expect(err.message).toBe(
+        `The JSONLogic tree reads \`${field}\`, which a search under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS does not provide: \`links\`, \`backlinks\`, and \`unresolvedLinks\` follow Obsidian's link resolution across the whole vault.`,
+      );
+      expect(vault.requests).toEqual([]);
+    },
+  );
+});
+
+/**
+ * `OBSIDIAN_DENY_PATHS=private,notes/private` with no allowlist: every gate
+ * refuses a denied path before the upstream call, and every listing, tag
+ * count, and JSONLogic result leaves denied notes out — the deny list routes
+ * them through the same scoped paths OBSIDIAN_READ_PATHS does.
+ */
+describe('OBSIDIAN_DENY_PATHS — deny-only service gates', () => {
+  const DENY = { denyPaths: ['private', 'notes/private'] };
+
+  const expectWithheld = (err: McpError, path: string, op: 'read' | 'write') => {
+    expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
+    expect(err.data).toMatchObject({
+      reason: 'path_forbidden',
+      subreason: 'denied_path',
+      path,
+      op,
+    });
+    expect(err.data).not.toHaveProperty('activeScope');
+    expect(err.message).toContain('OBSIDIAN_DENY_PATHS');
+  };
+
+  it('refuses every read and write of a denied path before any upstream call', async () => {
+    const svc = buildService(DENY);
+    const path = 'Private/plan.md';
+    const target: NoteTarget = { type: 'path', path };
+    expectWithheld(await rejectionOf<McpError>(svc.getNoteContent(ctx, target)), path, 'read');
+    expectWithheld(await rejectionOf<McpError>(svc.getNoteJson(ctx, target)), path, 'read');
+    expectWithheld(await rejectionOf<McpError>(svc.tryGetSize(ctx, target)), path, 'read');
+    expectWithheld(await rejectionOf<McpError>(svc.openInUi(ctx, path)), path, 'read');
+    expectWithheld(await rejectionOf<McpError>(svc.writeNote(ctx, target, 'x')), path, 'write');
+    expectWithheld(await rejectionOf<McpError>(svc.appendToNote(ctx, target, 'x')), path, 'write');
+    expectWithheld(await rejectionOf<McpError>(svc.deleteNote(ctx, target)), path, 'write');
+    // The spellings the plugin resolves to the same note are refused the same way.
+    for (const spelling of ['notes//private/x.md', 'Notes\\Private\\x.md', 'NOTES/PRIVATE/x.md']) {
+      expectWithheld(
+        await rejectionOf<McpError>(svc.getNoteContent(ctx, { type: 'path', path: spelling })),
+        spelling,
+        'read',
+      );
+    }
+    expect(upstreamHits).toBe(0);
+  });
+
+  it('reads and writes a path outside the deny list', async () => {
+    const replies = new Map<string, () => MockResponse>([
+      [
+        '/vault/Notes/public.md',
+        () => mockResponse('hello', { status: 200, headers: { 'content-type': 'text/markdown' } }),
+      ],
+      ['/vault/Privateer/x.md', () => mockResponse('', { status: 200 })],
+    ]);
+    const svc = buildService(DENY, replies);
+    expect(await svc.getNoteContent(ctx, { type: 'path', path: 'Notes/public.md' })).toBe('hello');
+    await svc.writeNote(ctx, { type: 'path', path: 'Privateer/x.md' }, 'x');
+    expect(upstreamHits).toBe(2);
+  });
+
+  it('drops a denied folder from every listing level and refuses to list it', async () => {
+    const listing = (files: string[]) => () =>
+      mockResponse(JSON.stringify({ files }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    const replies = new Map([
+      ['/vault/', listing(['Private/', 'Notes/', 'todo.md', 'Privateer/'])],
+      ['/vault/Notes/', listing(['Private/', 'Public/', 'n.md'])],
+    ]);
+    const svc = buildService(DENY, replies);
+    expect(await svc.listFiles(ctx)).toEqual({ files: ['Notes/', 'todo.md', 'Privateer/'] });
+    // A folder holding a denied descendant lists, without it.
+    expect(await svc.listFiles(ctx, 'Notes')).toEqual({ files: ['Public/', 'n.md'] });
+    expect(upstreamHits).toBe(2);
+    for (const dir of ['Private', 'Notes/Private', 'notes//private', 'Notes/Private/Deeper']) {
+      expectWithheld(await rejectionOf<McpError>(svc.listFiles(ctx, dir)), dir, 'read');
+    }
+    expect(upstreamHits).toBe(2);
+  });
+
+  it('counts tags over the readable notes only, from one JSONLogic search', async () => {
+    const { svc, calls } = tagService({ denyPaths: ['private'] });
+    expect(await svc.listTags(ctx)).toEqual([
+      { name: 'work', count: 2 },
+      { name: 'work/a', count: 2 },
+      { name: 'work/b', count: 1 },
+      { name: 'shared', count: 2 },
+      { name: 'root-only', count: 1 },
+      { name: 'draft', count: 1 },
+      { name: 'draft/idea', count: 1 },
+    ]);
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(['POST /search/']);
+    // No allowlist, so the guard passes every path upstream; the deny list is applied here.
+    expect(JSON.parse(calls[0]?.body ?? 'null')).toEqual({
+      if: [{ regexp: ['^', { var: 'path' }] }, { var: '' }, null],
+    });
+  });
+
+  it('evaluates JSONLogic over the readable notes, and refuses the link fields without naming a deny prefix', async () => {
+    const vault = jsonLogicVault([
+      { path: 'Work/a.md', links: ['Private/p.md', 'Notes/Private/q.md', 'Work/b.md'] },
+      { path: 'Work/b.md', links: ['Work/a.md'], unresolvedLinks: ['private/new', 'other'] },
+      { path: 'Private/p.md', links: ['Work/a.md'], tags: ['x'] },
+      { path: 'Notes/Private/q.md', links: ['Work/a.md'], tags: ['x'] },
+    ]);
+    const svc = new ObsidianService(makeTestConfig(DENY), vault.fetchImpl);
+    expect(await svc.searchJsonLogic(ctx, { var: 'path' })).toEqual([
+      { filename: 'Work/a.md', result: 'Work/a.md' },
+      { filename: 'Work/b.md', result: 'Work/b.md' },
+    ]);
+    // A tree that matches only denied notes has no hits, rather than the plugin's.
+    expect(await svc.searchJsonLogic(ctx, { in: ['x', { var: 'tags' }] })).toEqual([]);
+    // Neither search sent the caller's tree upstream.
+    expect(vault.bodies.every((b) => b.includes('"regexp"'))).toBe(true);
+    const requests = vault.requests.length;
+    const err = await rejectionOf<McpError>(
+      svc.searchJsonLogic(ctx, { in: ['Work/a.md', { var: 'backlinks' }] }),
+    );
+    expect(err.data).toEqual({ reason: 'link_fields_unavailable' });
+    expect(JSON.stringify({ message: err.message, data: err.data })).not.toMatch(/private/i);
+    expect(vault.requests).toHaveLength(requests);
+  });
+
+  it('reads a note under a withheld folder through the bodies it fetches for readable notes only', async () => {
+    const vault = jsonLogicVault([
+      { path: 'Work/a.md', content: 'alpha' },
+      { path: 'Private/p.md', content: 'alpha secret' },
+    ]);
+    const svc = new ObsidianService(makeTestConfig(DENY), vault.fetchImpl);
+    expect(await svc.searchJsonLogic(ctx, { in: ['alpha', { var: 'content' }] })).toEqual([
+      { filename: 'Work/a.md', result: true },
+    ]);
+    expect(vault.requests).toEqual(['POST /search/', 'GET /vault/Work/a.md']);
+  });
+});
+
+/**
+ * Under a read scope `searchText` never calls `/search/simple/`, which builds
+ * a context window for every match in the vault: one guarded `/search/` names
+ * the readable notes whose path or body may hold every token, each of their
+ * bodies is one `GET /vault/{path}`, and the server matches them the way the
+ * plugin does. Issue #163.
+ */
+describe('searchText — under a read scope, matched in-server over the readable notes', () => {
+  const json = (body: unknown) =>
+    mockResponse(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  /** An unscoped service whose `/search/simple/` answers `hits`. */
+  const unscopedOver = (hits: RawHit[]) =>
+    new ObsidianService(makeTestConfig(), async (url) => {
+      if (new URL(url).pathname === '/search/simple/') return json(hits);
+      throw new Error(`unexpected ${url}`);
+    });
+
+  const scoped = (notes: VaultNote[], config: Partial<ServerConfig>) => {
+    const vault = jsonLogicVault(notes);
+    return { vault, svc: new ObsidianService(makeTestConfig(config), vault.fetchImpl) };
+  };
+
+  it('sends no /search/simple/ request: one guarded /search/, then one GET per readable candidate', async () => {
+    const { vault, svc } = scoped(
+      [
+        { path: 'Work/a.md', content: 'alpha beta' },
+        { path: 'Work/b.md', content: 'alpha only' },
+        { path: 'Work/Beta.md', content: 'Alpha' },
+        { path: 'Private/p.md', content: 'alpha beta secret' },
+      ],
+      { readPaths: ['work'] },
+    );
+    const hits = await svc.searchText(ctx, 'ALPHA beta', 5);
+    expect(hits.map((h) => h.filename)).toEqual(['Work/a.md', 'Work/Beta.md']);
+    expect(vault.requests).toEqual([
+      'POST /search/',
+      'GET /vault/Work/a.md',
+      'GET /vault/Work/Beta.md',
+    ]);
+    const token = (pattern: string) => ({
+      or: [{ regexp: [pattern, { var: 'path' }] }, { regexp: [pattern, { var: 'content' }] }],
+    });
+    const scope = new PathPolicy(makeTestConfig({ readPaths: ['work'] })).readScopePattern();
+    expect(JSON.parse(vault.bodies[0] ?? 'null')).toEqual({
+      if: [
+        {
+          and: [
+            { regexp: [scope, { var: 'path' }] },
+            token('[aA][lL][pP][hH][aA]'),
+            token('[bB][eE][tT][aA]'),
+          ],
+        },
+        { var: 'stat' },
+        null,
+      ],
+    });
+  });
+
+  it('gives the same hits, or the same context_length_too_large, whatever out-of-scope notes contain', async () => {
+    const needles = 'needle '.repeat(20_000);
+    const outcome = async (notes: VaultNote[]) =>
+      scoped(notes, { readPaths: ['work'] })
+        .svc.searchText(ctx, 'needle', 2 ** 28)
+        .then(
+          (hits) => ({ hits }),
+          (err: McpError) => ({ code: err.code, data: err.data, message: err.message }),
+        );
+    const small: VaultNote = { path: 'Work/a.md', content: 'one needle here' };
+    const huge: VaultNote = { path: 'Work/huge.md', content: needles };
+    const elsewhere: VaultNote[] = [
+      { path: 'Private/p.md', content: needles },
+      { path: 'Archive/needle.md', content: needles },
+    ];
+    // 20,000 windows each holding the whole note pass what one response can carry.
+    const fits = await outcome([small]);
+    expect(fits).toMatchObject({ hits: [{ filename: 'Work/a.md' }] });
+    expect(await outcome([small, ...elsewhere])).toEqual(fits);
+    const tooLarge = await outcome([small, huge]);
+    expect(tooLarge).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'context_length_too_large', contextLength: 2 ** 28 },
+    });
+    expect(await outcome([...elsewhere, small, huge])).toEqual(tooLarge);
+  });
+
+  it.each(Object.keys(CAPTURE_QUERIES) as CaptureName[])(
+    'answers as /search/simple/ does for the same readable note: %s',
+    async (name) => {
+      const query = CAPTURE_QUERIES[name];
+      const { svc } = scoped(
+        [
+          { path: 'Private/copy.md', content: PROBE_BODY },
+          { path: PROBE_PATH, content: PROBE_BODY },
+        ],
+        { readPaths: [PROBE_PATH.split('/')[0] ?? ''] },
+      );
+      const expected = await unscopedOver(loadCapture(name)).searchText(ctx, query, 100);
+      expect(expected.length).toBeGreaterThan(0);
+      expect(await svc.searchText(ctx, query, 100)).toEqual(expected);
+    },
+  );
+
+  it.each(loadRuleCaptures().captures.map((c) => [JSON.stringify(c.query), c] as const))(
+    'answers as /search/simple/ does under a deny list, in its order: %s',
+    async (_label, { query, contextLength, response }) => {
+      const rules = loadRuleCaptures();
+      const notes: VaultNote[] = rules.vaultOrder.map((path) => ({
+        path,
+        content: rules.notes.find((n) => n.path === path)?.body ?? '',
+      }));
+      // Denied copies of every note, first and in the middle of the vault order.
+      const denied = notes.map((n) => ({ ...n, path: `Private/${n.path}` }));
+      const { svc } = scoped(
+        [denied[0] as VaultNote, ...notes.slice(0, 3), ...denied.slice(1), ...notes.slice(3)],
+        {
+          denyPaths: ['private'],
+        },
+      );
+      const expected = await unscopedOver(response).searchText(ctx, query, contextLength);
+      expect(await svc.searchText(ctx, query, contextLength)).toEqual(expected);
+    },
+  );
+
+  it('answers as /search/simple/ does for a common token at a small window, with escapes, emoji, and filename spans', async () => {
+    const notes: VaultNote[] = [
+      { path: 'Work/eve.md', content: 'e "q" e\\p e\tt e\u0001c e 😀 e\r\n'.repeat(300) },
+      { path: 'Private/e.md', content: 'e '.repeat(500) },
+      { path: 'Work/plain.md', content: 'the e of ee\n'.repeat(400) },
+    ];
+    const readable = notes
+      .filter((n) => n.path.startsWith('Work/'))
+      .map((n) => ({ path: n.path, body: n.content ?? '' }));
+    for (const [query, contextLength] of [
+      ['e', 1],
+      ['e the', 0],
+    ] as const) {
+      const { hits } = simulateSimpleSearch(readable, query, contextLength);
+      const expected = await unscopedOver(hits).searchText(ctx, query, contextLength);
+      expect(expected.reduce((n, h) => n + h.matches.length, 0)).toBeGreaterThan(1_000);
+      const { svc } = scoped(notes, { denyPaths: ['private'] });
+      expect(await svc.searchText(ctx, query, contextLength)).toEqual(expected);
+    }
+  });
+
+  /**
+   * The plugin fails where its serialized response passes V8's longest
+   * string, and every match carries about 150 characters there beside its
+   * window. Nine notes of `e ` repeated 450,000 times, at contextLength 0, hold
+   * 4,050,000 one-character windows, far under that string, and a response of
+   * about 615 million characters, past it.
+   */
+  it('fails many small windows with context_length_too_large where their characters alone fit', async () => {
+    const content = 'e '.repeat(450_000);
+    const { svc } = scoped(
+      [
+        ...Array.from({ length: 9 }, (_, i) => ({ path: `Work/n${i}.md`, content })),
+        { path: 'Private/p.md', content },
+      ],
+      { denyPaths: ['private'] },
+    );
+    expect(9 * 450_000).toBeLessThan(2 ** 29 - 24);
+    const err = await rejectionOf<McpError>(svc.searchText(ctx, 'e', 0));
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.data).toEqual({ reason: 'context_length_too_large', contextLength: 0 });
+  }, 60_000);
+
+  it('sends no regexp for a token the case folding cannot express, and still finds the notes it matches', async () => {
+    const { vault, svc } = scoped(
+      [
+        { path: 'Work/Café.md', content: 'MENU of the day' },
+        { path: 'Work/other.md', content: 'menu without it' },
+      ],
+      { readPaths: ['work'] },
+    );
+    // 'café' is not ASCII and 'x\ny' could span the basename and the body: only 'menu' is sent.
+    const hits = await svc.searchText(ctx, 'café menu', 100);
+    expect(hits.map((h) => h.filename)).toEqual(['Work/Café.md']);
+    await svc.searchText(ctx, 'menu x\ny', 100);
+    for (const body of vault.bodies) {
+      const clauses = (JSON.parse(body) as { if: [{ and: unknown[] }] }).if[0].and;
+      expect(clauses).toHaveLength(2);
+      expect(JSON.stringify(clauses[1])).toContain('[mM][eE][nN][uU]');
+    }
+  });
+
+  it('reads no body for a query of spaces alone, and returns every readable note with no matches', async () => {
+    const { vault, svc } = scoped(
+      [
+        { path: 'Work/a.md', content: 'alpha' },
+        { path: 'Private/p.md', content: 'secret' },
+        { path: 'Work/b.md', content: '' },
+      ],
+      { readPaths: ['work'] },
+    );
+    expect(await svc.searchText(ctx, '   ', 100)).toEqual([
+      { filename: 'Work/a.md', matches: [] },
+      { filename: 'Work/b.md', matches: [] },
+    ]);
+    expect(vault.requests).toEqual(['POST /search/']);
+    expect(vault.bodies[0]).not.toContain('"content"');
+  });
+
+  describe('one deadline for every request a search makes', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** A readable vault whose body reads never answer until their signal aborts. */
+    function stalledBodies(count: number) {
+      const vault = jsonLogicVault(
+        Array.from({ length: count }, (_, i) => ({ path: `Work/n${i}.md`, content: 'x' })),
+      );
+      const fetchImpl: ObsidianFetch = (url, init) => {
+        if (new URL(url).pathname.startsWith('/vault/')) {
+          vault.requests.push(`GET ${new URL(url).pathname}`);
+          return new Promise((_, reject) => {
+            init.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            });
+          });
+        }
+        return vault.fetchImpl(url, init);
+      };
+      return {
+        vault,
+        svc: new ObsidianService(makeTestConfig({ readPaths: ['work'] }), fetchImpl),
+      };
+    }
+
+    it('fails a search still reading bodies at 45 s with text_search_too_costly', async () => {
+      vi.useFakeTimers();
+      const { vault, svc } = stalledBodies(100);
+      let settled = false;
+      const run = svc.searchText(ctx, 'x', 100).finally(() => {
+        settled = true;
+      });
+      run.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(44_999);
+      expect(settled).toBe(false);
+      expect(vault.requests.filter((r) => r.startsWith('GET'))).toHaveLength(32);
+      await vi.advanceTimersByTimeAsync(1);
+      const err = await rejectionOf<McpError>(run);
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data).toMatchObject({ reason: 'text_search_too_costly' });
+      expect(err.message).toBe(
+        'The scoped text search ran past 45 s reading and matching the readable notes.',
+      );
+      expect(vault.requests.filter((r) => r.startsWith('GET'))).toHaveLength(32);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("keeps the caller's cancellation a cancellation once the deadline is armed", async () => {
+      vi.useFakeTimers();
+      const { svc } = stalledBodies(3);
+      const controller = new AbortController();
+      const run = rejectionOf(
+        svc.searchText(createMockContext({ signal: controller.signal }), 'x', 100),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      controller.abort();
+      expect(await run).toBe(controller.signal.reason);
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 });
 
@@ -710,6 +1330,41 @@ describe('non-path targets — gate after JSON resolution', () => {
     );
     expect(err.data).toMatchObject({ path: '(active file)', subreason: 'read_only_mode' });
     expectNoResolvedPath(err);
+  });
+
+  it.each(TARGETS)(
+    'deny list: %j resolving to a withheld note names the target and sends no write',
+    async (target, label) => {
+      const { svc, requests } = resolvingService({ denyPaths: ['private'] });
+      for (const [call, op] of [
+        [svc.getNoteJson(ctx, target), 'read'],
+        [svc.getNoteContent(ctx, target), 'read'],
+        [svc.writeNote(ctx, target, 'x'), 'write'],
+        [svc.deleteNote(ctx, target), 'write'],
+      ] as const) {
+        const err = await rejectionOf<McpError>(call);
+        expect(err.message).toBe(
+          `Target '${label}' resolves to a note that is not ${op === 'read' ? 'readable' : 'writable'}: withheld by OBSIDIAN_DENY_PATHS (subreason denied_path).`,
+        );
+        expect(err.data).toEqual({
+          reason: 'path_forbidden',
+          path: label,
+          op,
+          subreason: 'denied_path',
+          recovery: {
+            hint: 'The operator withholds the note this target resolves to. Pass a path target to a different note, or ask the operator to change OBSIDIAN_DENY_PATHS.',
+          },
+        });
+        expectNoResolvedPath(err);
+      }
+      expect(requests.filter((r) => !r.startsWith('GET '))).toEqual([]);
+    },
+  );
+
+  it('deny list: a target in scope is read through its resolution, not the raw markdown route', async () => {
+    const { svc, requests } = resolvingService({ denyPaths: ['private'] }, 'Work/a.md');
+    expect(await svc.getNoteContent(ctx, { type: 'active' })).toBe('hi');
+    expect(requests).toEqual(['GET /active/']);
   });
 
   it('getDocumentMap and getNoteContent deny a resolved target by its label', async () => {

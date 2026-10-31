@@ -14,9 +14,18 @@ const BASELINE =
 const SCOPE_RECOVERY =
   'Paths outside scope reject with `path_forbidden` — error data carries the active scope so you can self-correct.';
 
-/** Prefixes as the instructions quote them; `undefined` is an unrestricted op. */
-function renderScope(scope: readonly string[] | undefined): string {
-  return scope === undefined ? 'full vault' : scope.map((p) => `'${p}'`).join(', ');
+const WITHHELD_RECOVERY = 'Withheld paths reject with subreason `denied_path` and carry no scope.';
+
+/**
+ * Prefixes as the instructions quote them; `undefined` is an unrestricted op,
+ * `[]` an op that reaches nothing. `withheld` notes that OBSIDIAN_DENY_PATHS
+ * carves paths out of the scope, without naming them: the deny prefixes name
+ * exactly what the list hides.
+ */
+function renderScope(scope: readonly string[] | undefined, withheld: boolean): string {
+  if (scope?.length === 0) return 'none';
+  const reach = scope === undefined ? 'full vault' : scope.map((p) => `'${p}'`).join(', ');
+  return withheld ? `${reach}, except paths the operator withholds` : reach;
 }
 
 /**
@@ -32,19 +41,21 @@ export function buildInstructions(opts: {
 }): string {
   const { enableCommands, omnisearchReachable, policy, readOnly } = opts;
   const { readable, writable } = policy.effectiveScope();
+  const withheld = policy.withholdsPaths;
+  const recovery = withheld ? `${SCOPE_RECOVERY} ${WITHHELD_RECOVERY}` : SCOPE_RECOVERY;
   const sections = [BASELINE];
   if (readOnly) {
     sections.push(
       'Read-only mode is active (OBSIDIAN_READ_ONLY=true): write tools are unavailable. `obsidian_open_in_ui` still opens notes that exist, but rejects an open against a missing path — Obsidian would create the file.',
     );
-    if (readable !== undefined) {
+    if (readable !== undefined || withheld) {
       sections.push(
-        `Vault path policy is enforced. Readable: ${renderScope(readable)}. ${SCOPE_RECOVERY}`,
+        `Vault path policy is enforced. Readable: ${renderScope(readable, withheld)}. ${recovery}`,
       );
     }
   } else if (!policy.isUnrestricted) {
     sections.push(
-      `Vault path policy is enforced. Readable: ${renderScope(readable)}. Writable: ${renderScope(writable)}. ${SCOPE_RECOVERY}`,
+      `Vault path policy is enforced. Readable: ${renderScope(readable, withheld)}. Writable: ${renderScope(writable, withheld)}. ${recovery}`,
     );
   }
   if (enableCommands && !readOnly) {
@@ -53,8 +64,12 @@ export function buildInstructions(opts: {
     );
   }
   if (omnisearchReachable) {
+    const omnisearch =
+      '`obsidian_search_notes` includes an `omnisearch` mode: BM25-ranked, typo-tolerant, with PDF/OCR coverage (via the Text Extractor plugin). Omnisearch keeps only its top 50 matches: narrow with `path:` / `ext:` filters or more plain terms, which apply before that cap. Quoted phrases and `-exclusion` filter only those 50, so a result using them is marked `truncated`.';
     sections.push(
-      '`obsidian_search_notes` includes an `omnisearch` mode: BM25-ranked, typo-tolerant, with PDF/OCR coverage (via the Text Extractor plugin). Results cap at 50 upstream — narrow the query (quoted phrases, `-exclusion`, `path:` / `ext:` filters) to surface more.',
+      policy.restrictsReads
+        ? `${omnisearch} Under the read scope the cap ranks the whole vault before the scope filters it, so \`truncated\` is always true; a \`path:\` term naming a readable folder ranks within that folder.`
+        : omnisearch,
     );
   }
   return sections.join('\n\n');

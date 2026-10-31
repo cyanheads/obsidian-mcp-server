@@ -1,9 +1,10 @@
 /**
  * @fileoverview Worker-thread entry that evaluates a caller's JSONLogic tree
- * against note contexts, for searches scoped by OBSIDIAN_READ_PATHS. Runs the
- * operator set the Local REST API plugin runs (json-logic-js 2.0.5 plus its
- * `glob` and `regexp`), with the plugin's hit test and JSON-shaped results, so
- * a scoped search answers as the plugin would over the same notes.
+ * against note contexts, for searches scoped by OBSIDIAN_READ_PATHS or
+ * OBSIDIAN_DENY_PATHS. Runs the operator set the Local REST API plugin runs
+ * (json-logic-js 2.0.5 plus its `glob` and `regexp`), with the plugin's hit
+ * test and JSON-shaped results, so a scoped search answers as the plugin would
+ * over the same notes.
  *
  * Off the main thread so a slow tree cannot hold the event loop: the evaluator
  * terminates this worker at its deadline, which also stops a native regex
@@ -23,7 +24,7 @@ import { parentPort } from 'node:worker_threads';
 import globToRegExp from 'glob-to-regexp';
 import jsonLogic from 'json-logic-js';
 
-/** A note as the plugin's JSONLogic search evaluates it, link fields already scoped. */
+/** A note as the plugin's JSONLogic search evaluates it, less the link fields a scoped search leaves out. */
 export interface NoteContext {
   path: string;
   [field: string]: unknown;
@@ -263,6 +264,7 @@ function evaluate(request: EvaluationRequest): EvaluationResponse {
   return { ok: true, hits, keptUnitsLeft };
 }
 
-parentPort?.once('message', (request: EvaluationRequest) => {
+/** One reply per request: a search's batches arrive one at a time, each answered before the next is sent. */
+parentPort?.on('message', (request: EvaluationRequest) => {
   parentPort?.postMessage(evaluate(request));
 });

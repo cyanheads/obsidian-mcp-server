@@ -6,7 +6,8 @@
  * that tool's own `errors[]` advertises — a declared reason nothing can throw, or a hint that has drifted
  * from the contract, fails here rather than shipping as a dead entry. The
  * `path_forbidden` cells check what a denial on an `active` or `periodic`
- * target names on both surfaces.
+ * target names on both surfaces, and that a `denied_path` denial names no
+ * deny prefix.
  * @module tests/tools/path-error-contracts.test
  */
 
@@ -15,9 +16,11 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
+import { obsidianVaultNote } from '@/mcp-server/resources/definitions/obsidian-vault-note.resource.js';
 import { obsidianAppendToNote } from '@/mcp-server/tools/definitions/obsidian-append-to-note.tool.js';
 import { obsidianDeleteNote } from '@/mcp-server/tools/definitions/obsidian-delete-note.tool.js';
 import { obsidianGetNote } from '@/mcp-server/tools/definitions/obsidian-get-note.tool.js';
+import { obsidianListNotes } from '@/mcp-server/tools/definitions/obsidian-list-notes.tool.js';
 import { obsidianManageFrontmatter } from '@/mcp-server/tools/definitions/obsidian-manage-frontmatter.tool.js';
 import { obsidianManageTags } from '@/mcp-server/tools/definitions/obsidian-manage-tags.tool.js';
 import { obsidianOpenInUi } from '@/mcp-server/tools/definitions/obsidian-open-in-ui.tool.js';
@@ -307,5 +310,75 @@ describe('path_forbidden on a readable target outside OBSIDIAN_WRITE_PATHS names
       methods: ['GET', 'HEAD'],
       requests,
     });
+  });
+});
+
+/**
+ * `OBSIDIAN_DENY_PATHS=private,journal`: a denial names the variable and the
+ * subreason on both surfaces, carries no scope, and names neither deny prefix
+ * — the strings below are the prefixes as the parser stores them.
+ */
+const DENY_PATHS = ['private', 'journal'];
+
+function expectWithheldEnvelope(
+  error: { data: Record<string, unknown>; message: string },
+  text: string,
+) {
+  expect(error.data).toMatchObject({ reason: 'path_forbidden', subreason: 'denied_path' });
+  expect(error.data).not.toHaveProperty('activeScope');
+  expect(error.message).toMatch(/: withheld by OBSIDIAN_DENY_PATHS \(subreason denied_path\)\.$/);
+  expect(text).toContain(error.message);
+  expect(text).toContain('denied_path');
+  for (const prefix of DENY_PATHS) {
+    expect(JSON.stringify(error)).not.toContain(prefix);
+    expect(text).not.toContain(prefix);
+  }
+}
+
+describe('every path_forbidden contract names the deny list among its causes', () => {
+  it.each([
+    ...MATRIX.map((c) => [c.tool.name, c.tool.errors] as const),
+    [obsidianListNotes.name, obsidianListNotes.errors] as const,
+    ['obsidian://vault/{+path}', obsidianVaultNote.errors] as const,
+  ])('%s', (_name, errors) => {
+    const entry = errors?.find((e) => e.reason === 'path_forbidden');
+    expect(entry?.when).toContain('inside OBSIDIAN_DENY_PATHS');
+  });
+});
+
+describe('path_forbidden with denied_path reaches every path-taking tool', () => {
+  it.each(MATRIX.map((c) => [c.tool.name, c] as const))('%s', async (_name, cell) => {
+    const requests: string[] = [];
+    const fetchImpl: ObsidianFetch = async (url, init) => {
+      requests.push(`${(init.method ?? 'GET').toUpperCase()} ${new URL(url).pathname}`);
+      return mockResponse('', { status: 200 });
+    };
+    setObsidianService(new ObsidianService(makeTestConfig({ denyPaths: DENY_PATHS }), fetchImpl));
+    const { error, text } = await denialOf(cell.tool, cell.input('Private/Plan.md'));
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+      data: { path: 'Private/Plan.md' },
+    });
+    expectWithheldEnvelope(error, text);
+    expect(requests).toEqual([]);
+  });
+});
+
+describe('path_forbidden on a target resolving into OBSIDIAN_DENY_PATHS names the target', () => {
+  it.each(onEveryTarget(READ_CELLS))('%s', async (_name, tool, input, label) => {
+    const requests = installTargetUpstream({ denyPaths: DENY_PATHS }, 'Private/secret.md');
+    const { error, text } = await denialOf(tool, input);
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.Forbidden, data: { path: label } });
+    expect(error.message).toMatch(
+      new RegExp(
+        `^Target '${label.replace(/[()]/g, '\\$&')}' resolves to a note that is not (readable|writable): withheld by OBSIDIAN_DENY_PATHS \\(subreason denied_path\\)\\.$`,
+      ),
+    );
+    expectWithheldEnvelope(error, text);
+    for (const hidden of ['secret', 'Private']) {
+      expect(JSON.stringify(error)).not.toContain(hidden);
+      expect(text).not.toContain(hidden);
+    }
+    expect(requests.filter((r) => !r.startsWith('GET '))).toEqual([]);
   });
 });

@@ -255,12 +255,16 @@ describe('obsidian_search_notes / text locations — the merge rule', () => {
   });
 
   it('never merges spans of a single distinct token, even of different text', async () => {
-    // `aa` over `aa aaaa`: two spans, 'aa' and the coalesced 'aaaa'.
-    const body = 'aa aaaa';
+    /**
+     * `aa` over `İ aa aa`: upstream's offsets index the lower-cased text, where
+     * `İ` is two characters, so each span's slice of the note sits one
+     * character late and the two read 'a ' and 'a'. Merging would join them.
+     */
+    const body = 'İ aa aa';
     const { result } = await run(body, 'aa', 10);
     expect(spansOf(result)).toEqual([
-      [0, 2, 'aa'],
-      [3, 7, 'aaaa'],
+      [3, 5, 'a '],
+      [6, 8, 'a'],
     ]);
   });
 

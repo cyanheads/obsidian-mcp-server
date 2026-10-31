@@ -36,6 +36,7 @@ import {
 } from '@/services/obsidian/obsidian-service.js';
 import {
   contractErrorOf,
+  expectLinearCost,
   makeTestConfig,
   mockResponse,
   noteJson,
@@ -714,6 +715,29 @@ describe('obsidian_delete_note on a case-folding filesystem', () => {
     expect(err.message).toBe(`Not found: ${WRONG}. Did you mean: "${REAL}"?`);
     expect(vault.requests).toContain('GET /vault/Projects/');
     expect(vault.requests.filter((r) => r.startsWith('DELETE'))).toEqual([]);
+  });
+
+  /**
+   * The suggestion trims the not-found message, which names the caller's path:
+   * timed from 5k to 320k characters (`expectLinearCost`) on a space run inside
+   * that path.
+   */
+  it('suggests a near match for a path holding a long space run in linear time', async () => {
+    await expectLinearCost(
+      (n) => `Projects/A${' '.repeat(n)}B.md`,
+      async (wrong) => {
+        const real = `Projects/${wrong.slice('Projects/'.length).toLowerCase()}`;
+        installVault({ [real]: NOTE_BODY }, { caseFolding: true });
+        const err = await rejectionOf(
+          (async () =>
+            defaultDeleteNote.handler(
+              defaultDeleteNote.input.parse({ target: { type: 'path', path: wrong } }),
+              createMockContext({ errors: defaultDeleteNote.errors }),
+            ))(),
+        );
+        expect(err.message).toBe(`Not found: ${wrong}. Did you mean: "${real}"?`);
+      },
+    );
   });
 
   it('the exact path still deletes in one call', async () => {

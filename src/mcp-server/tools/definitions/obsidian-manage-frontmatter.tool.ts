@@ -81,8 +81,9 @@ export const obsidianManageFrontmatter = tool('obsidian_manage_frontmatter', {
       reason: 'path_forbidden',
       thrownBy: 'service',
       code: JsonRpcErrorCode.Forbidden,
-      when: '`get` requires the path to be readable; `set`/`delete` require it to be inside OBSIDIAN_WRITE_PATHS, with OBSIDIAN_READ_ONLY=false.',
-      recovery: 'Use a path inside the configured scope. The error data echoes the active scope.',
+      when: '`get` requires the path to be readable; `set`/`delete` require it to be inside OBSIDIAN_WRITE_PATHS, with OBSIDIAN_READ_ONLY=false. A path inside OBSIDIAN_DENY_PATHS is neither.',
+      recovery:
+        'Use a path inside the configured scope. The error data echoes the active scope; a `denied_path` denial carries none, since the operator withholds that path.',
     },
     {
       reason: 'value_required',

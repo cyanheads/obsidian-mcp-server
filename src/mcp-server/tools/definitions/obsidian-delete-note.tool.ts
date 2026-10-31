@@ -16,7 +16,7 @@ import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/err
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getObsidianService, type ObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { TargetSchema } from './_shared/schemas.js';
-import { findSimilarPaths } from './_shared/suggest-paths.js';
+import { didYouMean, findSimilarPaths } from './_shared/suggest-paths.js';
 
 const OPERATION = 'obsidian_delete_note';
 const CONSENT_TTL_SECONDS = 600;
@@ -64,9 +64,8 @@ async function readExactNote(ctx: Context, svc: ObsidianService, path: string): 
     if (!(err instanceof McpError) || err.code !== JsonRpcErrorCode.NotFound) throw err;
     const suggestions = await findSimilarPaths(ctx, svc, path);
     if (suggestions.length === 0) throw err;
-    const list = suggestions.map((s) => `"${s}"`).join(', ');
     throw notFound(
-      `${err.message.replace(/[.!?]?\s*$/, '')}. Did you mean: ${list}?`,
+      didYouMean(err.message, suggestions),
       { ...(err.data ?? {}), suggestions },
       { cause: err },
     );
@@ -76,8 +75,9 @@ async function readExactNote(ctx: Context, svc: ObsidianService, path: string): 
 
 /**
  * `elicitation` mirrors `OBSIDIAN_DELETE_ELICITATION`. Off, the operator's
- * `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_READ_ONLY` are what bound a delete — the
- * same bound `obsidian_write_note` with `overwrite: true` already has.
+ * `OBSIDIAN_WRITE_PATHS` / `OBSIDIAN_DENY_PATHS` / `OBSIDIAN_READ_ONLY` are
+ * what bound a delete — the same bound `obsidian_write_note` with
+ * `overwrite: true` already has.
  */
 export function buildDeleteNoteTool({ elicitation }: { elicitation: boolean }) {
   return tool('obsidian_delete_note', {
@@ -106,9 +106,9 @@ export function buildDeleteNoteTool({ elicitation }: { elicitation: boolean }) {
         reason: 'path_forbidden',
         thrownBy: 'service',
         code: JsonRpcErrorCode.Forbidden,
-        when: 'The target path is outside OBSIDIAN_WRITE_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes.',
+        when: 'The target path is outside OBSIDIAN_WRITE_PATHS or inside OBSIDIAN_DENY_PATHS, or OBSIDIAN_READ_ONLY=true denies all writes.',
         recovery:
-          'Use a path inside the configured write scope. The error data echoes the active scope.',
+          'Use a path inside the configured write scope. The error data echoes the active scope; a `denied_path` denial carries none, since the operator withholds that path.',
       },
       /** Declared only where it can fire: the off build never asks, so never throws it. */
       ...(elicitation

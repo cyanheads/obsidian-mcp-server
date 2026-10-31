@@ -4,8 +4,9 @@
  *
  * Not a mirror of `obsidian_list_tags`: this is a snapshot of
  * `ObsidianService.listTags`, returned whole and unsorted — the upstream
- * `/tags/` payload in upstream order, or under OBSIDIAN_READ_PATHS the tags of
- * readable notes in order of first appearance. The tool shapes the same
+ * `/tags/` payload in upstream order, or under OBSIDIAN_READ_PATHS or
+ * OBSIDIAN_DENY_PATHS the tags of readable notes in order of first
+ * appearance. The tool shapes the same
  * payload for an LLM caller — count-descending, capped, filterable — and that
  * shaping deliberately lives in the tool handler rather than the shared
  * service call both make.
@@ -18,7 +19,7 @@ import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
 export const obsidianTags = resource('obsidian://tags', {
   name: 'obsidian-tags',
   description:
-    'All tags found in the Obsidian vault, with usage counts, unsorted and uncapped — a full snapshot. When OBSIDIAN_READ_PATHS is set, only tags carried by readable notes. Includes hierarchical parents (e.g. `work` for `work/tasks`). Use the `obsidian_list_tags` tool for a count-ranked, capped, filterable view.',
+    'All tags found in the Obsidian vault, with usage counts, unsorted and uncapped — a full snapshot. When OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS is set, only tags carried by readable notes. Includes hierarchical parents (e.g. `work` for `work/tasks`). Use the `obsidian_list_tags` tool for a count-ranked, capped, filterable view.',
   mimeType: 'application/json',
   params: z.object({}),
   output: z.object({
@@ -30,13 +31,13 @@ export const obsidianTags = resource('obsidian://tags', {
             count: z
               .number()
               .describe(
-                'Times the tag, or a tag nested under it, occurs across the vault. When OBSIDIAN_READ_PATHS is set: the number of readable notes carrying the tag or a tag nested under it.',
+                'Times the tag, or a tag nested under it, occurs across the vault. When OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS is set: the number of readable notes carrying the tag or a tag nested under it.',
               ),
           })
           .describe('A tag with its usage count.'),
       )
       .describe(
-        'Every tag in the vault, in the order the Local REST API reports them. When OBSIDIAN_READ_PATHS is set: every tag carried by a readable note, in order of first appearance.',
+        'Every tag in the vault, in the order the Local REST API reports them. When OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS is set: every tag carried by a readable note, in order of first appearance.',
       ),
   }),
   auth: ['resource:obsidian-tags:read'],

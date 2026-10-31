@@ -10,10 +10,10 @@
  * the depth limit cut off recursion. Drill deeper by passing a higher `depth`,
  * narrowing with `path`, or filtering with `extension`/`nameRegex`.
  *
- * Under OBSIDIAN_READ_PATHS, `ObsidianService.listFiles` returns only readable
- * entries and the folders on the way to the scope, and lists those folders
- * when asked — so the walk descends into everything it is handed, and the
- * entry cap and totals count returned entries only.
+ * Under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS, `ObsidianService.listFiles`
+ * returns only readable entries and the folders on the way to the scope, and
+ * lists those folders when asked — so the walk descends into everything it is
+ * handed, and the entry cap and totals count returned entries only.
  *
  * Named `_notes` rather than `_files` to disambiguate from agents' generic
  * file-system tools (Read, Glob, LS) — a `_files` tool surface tempts agents
@@ -25,7 +25,11 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
-import { getObsidianService, type ObsidianService } from '@/services/obsidian/obsidian-service.js';
+import {
+  getObsidianService,
+  type ObsidianService,
+  trimSlashes,
+} from '@/services/obsidian/obsidian-service.js';
 import { inlineCode } from './_shared/markdown.js';
 import { nameRegexSafetyIssue } from './_shared/regex-safety.js';
 
@@ -156,9 +160,9 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
       reason: 'path_forbidden',
       thrownBy: 'service',
       code: JsonRpcErrorCode.Forbidden,
-      when: 'The supplied `path` is outside OBSIDIAN_READ_PATHS and is not a folder on the way to it. The vault root and the folders leading to a scoped path always list, showing only in-scope entries.',
+      when: 'The supplied `path` is outside OBSIDIAN_READ_PATHS and is not a folder on the way to it, or is inside OBSIDIAN_DENY_PATHS. The vault root and the folders leading to a scoped path always list, showing only in-scope entries.',
       recovery:
-        'List a directory inside the configured read scope, or omit `path` to list from the vault root. The error data echoes the active scope.',
+        'List a directory inside the configured read scope, or omit `path` to list from the vault root. The error data echoes the active scope; a `denied_path` denial carries none, since the operator withholds that path.',
     },
     {
       reason: 'directory_missing',
@@ -208,7 +212,7 @@ export const obsidianListNotes = tool('obsidian_list_notes', {
         : `.${input.extension.toLowerCase()}`
       : undefined;
 
-    const rootDir = (input.path ?? '').replace(/^\/+|\/+$/g, '');
+    const rootDir = trimSlashes(input.path ?? '');
     const state: WalkState = { entries: [], totalFiles: 0, totalDirs: 0, cappedByEntries: false };
     await walkVault(svc, ctx, rootDir, 1, state, { depth, regex, ext });
 

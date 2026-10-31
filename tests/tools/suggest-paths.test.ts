@@ -8,11 +8,13 @@ import { forbidden, JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/er
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import {
+  didYouMean,
+  findCaseVariants,
   findSimilarPaths,
   withCaseFallback,
 } from '@/mcp-server/tools/definitions/_shared/suggest-paths.js';
 import type { NoteTarget } from '@/services/obsidian/types.js';
-import { setupHarness } from '../helpers.js';
+import { expectLinearCost, rejectionOf, setupHarness } from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -256,5 +258,68 @@ describe('withCaseFallback', () => {
         throw orig;
       }),
     ).rejects.toBe(orig);
+  });
+});
+
+describe('didYouMean', () => {
+  it.each([
+    ['a bare message', 'Not found: a.md', 'Not found: a.md'],
+    ['a closing period', 'Not found: a.md.', 'Not found: a.md'],
+    ['a closing period and spaces', 'Not found: a.md.  ', 'Not found: a.md'],
+    ['two closing marks, of which one goes', 'Not found: a.md!?', 'Not found: a.md!'],
+    ['a period then a spaced period', 'x. . ', 'x. '],
+    ['a space before the closing period', 'x . \t', 'x '],
+    ['a trailing no-break space and line separator', 'x.\u{a0}\u{2028}', 'x'],
+    ['an interior space run', 'Not found: a   b.md', 'Not found: a   b.md'],
+    ['whitespace only', ' \n ', ''],
+    ['an empty message', '', ''],
+  ])('drops what `/[.!?]?\\s*$/` drops from %s', (_label, message, kept) => {
+    expect(message.replace(/[.!?]?\s*$/, '')).toBe(kept);
+    expect(didYouMean(message, ['b.md', 'c'])).toBe(`${kept}. Did you mean: "b.md", "c"?`);
+  });
+});
+
+/**
+ * The probes trim a caller-sized path and the error message that names it, so
+ * each is timed from 5k to 320k characters (`expectLinearCost`): a slash run
+ * inside the path, and a space run inside the message.
+ */
+describe('path probes / cost', () => {
+  it('lists the parent of a path holding a long slash run in linear time', async () => {
+    await expectLinearCost(
+      (n) => `x${'/'.repeat(n)}y.md`,
+      async (target) => {
+        harness
+          .current()
+          .pool.intercept({ path: '/vault/x/', method: 'GET' })
+          .reply(200, { files: ['Y.md'] });
+        const out = await findCaseVariants(createMockContext(), harness.current().service, target);
+        expect(out).toEqual({ exact: false, variants: [`${target.slice(0, -4)}Y.md`] });
+      },
+    );
+  });
+
+  it('suggests a near match for a path holding a long space run in linear time', async () => {
+    await expectLinearCost(
+      (n) => `a${' '.repeat(n)}b.md`,
+      async (target) => {
+        const near = target.slice(0, -3);
+        harness
+          .current()
+          .pool.intercept({ path: '/vault/', method: 'GET' })
+          .reply(200, { files: [near] });
+        const err = await rejectionOf(
+          withCaseFallback(
+            createMockContext(),
+            harness.current().service,
+            { type: 'path', path: target },
+            async () => {
+              throw notFound(`Not found: ${target}`, { path: target });
+            },
+          ),
+        );
+        expect(err.message).toBe(`Not found: ${target}. Did you mean: "${near}"?`);
+      },
+    );
   });
 });

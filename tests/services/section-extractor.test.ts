@@ -7,13 +7,17 @@
 import { Lexer, type Tokens } from 'marked';
 import { describe, expect, it } from 'vitest';
 import {
+  atxHeadingMarkers,
   blockKinds,
   extractSection,
   listHeadingPaths,
+  scanHeadings,
   sectionBody,
+  sectionLevel,
   v1HeadingSpan,
 } from '@/services/obsidian/section-extractor.js';
 import type { NoteJson } from '@/services/obsidian/types.js';
+import { expectLinearCost } from '../helpers.js';
 
 const baseStat = { ctime: 0, mtime: 0, size: 0 };
 
@@ -1010,57 +1014,121 @@ describe('listHeadingPaths / the plugin parser', () => {
   });
 });
 
-/**
- * Thread CPU milliseconds `run` takes. CPU time rather than wall-clock time, so
- * a test worker descheduled under a parallel run cannot fail a cost budget.
- */
-function cpuMs(run: () => void): number {
-  const start = process.threadCpuUsage();
-  run();
-  const used = process.threadCpuUsage(start);
-  return (used.user + used.system) / 1000;
-}
+/** `unit` repeated to exactly `size` characters. */
+const fill = (unit: string, size: number) =>
+  unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
 
 /**
- * The scan is linear in note length: an 80k-character note of each shape —
- * including ones built to stress the lexer — scans well inside the CPU budget.
- * A quadratic scan takes seconds on these.
+ * Nesting stock `marked` lexes one call deeper per level, each shape as one
+ * long line ending in a break and with breaks throughout: list markers on one
+ * line, alone and over lazy lines every nested item runs on to; markers in a
+ * lazily continued blockquote; a `>` run over a lazy line; and quoted lines
+ * alternating with lazy ones, each pair continuing the quote one level deeper.
+ * Duplicate definitions between headings exercise the offsets' accounting for
+ * each definition `marked` drops. The third element is where a shape's span
+ * starts when the default one would cross the size at which Bun's regex engine
+ * slows on it (~13× from 20k to 40k characters of alternating quotes, ~15× from
+ * 160k to 320k on one line of markers), so the span stays inside one tier.
+ */
+const NESTING_SHAPES: Array<[string, (size: number) => string, number?]> = [
+  ['`* ` markers on one line', (n) => `${'* '.repeat(n / 2)}x\n`, 2_500],
+  ['`* ` markers over lazy lines', (n) => `${'* '.repeat(n / 4)}x\n${'y\n'.repeat(n / 4)}`],
+  ['`- ` markers on one line', (n) => `${'- '.repeat(n / 2)}x\n`, 2_500],
+  ['`+ ` markers on one line', (n) => `${'+ '.repeat(n / 2)}x\n`],
+  ['`1. ` markers on one line', (n) => `${'1. '.repeat(n / 3)}x\n`],
+  ['`1. ` markers over lazy lines', (n) => `${'1. '.repeat(n / 6)}x\n${'y\n'.repeat(n / 4)}`],
+  ['mixed markers on one line', (n) => `${'- * + 1. '.repeat(n / 9)}x\n`],
+  ['markers in a blockquote over a lazy line', (n) => `> ${'* '.repeat(n / 2)}x\nlazy\n`, 2_500],
+  [
+    'markers in a blockquote over lazy lines',
+    (n) => `> ${'* '.repeat(n / 4)}x\n${'lazy\n'.repeat(n / 10)}`,
+  ],
+  ['a `>` run over a lazy line', (n) => `${'> '.repeat(n / 2)}x\nlazy\n`],
+  ['quoted lines alternating with lazy ones', (n) => fill('> > x\nlazy\n', n), 300],
+  ['duplicate definitions between headings', (n) => fill('[r]: /a\n# h\n', n)],
+];
+
+/**
+ * The scan is linear in note length: each shape — including ones built to
+ * stress the lexer — scans inside the CPU budget at every size of its span and
+ * grows well short of quadratically across it.
  */
 describe('listHeadingPaths / cost', () => {
-  const SIZE = 80_000;
-  const BUDGET_MS = 1_000;
-  const fill = (unit: string) => unit.repeat(Math.ceil(SIZE / unit.length)).slice(0, SIZE);
-
-  it.each<[string, () => string]>([
-    ['ATX headings', () => fill('## h\n')],
-    ['untitled headings', () => fill('#\n')],
+  it.each<[string, (size: number) => string, number?]>([
+    ['ATX headings', (n) => fill('## h\n', n)],
+    ['untitled headings', (n) => fill('#\n', n)],
     [
       'headings over prose',
-      () => fill('# H\n\nSome *text* with **bold**, `code`, and [a link](x).\n\n'),
+      (n) => fill('# H\n\nSome *text* with **bold**, `code`, and [a link](x).\n\n', n),
     ],
-    ['setext headings with a one-dash underline', () => fill('t\n-\n')],
-    ['pipe lines over one dash', () => fill('a|b\n-\n')],
-    ['pipe lines over a delimiter with too few cells', () => fill('| a | b |\n| - |\n')],
-    ['a blockquote nested a thousand deep', () => `${'>'.repeat(1_000)} x\n${fill('> x\n')}`],
-    ['setext headings with a three-dash underline', () => fill('t\n---\n')],
-    ['heading lines in list items', () => fill('- item\n  ## Nested\n')],
+    ['setext headings with a one-dash underline', (n) => fill('t\n-\n', n)],
+    ['pipe lines over one dash', (n) => fill('a|b\n-\n', n)],
+    ['pipe lines over a delimiter with too few cells', (n) => fill('| a | b |\n| - |\n', n)],
+    ['a blockquote nested a thousand deep', (n) => `${'>'.repeat(1_000)} x\n${fill('> x\n', n)}`],
+    ['setext headings with a three-dash underline', (n) => fill('t\n---\n', n)],
+    ['heading lines in list items', (n) => fill('- item\n  ## Nested\n', n)],
     [
       'a deeply nested list',
-      () => {
+      (n) => {
         let md = '';
-        for (let depth = 0; md.length < SIZE; depth++) md += `${'  '.repeat(depth % 40)}- x\n`;
+        for (let depth = 0; md.length < n; depth++) md += `${'  '.repeat(depth % 40)}- x\n`;
         return md;
       },
     ],
-    ['one long HTML block', () => `<div>\n${fill('## not a heading\n')}</div>\n`],
-    ['an unclosed HTML comment', () => `<!--\n${fill('## not a heading\n')}`],
-    ['HTML lines between headings', () => fill('<br>\n## x\n\n')],
-    ['an unclosed fence', () => `\`\`\`\n${fill('## not a heading\n')}`],
-    ['one long table', () => `| a |\n| - |\n${fill('| x |\n')}`],
-    ['CRLF headings', () => fill('## h\r\ntext\r\n\r\n')],
-  ])('scans an 80k-character note of %s inside the budget', (_label, build) => {
-    const md = build();
-    expect(cpuMs(() => listHeadingPaths(md))).toBeLessThan(BUDGET_MS);
+    ['one long HTML block', (n) => `<div>\n${fill('## not a heading\n', n)}</div>\n`],
+    ['an unclosed HTML comment', (n) => `<!--\n${fill('## not a heading\n', n)}`],
+    ['HTML lines between headings', (n) => fill('<br>\n## x\n\n', n)],
+    ['an unclosed fence', (n) => `\`\`\`\n${fill('## not a heading\n', n)}`],
+    ['one long table', (n) => `| a |\n| - |\n${fill('| x |\n', n)}`],
+    ['CRLF headings', (n) => fill('## h\r\ntext\r\n\r\n', n)],
+    ...NESTING_SHAPES,
+  ])('scans %s in linear time, inside the budget', async (_label, build, from) => {
+    await expectLinearCost(build, (md) => listHeadingPaths(md), from);
+  });
+});
+
+/**
+ * A heading section is read with its trailing line feeds dropped, exactly as
+ * `/\n+$/` drops them: a CR, a line separator, or any other whitespace ends the
+ * run, and nothing inside the section changes.
+ */
+describe('extractSection / heading section end', () => {
+  it.each([
+    ['a heading that ends the note', '# H', '# H'],
+    ['one trailing line feed', '# H\n', '# H'],
+    ['a run of trailing line feeds', '# H\nx\n\n\n', '# H\nx'],
+    ['CRLF blank lines, whose last CR stays', '# H\r\n\r\n', '# H\r\n\r'],
+    ['mixed CRLF and LF breaks', '# H\r\nx\r\n\n\r\n', '# H\r\nx\r\n\n\r'],
+    ['blank lines before the next sibling', '# H\nx\n\n\n# G\n', '# H\nx'],
+    ['blank lines before a shallower heading', '## H\n\n### s\n\n\n# G', '## H\n\n### s'],
+    ['a whitespace-only last line', '# H\nx\n \t\n', '# H\nx\n \t'],
+    ['a trailing no-break space', '# H\nx\u{a0}\n', '# H\nx\u{a0}'],
+    ['a trailing line separator', '# H\nx\u{2028}\n\n', '# H\nx\u{2028}'],
+    ['a trailing byte order mark', '# H\nx\n\u{feff}', '# H\nx\n\u{feff}'],
+    ['a trailing non-BMP character', '# H\n\u{1F600}\n\n', '# H\n\u{1F600}'],
+  ])('drops the trailing line feeds of %s', (_label, md, expected) => {
+    expect(extractSection(note(md), { type: 'heading', target: 'H' }).value).toBe(expected);
+  });
+
+  /**
+   * The section read runs over caller-sized notes, so it is timed over a 64×
+   * span on a heading's body: a run of blank lines that does not end the note,
+   * from 5k to 320k characters, and one long line ending in a break. Bun's
+   * regex engine lexes that line ~10× slower from about 12k characters on, so
+   * its span runs from 150 to 9,600, inside one tier.
+   */
+  it.each<[string, (size: number) => string, number?]>([
+    ['one long line ending in a break', (n) => `# H\na${' '.repeat(n)}b\n`, 150],
+    ['a run of blank lines', (n) => `# H\n${'\n'.repeat(n)}x\n`],
+  ])('reads a section over %s in linear time', async (_label, build, from) => {
+    await expectLinearCost(
+      build,
+      (md) => {
+        const { value } = extractSection(note(md), { type: 'heading', target: 'H' });
+        expect(value).toBe(md.slice(0, -1));
+      },
+      from,
+    );
   });
 });
 
@@ -1306,18 +1374,280 @@ describe('blockKinds', () => {
   });
 });
 
+/** The type of each top-level block stock `marked` reads in `md`, `space` excepted. */
+function stockKinds(md: string): string[] {
+  return new Lexer()
+    .lex(md)
+    .filter((token) => token.type !== 'space')
+    .map((token) => token.type);
+}
+
+/**
+ * The scan skips lexing list items and bounds how deep it lexes a lazily
+ * continued blockquote; neither changes the top-level blocks below the bound.
+ * Each note reads as stock `marked` reads it: the same block types, the same
+ * heading paths, and — through the 1.x engine's raw-length offsets — the same
+ * heading positions.
+ */
+describe('lists and lazily continued blockquotes / the top-level blocks stock marked yields', () => {
+  it.each([
+    ['a list, then a paragraph', '- item\n\nparagraph after\n\n# H\nh\n'],
+    ['a tight list a heading interrupts', '- a\n- b\n# H\ntext\n## I\n'],
+    ['a loose list', '- a\n\n- b\n\n## H\n'],
+    ['a task list', '- [ ] a\n- [x] b\n\n# H\n'],
+    ['an ordered list from 3', '3. a\n4. b\n\npara\n# H\n'],
+    ['nested lists over a lazy line', '- a\n  - b\n    - c\nlazy\n\n# H\n'],
+    [
+      'a list item holding a fence and a heading line',
+      '- a\n  ```\n  # no\n  ```\n  ## no\n\n# H\n',
+    ],
+    ['markers on one line', '* * - + 1. x\n\n# H\nx\n===\n'],
+    ['a list item holding a definition', '- [r]: /a\n\n# H\n[r]\n'],
+    ['a list item holding indented code', '- a\n\n      code\n\n# H\n'],
+    ['a list in a lazily continued blockquote', '> - a\n> - b\nlazy\n\n# H\n'],
+    ['a quote nested 16 deep over a lazy line', `${'> '.repeat(16)}x\nlazy\n\n# H\n`],
+    [
+      'a quote nested 16 deep whose indented code stops a lazy line',
+      `${'> '.repeat(16)}    code\nlazy\nText\n===\n\n# H\n`,
+    ],
+    [
+      'a quote nested 16 deep whose fence stops a lazy line',
+      `${'> '.repeat(16)}\`\`\`\nlazy\nText\n===\n\n# H\n`,
+    ],
+    [
+      'a quote nested 16 deep holding a list over a lazy line',
+      `${'> '.repeat(16)}- a\nlazy\n# H\n`,
+    ],
+    ['a quote stepping down a level per line', `${'> '.repeat(3)}a\n> > b\n> c\nlazy\n\n# H\n`],
+    ['quoted lines alternating with lazy ones', `${'> > x\nlazy\n'.repeat(15)}\n# H\n`],
+  ])('reads %s as stock marked does', (_label, md) => {
+    expect(blockKinds(md)).toEqual(stockKinds(md));
+    const paths = listHeadingPaths(md);
+    expect(paths).toEqual(pluginPaths(md));
+    for (const path of paths) expect(v1HeadingSpan(md, path)).toEqual(engineSpan(md, path));
+  });
+});
+
+/**
+ * Stock `marked` lexes each list item's content as a document of its own and
+ * re-lexes a blockquote over a lazy line once per nesting level, one call
+ * deeper each time. Every scan entry point completes at any depth and reads
+ * the headings and block around the nesting.
+ */
+describe('scan entry points / list and blockquote nesting at any depth', () => {
+  const SHAPES: Array<[string, (depth: number) => string, string]> = [
+    ['`* ` markers', (d) => `${'* '.repeat(d)}x`, 'list'],
+    ['`- ` markers', (d) => `${'- '.repeat(d)}x`, 'list'],
+    ['`+ ` markers', (d) => `${'+ '.repeat(d)}x`, 'list'],
+    ['`1. ` markers', (d) => `${'1. '.repeat(d)}x`, 'list'],
+    ['mixed markers', (d) => `${'- * + 1. '.repeat(d / 4)}x`, 'list'],
+    ['markers in a lazily continued blockquote', (d) => `> ${'* '.repeat(d)}x\nlazy`, 'blockquote'],
+    ['a `>` run over a lazy line', (d) => `${'> '.repeat(d)}x\nlazy`, 'blockquote'],
+  ];
+
+  describe.each([10_000, 100_000])('%i levels', (depth) => {
+    it.each(SHAPES)('%s', (_label, build, kind) => {
+      const body = build(depth);
+      const md = `# Top\n\ntext\n\n${body}\n\npara ^abc\n\n## Next\n\nend\n`;
+      const next = md.indexOf('## Next');
+
+      expect(scanHeadings(md)).toEqual([
+        { level: 1, text: 'Top', start: 0, end: 6 },
+        { level: 2, text: 'Next', start: next, end: next + 8 },
+      ]);
+      expect(extractSection(note(md), { type: 'heading', target: 'Next' }).value).toBe(
+        '## Next\n\nend',
+      );
+      expect(extractSection(note(md), { type: 'block', target: 'abc' }).value).toBe('para ^abc');
+      expect(listHeadingPaths(md)).toEqual(['Top', 'Top::Next']);
+      expect(sectionBody(md, 'Top')).toEqual({
+        blocks: ['paragraph', kind, 'paragraph'],
+        content: md.slice(6),
+        subsections: true,
+      });
+      expect(sectionLevel(md, 'Top::Next', false)).toBe(2);
+      expect(v1HeadingSpan(md, 'Top')).toEqual({ start: 6, end: md.length });
+      expect(blockKinds(body)).toEqual([kind]);
+      expect(atxHeadingMarkers(body).markers).toEqual([]);
+    });
+  });
+});
+
+/**
+ * Past 16 open stock calls, a blockquote over a lazy line takes the
+ * blockquote rule's own match as its extent, unlexed: the lines right after
+ * innermost code join the quote where stock `marked` ends it at the code —
+ * a paragraph, or the text and underline of a setext heading, which then
+ * leaves the heading paths. Any other quote reads as stock `marked` reads it.
+ */
+describe('lazily continued blockquotes / past the depth bound', () => {
+  it.each([16, 17, 150])('reads a quote nested %i deep whose code a paragraph follows', (depth) => {
+    const md = `${'> '.repeat(depth)}    code\nlazy\n\nText\n===\n\n# H\n`;
+    expect(stockKinds(md)).toEqual(['blockquote', 'paragraph', 'heading', 'heading']);
+    expect(blockKinds(md)).toEqual(
+      depth > 16
+        ? ['blockquote', 'heading', 'heading']
+        : ['blockquote', 'paragraph', 'heading', 'heading'],
+    );
+    expect(listHeadingPaths(md)).toEqual(['Text', 'H']);
+    expect(pluginPaths(md)).toEqual(['Text', 'H']);
+    expect(extractSection(note(md), { type: 'heading', target: 'H' }).value).toBe('# H');
+  });
+
+  it.each([16, 17, 150])(
+    'reads a quote nested %i deep whose code a setext heading follows',
+    (depth) => {
+      const md = `${'> '.repeat(depth)}    code\nText\n===\n\n# H\n`;
+      expect(pluginPaths(md)).toEqual(['Text', 'H']);
+      expect(listHeadingPaths(md)).toEqual(depth > 16 ? ['H'] : ['Text', 'H']);
+      expect(extractSection(note(md), { type: 'heading', target: 'H' }).value).toBe('# H');
+    },
+  );
+
+  /**
+   * The bound counts stock calls open at once, not quotes read so far: each
+   * call closes before the next quote starts, so after any number of separate
+   * lazily continued quotes, a quote whose code a setext heading follows still
+   * reads as stock `marked` reads it.
+   */
+  it.each([16, 40])(
+    'reads a quote whose code a setext heading follows after %i separate lazily continued quotes',
+    (count) => {
+      const md = `${'> a\nlazy\n\n'.repeat(count)}>     code\nText\n===\n\n# H\n`;
+      expect(pluginPaths(md)).toEqual(['Text', 'H']);
+      expect(listHeadingPaths(md)).toEqual(['Text', 'H']);
+      expect(blockKinds(md)).toEqual(stockKinds(md));
+      expect(extractSection(note(md), { type: 'heading', target: 'Text' }).value).toBe('Text\n===');
+    },
+  );
+
+  it.each([
+    ['a quote nested 150 deep over a lazy line', `${'> '.repeat(150)}x\nlazy\n\n# H\n`],
+    ['quoted lines alternating with lazy ones 40 times', `${'> > x\nlazy\n'.repeat(40)}\n# H\n`],
+    [
+      'a quote nested 150 deep holding a list over a lazy line',
+      `${'> '.repeat(150)}- a\nlazy\n# H\n`,
+    ],
+  ])('reads %s as stock marked does', (_label, md) => {
+    expect(blockKinds(md)).toEqual(stockKinds(md));
+    expect(listHeadingPaths(md)).toEqual(pluginPaths(md));
+  });
+});
+
+/**
+ * `marked` drops a link reference definition whose label is already defined
+ * but still consumes its text, so the raw lengths of the tokens it keeps no
+ * longer cover the note. Every heading after the duplicate is located in the
+ * note's own bytes regardless, by each reader and `sectionBody`. The 1.x
+ * write span alone mirrors the engine, which sums the kept tokens and so
+ * splices short of the heading by each dropped definition.
+ */
+describe('duplicate link reference definitions', () => {
+  const tail = '# H\n\nbody\n\n# Next\n\ntail\n';
+  /** Notes whose duplicate the scan drops as stock `marked` — the engine's lexer — does. */
+  const TOP_LEVEL = `[r]: /a\n[r]: /b\n\n${tail}`;
+  const DROPPED: Array<[string, string]> = [
+    ['a top-level duplicate', TOP_LEVEL],
+    ['a footnote-style duplicate', `text[^1]\n\n[^1]: first\n[^1]: second\n\n${tail}`],
+    ['a case-folded duplicate', `[A]: /x\n[a]: /y\n\n${tail}`],
+    ['three definitions of one label', `[r]: /a\n[r]: /b\n[r]: /c\n\n${tail}`],
+    ['a first definition inside a lazily continued quote', `> [r]: /a\nlazy\n\n[r]: /b\n\n${tail}`],
+  ];
+  const ITEM_FIRST = `- [r]: /a\n\n[r]: /b\n\n${tail}`;
+  const NOTES: Array<[string, string]> = [
+    ...DROPPED,
+    ['a first definition inside a list item', ITEM_FIRST],
+  ];
+
+  it.each(NOTES)('reads each section after %s from the note’s own bytes', (_label, md) => {
+    const h = md.indexOf('# H');
+    const next = md.indexOf('# Next');
+    expect(listHeadingPaths(md)).toEqual(['H', 'Next']);
+    expect(scanHeadings(md).map(({ start, end }) => [start, end])).toEqual([
+      [h, h + 4],
+      [next, next + 7],
+    ]);
+    expect(extractSection(note(md), { type: 'heading', target: 'H' }).value).toBe('# H\n\nbody');
+    expect(extractSection(note(md), { type: 'heading', target: 'Next' }).value).toBe(
+      '# Next\n\ntail',
+    );
+    expect(sectionBody(md, 'H')).toEqual({
+      blocks: ['paragraph'],
+      content: '\nbody\n\n',
+      subsections: false,
+    });
+  });
+
+  /**
+   * The engine's span counts the kept tokens alone: for the top-level
+   * duplicate, `# H` at 17 and `# Next` at 28 fall 9 characters short (the
+   * dropped `[r]: /b\n\n`), so it splices from 8 + `# H`.length + 1 = 12 to 19.
+   */
+  it('spans a 1.x write where the engine splices, short by the dropped definition', () => {
+    expect(v1HeadingSpan(TOP_LEVEL, 'H')).toEqual({ start: 12, end: 19 });
+    expect(extractSection(note(TOP_LEVEL), { type: 'heading', target: 'H' }).value).toBe(
+      '# H\n\nbody',
+    );
+  });
+
+  it.each(DROPPED)('spans a 1.x write as the engine does after %s', (_label, md) => {
+    expect(v1HeadingSpan(md, 'H')).toEqual(engineSpan(md, 'H'));
+    expect(v1HeadingSpan(md, 'Next')).toEqual(engineSpan(md, 'Next'));
+  });
+
+  /**
+   * List items go unlexed, so a label an item defines first is never
+   * registered: the scan keeps the later top-level definition the engine
+   * drops, and the 1.x span there stays on the note's own headings.
+   */
+  it('spans a 1.x write on the note’s own headings when a list item defines the label', () => {
+    const h = ITEM_FIRST.indexOf('# H');
+    const next = ITEM_FIRST.indexOf('# Next');
+    expect(engineSpan(ITEM_FIRST, 'H')).toEqual({ start: h + 4 - 9, end: next - 9 });
+    expect(v1HeadingSpan(ITEM_FIRST, 'H')).toEqual({ start: h + 4, end: next });
+  });
+
+  it.each(NOTES)('stops a block walk-back at the heading line after %s', (_label, md) => {
+    const withBlock = md.replace('# H\n\nbody', '# H\nbody ^id');
+    expect(extractSection(note(withBlock), { type: 'block', target: 'id' }).value).toBe('body ^id');
+  });
+
+  it('reads a CRLF section after a duplicate byte for byte', () => {
+    const md = '[r]: /a\r\n[r]: /b\r\n\r\n# H\r\nbody\r\n# Next\r\ntail\r\n';
+    expect(extractSection(note(md), { type: 'heading', target: 'H' }).value).toBe('# H\r\nbody\r');
+  });
+
+  it('locates an ATX heading in written content below a duplicate', () => {
+    const { markers, normalized } = atxHeadingMarkers('[r]: /a\n[r]: /b\n\n## H\n');
+    expect(markers).toEqual([{ hashes: 2, line: '## H', start: normalized.indexOf('## H') }]);
+  });
+
+  it('drops a top-level duplicate from the block kinds, as stock marked does', () => {
+    const md = `[r]: /a\n[r]: /b\n\n${tail}`;
+    expect(blockKinds(md)).toEqual(['def', 'heading', 'paragraph', 'heading', 'paragraph']);
+    expect(blockKinds(md)).toEqual(stockKinds(md));
+  });
+
+  /**
+   * List items go unlexed, so a definition inside one is never registered and
+   * a later top-level definition of its label stays a block of its own, as a
+   * definition inside a blockquote's unlexed extent already does.
+   */
+  it('keeps a top-level definition whose label a list item defines first', () => {
+    const md = '- [r]: /a\n\n[r]: /b\n\n# H\n';
+    expect(stockKinds(md)).toEqual(['list', 'heading']);
+    expect(blockKinds(md)).toEqual(['list', 'def', 'heading']);
+  });
+});
+
 /**
  * Both scans lex the whole input once, so their cost grows linearly with it:
  * each shape, including the ones built to stress the lexer, stays inside the
- * CPU budget at 80k characters, and grows well short of quadratically from 5k
- * to 80k — best of three runs per size, ~16x for a linear scan, ~256x for a
- * quadratic one.
+ * CPU budget at every size of its span and grows well short of quadratically
+ * across it.
  */
 describe('sectionBody and blockKinds / cost', () => {
-  const BUDGET_MS = 1_000;
-  const fill = (unit: string, size: number) =>
-    unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
-  const SHAPES: Array<[string, (size: number) => string]> = [
+  it.each<[string, (size: number) => string, number?]>([
     ['list items', (n) => fill('- item\n', n)],
     ['nested list items', (n) => fill('- a\n  - b\n    - c\n', n)],
     ['headings over prose', (n) => fill('## H\n\nSome *text* with `code`.\n\n', n)],
@@ -1329,20 +1659,15 @@ describe('sectionBody and blockKinds / cost', () => {
     ['an unclosed fence', (n) => `\`\`\`\n${fill('- not a list\n', n)}`],
     ['one long table', (n) => `| a |\n| - |\n${fill('| x |\n', n)}`],
     ['CRLF list items', (n) => fill('- item\r\n', n)],
-  ];
-
-  it.each(SHAPES)('scans %s in linear time, inside the budget', (_label, build) => {
-    const bestOfThree = (size: number) => {
-      const md = `# T\n## A\n${build(size)}`;
-      const scan = () => {
+    ...NESTING_SHAPES,
+  ])('scans %s in linear time, inside the budget', async (_label, build, from) => {
+    await expectLinearCost(
+      (size) => `# T\n## A\n${build(size)}`,
+      (md) => {
         sectionBody(md, 'T::A');
         blockKinds(md);
-      };
-      return Math.min(cpuMs(scan), cpuMs(scan), cpuMs(scan));
-    };
-    const small = bestOfThree(5_000);
-    const large = bestOfThree(80_000);
-    expect(large).toBeLessThan(BUDGET_MS);
-    expect(large / small).toBeLessThan(64);
+      },
+      from,
+    );
   });
 });

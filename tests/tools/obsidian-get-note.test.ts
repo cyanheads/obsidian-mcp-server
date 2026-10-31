@@ -5,11 +5,12 @@
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { Lexer } from 'marked';
 import { describe, expect, it } from 'vitest';
 import { obsidianGetNote } from '@/mcp-server/tools/definitions/obsidian-get-note.tool.js';
 import {
   contractErrorOf,
-  expectLinearCpu,
+  expectLinearCost,
   installMovingTargetVault,
   MOVING_TARGET_NOTES,
   markdownText,
@@ -1204,7 +1205,7 @@ describe('obsidian_get_note / includeLinks', () => {
     ['one long line opening with an unclosed link', (n) => `[[${'x'.repeat(n)}\n[[y]]`],
     ['openers over line breaks throughout', (n) => '[[  \r\n'.repeat(Math.ceil(n / 6))],
   ])('scans %s in linear time across a 64x span', async (_label, build) => {
-    await expectLinearCpu(build, async (content) => {
+    await expectLinearCost(build, async (content) => {
       mockFullNote(content);
       await obsidianGetNote.handler(
         obsidianGetNote.input.parse({
@@ -1443,6 +1444,22 @@ describe('obsidian_get_note / includeLinks', () => {
   });
 });
 
+/**
+ * Asserts `text` parses — under `marked`, which reads these shapes as
+ * CommonMark does — to `label` as a paragraph of its own, followed by exactly
+ * the blocks `body` parses to alone.
+ */
+function expectLabelOverBody(text: string, label: string, body: string): void {
+  const blocks = (md: string) =>
+    Lexer.lex(md)
+      .filter((token) => token.type !== 'space')
+      .map((token) => [token.type, token.raw.trimEnd()]);
+  const rendered = blocks(text);
+  const at = rendered.findIndex(([type, raw]) => type === 'paragraph' && raw === label);
+  expect(at, text).toBeGreaterThan(-1);
+  expect(rendered.slice(at + 1)).toEqual(blocks(body));
+}
+
 describe('obsidian_get_note / format()', () => {
   it('renders content', () => {
     const blocks = obsidianGetNote.format!({
@@ -1472,6 +1489,7 @@ describe('obsidian_get_note / format()', () => {
         '- `author`: casey',
         '',
         '**Content**',
+        '',
         'body',
       ].join('\n'),
     );
@@ -1528,6 +1546,7 @@ describe('obsidian_get_note / format()', () => {
         '*Section:* block → abc',
         '',
         '**Value:**',
+        '',
         'a claim ^abc',
       ].join('\n'),
     );
@@ -1557,6 +1576,7 @@ describe('obsidian_get_note / format()', () => {
         '*Candidates:* Overview::Alpha::Shared, Overview::Beta::Shared',
         '',
         '**Value:**',
+        '',
         '### Shared',
       ].join('\n'),
     );
@@ -1608,9 +1628,75 @@ describe('obsidian_get_note / format()', () => {
         '*Resolved:* Root::Nested',
         '',
         '**Value:**',
+        '',
         '## Nested',
       ].join('\n'),
     );
+  });
+
+  /**
+   * A raw body under its `**Content**` / `**Value:**` label parses as it does
+   * alone, the label a paragraph of its own: on the label's next line, the
+   * body's first line would join the label's block — a setext underline, a
+   * paragraph line, indented code, a list from 2, or a definition.
+   */
+  describe('keeps the raw body apart from its label under a CommonMark parse', () => {
+    const BODIES = [
+      ['frontmatter', '---\ntitle: x\n---\nbody'],
+      ['a `===` line', '===\nbody'],
+      ['a lone `-` line', '-\nbody'],
+      ['a paragraph line', 'first line\nsecond'],
+      ['indented code', '    code\n\nbody'],
+      ['a list item numbered 2', '2. item\n3. next'],
+      ['a link reference definition', '[ref]: /x\n\n[ref]'],
+      ['a setext heading', 'Setext\n===\n\nbody'],
+      ['nothing', ''],
+    ] as const;
+    type Result = Parameters<NonNullable<typeof obsidianGetNote.format>>[0]['result'];
+    const RENDERINGS: ReadonlyArray<readonly [string, string, (body: string) => Result]> = [
+      [
+        'full',
+        '**Content**',
+        (body) => ({
+          format: 'full',
+          path: 'A.md',
+          content: body,
+          frontmatter: {},
+          tags: [],
+          stat: { ctime: 0, mtime: 0, size: 0 },
+        }),
+      ],
+      [
+        'a heading section',
+        '**Value:**',
+        (body) => ({
+          format: 'section',
+          path: 'A.md',
+          section: { type: 'heading', target: 'Setext' },
+          sectionTarget: 'Setext',
+          valueText: body,
+        }),
+      ],
+      [
+        'a block section',
+        '**Value:**',
+        (body) => ({
+          format: 'section',
+          path: 'A.md',
+          section: { type: 'block', target: 'abc' },
+          valueText: body,
+        }),
+      ],
+    ];
+
+    it.each(
+      RENDERINGS.flatMap(([rendering, label, result]) =>
+        BODIES.map(([opening, body]) => [rendering, opening, label, result(body), body] as const),
+      ),
+    )('renders %s with a body opening with %s', (_rendering, _opening, label, result, body) => {
+      const text = (obsidianGetNote.format!({ result })[0] as { text: string }).text;
+      expectLabelOverBody(text, label, body);
+    });
   });
 
   it('renders document-map listing', () => {
@@ -1778,5 +1864,53 @@ describe('obsidian_get_note / content[] reads back vault text', () => {
     expect(text).toContain('Tags: _wip');
     expect(text).toContain('a`b: *not emphasis*');
     expect(text).toContain('list: ["x","y"]');
+  });
+});
+
+/**
+ * A full read and a heading-section read carry the raw body unchanged in
+ * `structuredContent`, and in `content[]` under a label that stays a
+ * paragraph of its own.
+ */
+describe('obsidian_get_note / the raw body under its content[] label', () => {
+  const MD = '---\ntitle: x\n---\nSetext\n===\n\nbody\n\n# Other\n';
+
+  function serveNote(): void {
+    harness
+      .current()
+      .pool.intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(
+        200,
+        { ...noteJson('Note.md', MD), frontmatter: { title: 'x' } },
+        { headers: { 'content-type': 'application/json' } },
+      );
+  }
+
+  it('keeps a full read’s frontmatter apart from the **Content** label', async () => {
+    serveNote();
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'full',
+      target: { type: 'path', path: 'Note.md' },
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect((res.structuredContent as { result: { content: string } }).result.content).toBe(MD);
+    expectLabelOverBody((res.content[0] as { text: string }).text, '**Content**', MD);
+  });
+
+  it('keeps a setext heading section apart from the **Value:** label', async () => {
+    serveNote();
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'section',
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Setext' },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const value = 'Setext\n===\n\nbody';
+    expect((res.structuredContent as { result: { valueText: string } }).result.valueText).toBe(
+      value,
+    );
+    expectLabelOverBody((res.content[0] as { text: string }).text, '**Value:**', value);
   });
 });

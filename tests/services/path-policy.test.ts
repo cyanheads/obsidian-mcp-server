@@ -20,6 +20,7 @@ function cfg(overrides: Partial<ServerConfig> = {}): ServerConfig {
     enableCommands: false,
     readPaths: undefined,
     writePaths: undefined,
+    denyPaths: undefined,
     readOnly: false,
     deleteElicitation: false,
     ...overrides,
@@ -222,6 +223,28 @@ describe('PathPolicy normalization (matches parser rules)', () => {
   });
 });
 
+/**
+ * `encodeVaultPath` drops empty segments, so `a//b/x.md` reaches the plugin as
+ * `a/b/x.md`, and the vault's filesystem resolves NFC and NFD spellings of a
+ * name to one file. The policy compares paths in that same form, or a deny
+ * prefix would miss a path the plugin then serves.
+ */
+describe('PathPolicy normalization — paths as they reach the plugin', () => {
+  it('collapses repeated separators in a candidate', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['a/b'], writePaths: ['a/b'] }));
+    expect(p.isReadable('a//b/x.md')).toBe(true);
+    expect(p.isReadable('a\\\\b//x.md')).toBe(true);
+    expect(p.isWritable('A//B//x.md')).toBe(true);
+    expect(p.isReadable('a//c/x.md')).toBe(false);
+  });
+
+  it('matches an NFD spelling against an NFC prefix', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['café'.normalize('NFC')] }));
+    expect(p.isReadable(`${'Café'.normalize('NFD')}/x.md`)).toBe(true);
+    expect(p.filterReadable([{ filename: `${'café'.normalize('NFD')}/y.md` }])).toHaveLength(1);
+  });
+});
+
 describe('PathPolicy cross-platform separators', () => {
   /**
    * Configured prefixes always arrive forward-slash-normalized from the
@@ -288,6 +311,7 @@ describe('PathPolicy ↔ config-parser separator integration', () => {
     'OBSIDIAN_API_KEY',
     'OBSIDIAN_READ_PATHS',
     'OBSIDIAN_WRITE_PATHS',
+    'OBSIDIAN_DENY_PATHS',
     'OBSIDIAN_READ_ONLY',
   ] as const;
 
@@ -321,6 +345,23 @@ describe('PathPolicy ↔ config-parser separator integration', () => {
     const policy = new PathPolicy(getServerConfig());
     expect(policy.isWritable('projects/sub/note.md')).toBe(true);
     expect(policy.isWritable('Projects\\Sub\\note.md')).toBe(true);
+  });
+
+  it('a `./` or doubled-separator prefix covers the folder it names', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_READ_PATHS', './Private,Journal//Therapy');
+    const policy = new PathPolicy(getServerConfig());
+    expect(policy.isReadable('private/a.md')).toBe(true);
+    expect(policy.isReadable('Journal/Therapy/b.md')).toBe(true);
+  });
+
+  it('a deny entry spelled with `./` or a doubled separator still denies', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_DENY_PATHS', './Private, Journal//Therapy');
+    const policy = new PathPolicy(getServerConfig());
+    expect(policy.isReadable('Private/a.md')).toBe(false);
+    expect(policy.isReadable('journal/therapy/b.md')).toBe(false);
+    expect(policy.isReadable('journal/c.md')).toBe(true);
   });
 });
 
@@ -526,15 +567,6 @@ describe('PathPolicy.effectiveScope (what path_forbidden enforces)', () => {
   });
 });
 
-describe('PathPolicy.keepReadable (link entries)', () => {
-  it('keeps readable link targets and link text, write paths included', () => {
-    const p = new PathPolicy(cfg({ readPaths: ['work'], writePaths: ['drafts'] }));
-    expect(
-      p.keepReadable(['Work/a.md', 'Private/x.md', 'drafts/new', 'workshop/b.md', 'x', 'WORK']),
-    ).toEqual(['Work/a.md', 'drafts/new', 'WORK']);
-  });
-});
-
 /**
  * The guard only narrows what the plugin returns, so it must match every
  * readable path — a readable note it rejects would silently vanish from a
@@ -654,5 +686,357 @@ describe('PathPolicy.readOnlyShadowsWritePaths (warning trigger)', () => {
 
   it('is false when only writePaths is set', () => {
     expect(new PathPolicy(cfg({ writePaths: ['projects'] })).readOnlyShadowsWritePaths).toBe(false);
+  });
+});
+
+/**
+ * `OBSIDIAN_DENY_PATHS` withholds paths from reads and writes alike, and wins
+ * over every allow rule. Each row probes the same paths; a path counts as
+ * writable when a write tool could reach it, which takes read access too.
+ */
+describe('OBSIDIAN_DENY_PATHS — composition with the allowlists', () => {
+  const PROBES = [
+    'private/x.md',
+    'Private/Deep/y.md',
+    'privateer/z.md',
+    'projects/a.md',
+    'projects/secret/s.md',
+    'Projects/Secret',
+    'journal/public/j.md',
+    'journal/x.md',
+    'notes/n.md',
+  ];
+  const except = (...out: string[]) => PROBES.filter((p) => !out.includes(p));
+
+  it.each([
+    [
+      'deny only',
+      { denyPaths: ['private'] },
+      except('private/x.md', 'Private/Deep/y.md'),
+      except('private/x.md', 'Private/Deep/y.md'),
+    ],
+    [
+      'read paths with a denied subfolder',
+      { readPaths: ['projects'], denyPaths: ['projects/secret'] },
+      ['projects/a.md'],
+      ['projects/a.md'],
+    ],
+    [
+      'write paths with a denied subfolder',
+      { writePaths: ['projects'], denyPaths: ['projects/secret'] },
+      except('projects/secret/s.md', 'Projects/Secret'),
+      ['projects/a.md'],
+    ],
+    [
+      'read-only with a deny list',
+      { readOnly: true, denyPaths: ['private'] },
+      except('private/x.md', 'Private/Deep/y.md'),
+      [],
+    ],
+    [
+      'a read path inside a denied folder',
+      { readPaths: ['journal/public'], denyPaths: ['journal'] },
+      [],
+      [],
+    ],
+  ] as Array<[string, Partial<ServerConfig>, string[], string[]]>)(
+    '%s',
+    (_label, config, readable, writable) => {
+      const p = new PathPolicy(cfg(config));
+      expect(PROBES.filter((path) => p.isReadable(path))).toEqual(readable);
+      expect(PROBES.filter((path) => p.isReadable(path) && p.isWritable(path))).toEqual(writable);
+      // The service's write gate checks isWritable alone, so a denied path fails it directly.
+      for (const denied of config.denyPaths ?? []) {
+        expect(p.isWritable(`${denied}/w.md`)).toBe(false);
+      }
+    },
+  );
+
+  it('denies a single note and matches at segment boundaries, case-insensitively', () => {
+    const p = new PathPolicy(cfg({ denyPaths: ['notes/plan.md', 'pub'] }));
+    expect(p.isReadable('Notes/PLAN.md')).toBe(false);
+    expect(p.isReadable('notes/plan.md.bak')).toBe(true);
+    expect(p.isReadable('PUB/a.md')).toBe(false);
+    expect(p.isReadable('public/a.md')).toBe(true);
+  });
+
+  it('denies doubled-separator, backslash, and NFD spellings of a denied path', () => {
+    const p = new PathPolicy(cfg({ denyPaths: ['notes/private', 'café'.normalize('NFC')] }));
+    for (const path of [
+      'notes//private/x.md',
+      'Notes\\Private\\x.md',
+      '/notes/private/',
+      `${'Café'.normalize('NFD')}/x.md`,
+    ]) {
+      expect(p.isReadable(path), path).toBe(false);
+      expect(p.isWritable(path), path).toBe(false);
+    }
+  });
+
+  it('makes a deny-only policy restricted, and read-restricted', () => {
+    const p = new PathPolicy(cfg({ denyPaths: ['private'] }));
+    expect(p.isUnrestricted).toBe(false);
+    expect(p.restrictsReads).toBe(true);
+    expect(p.withholdsPaths).toBe(true);
+    expect(new PathPolicy(cfg({ readPaths: ['work'] })).withholdsPaths).toBe(false);
+  });
+
+  it('filters search hits under a deny-only policy, matching the prefix at a segment boundary', () => {
+    const p = new PathPolicy(cfg({ denyPaths: ['private'] }));
+    expect(
+      p
+        .filterReadable([
+          { filename: 'Private/a.md' },
+          { filename: 'work/b.md' },
+          { filename: 'privateer/c.md' },
+        ])
+        .map((h) => h.filename),
+    ).toEqual(['work/b.md', 'privateer/c.md']);
+  });
+});
+
+describe('OBSIDIAN_DENY_PATHS — denials', () => {
+  const DENY = { denyPaths: ['private', 'journal'] };
+
+  /** The deny prefixes, in the cases the config parser stores them. */
+  const expectNoDenyPrefix = (err: McpError) => {
+    const text = JSON.stringify({ message: err.message, data: err.data });
+    expect(text).not.toContain('private');
+    expect(text).not.toContain('journal');
+  };
+
+  it('throws denied_path with no activeScope, naming OBSIDIAN_DENY_PATHS and no prefix', () => {
+    const p = new PathPolicy(cfg(DENY));
+    const read = thrownBy(() => p.assertReadable('Private/Plan.md'));
+    expect(read.code).toBe(JsonRpcErrorCode.Forbidden);
+    expect(read.message).toBe(
+      "Path 'Private/Plan.md' is not readable: withheld by OBSIDIAN_DENY_PATHS (subreason denied_path).",
+    );
+    expect(read.data).toEqual({
+      reason: 'path_forbidden',
+      path: 'Private/Plan.md',
+      op: 'read',
+      subreason: 'denied_path',
+      recovery: {
+        hint: 'The operator withholds this path. Use a different path, or ask the operator to change OBSIDIAN_DENY_PATHS.',
+      },
+    });
+    expectNoDenyPrefix(read);
+
+    const write = thrownBy(() => p.assertWritable('Private/Plan.md'));
+    expect(write.message).toBe(
+      "Path 'Private/Plan.md' is not writable: withheld by OBSIDIAN_DENY_PATHS (subreason denied_path).",
+    );
+    expect(write.data).toEqual({ ...read.data, op: 'write' });
+    expectNoDenyPrefix(write);
+  });
+
+  it.each([['(active file)'], ['daily note for 2026-10-01']])(
+    'names a resolved note by its target label: %s',
+    (label) => {
+      const p = new PathPolicy(cfg(DENY));
+      for (const err of [
+        thrownBy(() => p.assertReadable('Private/secret.md', label)),
+        thrownBy(() => p.assertWritable('Private/secret.md', label)),
+      ]) {
+        expect(err.message).toMatch(
+          new RegExp(
+            `^Target '${label.replace(/[()]/g, '\\$&')}' resolves to a note that is not (readable|writable): withheld by OBSIDIAN_DENY_PATHS \\(subreason denied_path\\)\\.$`,
+          ),
+        );
+        expect(err.data).toMatchObject({ path: label, subreason: 'denied_path' });
+        expect(err.data).not.toHaveProperty('activeScope');
+        expect((err.data?.recovery as { hint?: string } | undefined)?.hint).toBe(
+          'The operator withholds the note this target resolves to. Pass a path target to a different note, or ask the operator to change OBSIDIAN_DENY_PATHS.',
+        );
+        expect(JSON.stringify({ message: err.message, data: err.data })).not.toMatch(/secret/i);
+        expectNoDenyPrefix(err);
+      }
+    },
+  );
+
+  it('selects read_only_mode, then the allowlist subreason, then denied_path', () => {
+    const scoped = new PathPolicy(
+      cfg({
+        readPaths: ['projects'],
+        writePaths: ['projects/w'],
+        denyPaths: ['projects/secret', 'projects/w/x'],
+      }),
+    );
+    expect(thrownBy(() => scoped.assertReadable('other/a.md')).data).toMatchObject({
+      subreason: 'outside_read_paths',
+      activeScope: ['projects', 'projects/w'],
+    });
+    expect(thrownBy(() => scoped.assertReadable('projects/secret/a.md')).data?.subreason).toBe(
+      'denied_path',
+    );
+    expect(thrownBy(() => scoped.assertWritable('projects/a.md')).data).toMatchObject({
+      subreason: 'outside_write_paths',
+      activeScope: ['projects/w'],
+    });
+    expect(thrownBy(() => scoped.assertWritable('projects/w/x/a.md')).data?.subreason).toBe(
+      'denied_path',
+    );
+    // A denied path outside the write allowlist reports the allowlist, never the deny list.
+    expect(thrownBy(() => scoped.assertWritable('projects/secret/a.md')).data?.subreason).toBe(
+      'outside_write_paths',
+    );
+
+    const readOnly = new PathPolicy(cfg({ readOnly: true, denyPaths: ['private'] }));
+    expect(thrownBy(() => readOnly.assertWritable('private/a.md')).data?.subreason).toBe(
+      'read_only_mode',
+    );
+    expect(thrownBy(() => readOnly.assertReadable('private/a.md')).data?.subreason).toBe(
+      'denied_path',
+    );
+  });
+
+  it('reports a path under a denied allow prefix as denied, and a path elsewhere as outside an empty scope', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['journal/public'], denyPaths: ['journal'] }));
+    expect(thrownBy(() => p.assertReadable('journal/public/j.md')).data?.subreason).toBe(
+      'denied_path',
+    );
+    const outside = thrownBy(() => p.assertReadable('notes/n.md'));
+    expect(outside.data).toMatchObject({ subreason: 'outside_read_paths', activeScope: [] });
+    expect((outside.data?.recovery as { hint?: string } | undefined)?.hint).toMatch(
+      /^Allowed prefixes: \[\(empty\)\]/,
+    );
+  });
+});
+
+/**
+ * A denied folder never lists and is never listed, including on the way to an
+ * allow prefix; an allow prefix inside a denied folder grants nothing, so the
+ * folders leading to it are not on the way to anything.
+ */
+describe('OBSIDIAN_DENY_PATHS — listings', () => {
+  it('drops a denied folder at every level of a deny-only listing', () => {
+    const p = new PathPolicy(cfg({ denyPaths: ['private', 'notes/private'] }));
+    expect(p.filterListing('', ['Private/', 'Notes/', 'todo.md', 'Privateer/'])).toEqual([
+      'Notes/',
+      'todo.md',
+      'Privateer/',
+    ]);
+    // A folder holding a denied descendant lists, without it.
+    expect(() => p.assertListable('Notes')).not.toThrow();
+    expect(p.filterListing('Notes', ['Private/', 'Public/', 'p.md'])).toEqual(['Public/', 'p.md']);
+    expect(p.filterListing('notes//', ['Private/', 'p.md'])).toEqual(['p.md']);
+    for (const dir of ['Private', 'Notes/Private', 'notes//private', 'Notes/Private/Deeper']) {
+      expect(thrownBy(() => p.assertListable(dir)).data, dir).toMatchObject({
+        path: dir,
+        subreason: 'denied_path',
+      });
+    }
+    expect(p.isScopeAncestor('')).toBe(true);
+    expect(p.isScopeAncestor('notes')).toBe(false);
+  });
+
+  it('lists no folder on the way to an allow prefix the deny list covers', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['a/b/c'], denyPaths: ['a/b'] }));
+    expect(p.isScopeAncestor('a')).toBe(false);
+    expect(p.isScopeAncestor('a/b')).toBe(false);
+    expect(p.filterListing('', ['a/', 'z.md'])).toEqual([]);
+    expect(p.filterListing('a', ['b/', 'y.md'])).toEqual([]);
+    expect(thrownBy(() => p.assertListable('a')).data?.subreason).toBe('outside_read_paths');
+    expect(thrownBy(() => p.assertListable('a/b')).data?.subreason).toBe('outside_read_paths');
+    expect(thrownBy(() => p.assertListable('a/b/c')).data?.subreason).toBe('denied_path');
+  });
+
+  it('keeps the folders on the way to a surviving allow prefix, and drops the denied one beside it', () => {
+    const p = new PathPolicy(cfg({ readPaths: ['a/b/c', 'a/x'], denyPaths: ['a/b'] }));
+    expect(p.filterListing('', ['a/', 'z.md'])).toEqual(['a/']);
+    expect(p.filterListing('a', ['b/', 'x/', 'y.md'])).toEqual(['x/']);
+    expect(thrownBy(() => p.assertListable('a/b')).data?.activeScope).toEqual(['a/x']);
+  });
+});
+
+describe('OBSIDIAN_DENY_PATHS — the scoped-search guard', () => {
+  const guard = (config: Partial<ServerConfig>) =>
+    new RegExp(new PathPolicy(cfg(config)).readScopePattern());
+
+  it('matches every path when there is no allowlist; filterReadable drops the denied ones', () => {
+    const g = guard({ denyPaths: ['private'] });
+    for (const path of ['private/x.md', 'Notes/Private/y.md', 'a', '']) {
+      expect(g.test(path), path).toBe(true);
+    }
+  });
+
+  it('builds on the surviving allow prefixes and never subtracts a deny prefix', () => {
+    const g = guard({ readPaths: ['café', 'work', 'a/b/c'], denyPaths: ['work/secret', 'a/b'] });
+    expect(g.test('Work/secret/x.md')).toBe(true);
+    expect(g.test('Work/a.md')).toBe(true);
+    // A superset past the first non-ASCII character, so a negated pattern would drop readable notes.
+    expect(g.test('cafeteria/x.md')).toBe(true);
+    expect(g.test('a/b/c/z.md')).toBe(false);
+    expect(g.test('Private/a.md')).toBe(false);
+  });
+
+  it('matches no path when no allow prefix survives', () => {
+    const g = guard({ readPaths: ['journal/public'], denyPaths: ['journal'] });
+    for (const path of ['journal/public/j.md', 'notes/n.md', 'x', '']) {
+      expect(g.test(path), path).toBe(false);
+    }
+  });
+});
+
+describe('OBSIDIAN_DENY_PATHS — scope reporting', () => {
+  it.each([
+    ['deny only', { denyPaths: ['private'] }, undefined, undefined],
+    [
+      'read paths with a denied subfolder',
+      { readPaths: ['projects'], denyPaths: ['projects/secret'] },
+      ['projects'],
+      ['projects'],
+    ],
+    [
+      'write paths with a denied subfolder',
+      { writePaths: ['projects'], denyPaths: ['projects/secret'] },
+      undefined,
+      ['projects'],
+    ],
+    ['read-only with a deny list', { readOnly: true, denyPaths: ['private'] }, undefined, []],
+    [
+      'a read path inside a denied folder',
+      { readPaths: ['journal/public', 'work'], writePaths: ['journal/w'], denyPaths: ['journal'] },
+      ['work'],
+      [],
+    ],
+  ] as Array<[string, Partial<ServerConfig>, string[] | undefined, string[] | undefined]>)(
+    'effectiveScope: %s',
+    (_label, config, readable, writable) => {
+      expect(new PathPolicy(cfg(config)).effectiveScope()).toEqual({ readable, writable });
+    },
+  );
+
+  it('describes the configured deny list for the startup log', () => {
+    expect(
+      new PathPolicy(cfg({ readPaths: ['work'], denyPaths: ['work/secret'] })).describe(),
+    ).toEqual({
+      readPaths: ['work'],
+      writePaths: 'full vault',
+      denyPaths: ['work/secret'],
+      readOnly: false,
+    });
+  });
+
+  it('names the configured allow prefixes a deny prefix covers', () => {
+    const p = new PathPolicy(
+      cfg({
+        readPaths: ['journal/public', 'work', 'journal'],
+        writePaths: ['work/secret/inbox', 'drafts'],
+        denyPaths: ['journal', 'work/secret'],
+      }),
+    );
+    expect(p.denyShadowedPaths).toEqual([
+      { variable: 'OBSIDIAN_READ_PATHS', prefix: 'journal/public' },
+      { variable: 'OBSIDIAN_READ_PATHS', prefix: 'journal' },
+      { variable: 'OBSIDIAN_WRITE_PATHS', prefix: 'work/secret/inbox' },
+    ]);
+    // Read-only already ignores the write paths, with its own warning.
+    expect(
+      new PathPolicy(cfg({ readOnly: true, writePaths: ['a/b'], denyPaths: ['a'] }))
+        .denyShadowedPaths,
+    ).toEqual([]);
+    expect(new PathPolicy(cfg({ readPaths: ['work'] })).denyShadowedPaths).toEqual([]);
   });
 });

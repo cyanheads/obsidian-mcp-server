@@ -9,7 +9,11 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { encodeVaultPath, ObsidianService } from '@/services/obsidian/obsidian-service.js';
+import {
+  encodeVaultPath,
+  ObsidianService,
+  trimSlashes,
+} from '@/services/obsidian/obsidian-service.js';
 import type { NoteTarget } from '@/services/obsidian/types.js';
 import {
   loadCapture,
@@ -1574,6 +1578,21 @@ describe('ObsidianService path-traversal enforcement', () => {
         service.getNoteContent(ctx, { type: 'path', path: 'notes/🚀.md' }),
       ).resolves.toBe('# rocket');
     });
+  });
+});
+
+describe('trimSlashes', () => {
+  it.each([
+    ['an empty path', '', ''],
+    ['a lone slash', '/', ''],
+    ['only slashes', '///', ''],
+    ['leading and trailing slashes', '//a/b//', 'a/b'],
+    ['an interior slash run', 'a///b', 'a///b'],
+    ['backslashes, which it keeps', '\\a\\', '\\a\\'],
+    ['surrounding spaces, which it keeps', ' /a/ ', ' /a/ '],
+  ])('trims %s exactly as `/^\\/+|\\/+$/g` does', (_label, path, expected) => {
+    expect(path.replace(/^\/+|\/+$/g, '')).toBe(expected);
+    expect(trimSlashes(path)).toBe(expected);
   });
 });
 

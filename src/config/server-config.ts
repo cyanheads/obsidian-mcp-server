@@ -15,18 +15,20 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 const envBoolean = z.union([z.boolean(), z.stringbool()]);
 
 /**
- * Comma-separated path-list preprocessor. Semantics (see issue #40):
- * - undefined / `''` / whitespace-only → undefined (treat as unset; default = full vault)
+ * Comma-separated path-list preprocessor, shared by OBSIDIAN_READ_PATHS,
+ * OBSIDIAN_WRITE_PATHS, and OBSIDIAN_DENY_PATHS. Semantics (see issues #40, #76):
+ * - undefined / `''` / whitespace-only → undefined (treat as unset)
  * - `,` / `,,,` (separators only, no path content) → throw ZodError → ConfigurationError
  * - mixed empties (`a,,b`) → drop empties → `['a', 'b']`
- * - absolute path / `..` traversal → throw
- * - valid: `\` → `/` + lower-case + trim trailing slash + dedupe (preserves first occurrence order)
+ * - absolute path / `..` traversal / an entry naming the vault root (`.`, `./`) → throw
+ * - valid: `\` → `/`, empty and `.` segments dropped, lower-case, NFC, dedupe
+ *   (preserves first occurrence order)
  *
- * Separator normalization is required for parity with `PathPolicy.normalize()`,
- * which also collapses `\` → `/` on candidate paths. Without matching
- * normalization here, a prefix like `Foo\Bar` would never match a candidate
- * `Foo\Bar\note.md` (candidate becomes `foo/bar/note.md`, prefix stays as
- * `foo\bar`).
+ * The stored form is `PathPolicy.normalize()`'s — the form a vault path
+ * reaches the plugin in — so a prefix and a candidate compare directly. A
+ * prefix kept as written (`foo\bar`, `./private`, `journal//therapy`) would
+ * match no vault path: a refusal for an allowlist, and a deny entry that
+ * silently denies nothing.
  */
 const envPathList = z
   .preprocess(
@@ -63,7 +65,7 @@ const envPathList = z
             });
             return z.NEVER;
           }
-          const segments = raw.split(/[\\/]/);
+          const segments = raw.split(/[\\/]/).filter((s) => s !== '' && s !== '.');
           if (segments.includes('..')) {
             ctx.addIssue({
               code: 'custom',
@@ -71,8 +73,14 @@ const envPathList = z
             });
             return z.NEVER;
           }
-          const normalized = raw.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '');
-          if (normalized.length === 0) continue;
+          if (segments.length === 0) {
+            ctx.addIssue({
+              code: 'custom',
+              message: `must name a folder or note, not the vault root; got '${raw}'`,
+            });
+            return z.NEVER;
+          }
+          const normalized = segments.join('/').toLowerCase().normalize('NFC');
           if (seen.has(normalized)) continue;
           seen.add(normalized);
           out.push(normalized);
@@ -122,10 +130,13 @@ const ServerConfigSchema = z.object({
       'Opt-in flag for the command-palette pair (`obsidian_list_commands` + `obsidian_execute_command`). Off by default — Obsidian commands are opaque and can be destructive.',
     ),
   readPaths: envPathList.describe(
-    'Optional vault-relative folder allowlist for read operations. Comma-separated; prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault.',
+    'Optional vault-relative folder allowlist for read operations. Comma-separated; prefix-based with implicit recursion; case-insensitive; backslashes read as slashes, repeated and trailing slashes and `.` segments dropped, and names normalized to Unicode NFC; an entry naming the vault root (`.`) is rejected at startup. Unset = full vault.',
   ),
   writePaths: envPathList.describe(
-    'Optional vault-relative folder allowlist for write operations. Same syntax as OBSIDIAN_READ_PATHS. Write paths are implicitly readable. Unset = full vault, or the read scope when reads are restricted.',
+    'Optional vault-relative folder allowlist for write operations. Same syntax as OBSIDIAN_READ_PATHS. Write paths are implicitly readable. Unset = full vault, or the read scope when reads are restricted; paths in OBSIDIAN_DENY_PATHS stay denied.',
+  ),
+  denyPaths: envPathList.describe(
+    'Optional vault-relative blocklist for reads and writes alike. Same syntax as OBSIDIAN_READ_PATHS. Wins over both allowlists: a denied path is unreadable and unwritable, and absent from listings, search results, and tag counts. Unset = nothing denied.',
   ),
   readOnly: envBoolean
     .default(false)
@@ -159,6 +170,7 @@ export function getServerConfig(): ServerConfig {
     enableCommands: 'OBSIDIAN_ENABLE_COMMANDS',
     readPaths: 'OBSIDIAN_READ_PATHS',
     writePaths: 'OBSIDIAN_WRITE_PATHS',
+    denyPaths: 'OBSIDIAN_DENY_PATHS',
     readOnly: 'OBSIDIAN_READ_ONLY',
     deleteElicitation: 'OBSIDIAN_DELETE_ELICITATION',
     omnisearchUrl: 'OBSIDIAN_OMNISEARCH_URL',

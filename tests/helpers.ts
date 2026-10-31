@@ -109,6 +109,7 @@ export function makeTestConfig(overrides: Partial<ServerConfig> = {}): ServerCon
     enableCommands: false,
     readPaths: undefined,
     writePaths: undefined,
+    denyPaths: undefined,
     readOnly: false,
     deleteElicitation: false,
     ...overrides,
@@ -198,36 +199,69 @@ export async function contractErrorOf<T extends AnyToolDefinition>(
 }
 
 /**
- * Assert that `scan` costs time linear in the length of its input. `build`
- * makes an input of each size, doubling from 5,000 to 320,000 characters (a
- * 64× span); each size is scanned three times and its best thread CPU time
- * must stay under a 1 s budget before the next size is tried, and the cost at
- * 320k must stay under 256× that at 5k — ~64× for a linear scan, ~4,096× for a
- * quadratic one. Thread CPU time rather than wall-clock time, so a worker
- * descheduled under a parallel run cannot fail the budget.
+ * Thread-CPU milliseconds per call of `run`: the fastest of three samples, each
+ * repeating `run` until it has used `floorMs` of CPU and dividing by the calls,
+ * so a call shorter than the clock's tick still reads true. CPU rather than
+ * wall-clock time, so a test worker descheduled under a parallel run cannot
+ * fail a cost budget.
  */
-export async function expectLinearCpu(
+async function cpuMs(run: () => unknown, floorMs = 1): Promise<number> {
+  let best = Number.POSITIVE_INFINITY;
+  for (let sample = 0; sample < 3; sample++) {
+    const start = process.threadCpuUsage();
+    let calls = 0;
+    let usedMs = 0;
+    do {
+      await run();
+      calls++;
+      const { user, system } = process.threadCpuUsage(start);
+      usedMs = (user + system) / 1000;
+    } while (usedMs < floorMs);
+    best = Math.min(best, usedMs / calls);
+  }
+  return best;
+}
+
+/** CPU budget for one scan, at every size. */
+const BUDGET_MS = 1_000;
+
+/**
+ * Asserts that `scan`, sync or async, costs linear time over `build`'s inputs,
+ * including calls too fast to time one at a time. Sizes double from `from` to
+ * 64× `from`, and each scans inside `BUDGET_MS` before the next is built, so a
+ * quadratic scan fails at the first size it outgrows rather than minutes later
+ * at the largest. Over the span a linear scan's cost grows ~64× and a
+ * quadratic one's ~4,096×, so the ratio must stay under 256, their geometric
+ * midpoint. The two ends are sampled at a 5 ms floor, and re-sampled
+ * alternately before a ratio fails.
+ */
+export async function expectLinearCost(
   build: (size: number) => string,
   scan: (input: string) => unknown,
+  from = 5_000,
 ): Promise<void> {
-  const costs: string[] = [];
-  let first = 0;
-  let last = 0;
-  for (let size = 5_000; size <= 320_000; size *= 2) {
+  const to = from * 64;
+  let smallMs = Number.POSITIVE_INFINITY;
+  let largeMs = Number.POSITIVE_INFINITY;
+  for (let size = from; size <= to; size *= 2) {
     const input = build(size);
-    let best = Number.POSITIVE_INFINITY;
-    for (let run = 0; run < 3; run++) {
-      const start = process.threadCpuUsage();
-      await scan(input);
-      const used = process.threadCpuUsage(start);
-      best = Math.min(best, (used.user + used.system) / 1000);
-    }
-    costs.push(`${size}: ${best.toFixed(2)}ms`);
-    expect(best, costs.join(', ')).toBeLessThan(1_000);
-    if (size === 5_000) first = best;
-    last = best;
+    const ms = await cpuMs(() => scan(input), size === from || size === to ? 5 : 1);
+    expect(ms, `${size} characters`).toBeLessThan(BUDGET_MS);
+    if (size === from) smallMs = ms;
+    if (size === to) largeMs = ms;
   }
-  expect(last / first, costs.join(', ')).toBeLessThan(256);
+  if (largeMs / smallMs >= 256) {
+    const small = build(from);
+    const large = build(to);
+    for (let round = 0; round < 3; round++) {
+      smallMs = Math.min(smallMs, await cpuMs(() => scan(small), 5));
+      largeMs = Math.min(largeMs, await cpuMs(() => scan(large), 5));
+    }
+  }
+  expect(
+    largeMs / smallMs,
+    `${largeMs.toFixed(2)} ms at ${to} characters, ${smallMs.toFixed(3)} ms at ${from}`,
+  ).toBeLessThan(256);
 }
 
 /**
@@ -607,16 +641,22 @@ function pluginTruthy(value: unknown): boolean {
 }
 
 /**
- * A stub fetch serving JSONLogic `POST /search/` the way Local REST API 5.x
- * does (`searchJsonLogic`, plugin 5.2.0–5.5.2): the received tree is evaluated
- * against every note's context in vault order, out-of-scope notes included,
- * with `content` read only when the tree's JSON contains `"content"`, and a
- * throw on any note fails the whole search with a 400 naming that note. Every
- * request body is recorded in `bodies`; any other route throws.
+ * A stub fetch serving the two routes a JSONLogic search reads, the way Local
+ * REST API 5.x does. `POST /search/` (`searchJsonLogic`, plugin 5.2.0–5.5.2)
+ * evaluates the received tree against every note's context in vault order,
+ * out-of-scope notes included, with `content` read only when the tree's JSON
+ * contains `"content"`, and a throw on any note fails the whole search with a
+ * 400 naming that note. `GET /vault/{path}` (`_vaultGet`) answers one note's
+ * raw UTF-8 bytes as an attachment, or a 404 for a note not in the vault.
+ * Every request is recorded in `requests` as `METHOD path`, and every search
+ * body in `bodies`; `remove` takes a note out of the vault from then on. Any
+ * other route throws.
  */
 export function jsonLogicVault(notes: readonly VaultNote[]): {
   bodies: string[];
   fetchImpl: ObsidianFetch;
+  remove: (path: string) => void;
+  requests: string[];
 } {
   const backlinks = new Map<string, string[]>();
   for (const note of notes) {
@@ -624,22 +664,44 @@ export function jsonLogicVault(notes: readonly VaultNote[]): {
       backlinks.set(target, [...(backlinks.get(target) ?? []), note.path]);
     }
   }
+  const removed = new Set<string>();
+  const present = () => notes.filter((note) => !removed.has(note.path));
   const bodies: string[] = [];
+  const requests: string[] = [];
   const fetchImpl: ObsidianFetch = async (url, init) => {
-    const path = new URL(url).pathname;
-    if (path !== '/search/' || (init.method ?? 'GET').toUpperCase() !== 'POST') {
-      throw new Error(`jsonLogicVault serves only POST /search/, got ${init.method} ${path}`);
+    init.signal?.throwIfAborted();
+    const path = decodeURIComponent(new URL(url).pathname);
+    const method = (init.method ?? 'GET').toUpperCase();
+    requests.push(`${method} ${path}`);
+    if (method === 'GET' && path.startsWith('/vault/')) {
+      const note = present().find((n) => n.path === path.slice('/vault/'.length));
+      if (!note) {
+        return mockResponse(JSON.stringify({ errorCode: 40400, message: 'Not Found' }), {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return mockResponse(new TextEncoder().encode(note.content ?? ''), {
+        status: 200,
+        headers: {
+          'content-type': 'text/markdown; charset=utf-8',
+          'content-disposition': `attachment; filename="${encodeURI(note.path)}"`,
+        },
+      });
+    }
+    if (path !== '/search/' || method !== 'POST') {
+      throw new Error(`jsonLogicVault serves POST /search/ and GET /vault/, got ${method} ${path}`);
     }
     const body = String(init.body);
     bodies.push(body);
     const tree: unknown = JSON.parse(body);
     const includeContent = body.includes('"content"');
     const results: Array<{ filename: string; result: unknown }> = [];
-    for (const note of notes) {
+    for (const note of present()) {
       const context = {
         tags: note.tags ?? [],
         frontmatter: note.frontmatter ?? {},
-        stat: { ctime: 1, mtime: 2, size: (note.content ?? '').length },
+        stat: { ctime: 1, mtime: 2, size: new TextEncoder().encode(note.content ?? '').length },
         path: note.path,
         content: includeContent ? (note.content ?? '') : '',
         links: note.links ?? [],
@@ -665,7 +727,7 @@ export function jsonLogicVault(notes: readonly VaultNote[]): {
       headers: { 'content-type': 'application/json' },
     });
   };
-  return { bodies, fetchImpl };
+  return { bodies, fetchImpl, remove: (path) => removed.add(path), requests };
 }
 
 /**

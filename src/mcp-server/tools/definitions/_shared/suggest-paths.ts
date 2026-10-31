@@ -28,7 +28,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { conflict, JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
-import type { ObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { type ObsidianService, trimSlashes } from '@/services/obsidian/obsidian-service.js';
 import type { NoteTarget } from '@/services/obsidian/types.js';
 import { inlineCode } from './markdown.js';
 
@@ -100,14 +100,23 @@ export async function withCaseFallback<T>(
     }
     if (probe.extInsensitive.length === 0) throw err;
     const suggestions = probe.extInsensitive.slice(0, MAX_SUGGESTIONS);
-    const list = suggestions.map((s) => `"${s}"`).join(', ');
-    const prefix = err.message.replace(/[.!?]?\s*$/, '');
     throw notFound(
-      `${prefix}. Did you mean: ${list}?`,
+      didYouMean(err.message, suggestions),
       { ...(err.data ?? {}), suggestions },
       { cause: err },
     );
   }
+}
+
+/**
+ * A not-found `message` with `suggestions` appended as a "did you mean"
+ * question. The message's trailing whitespace, and one `.`, `!`, or `?` before
+ * it, are dropped first: what `/[.!?]?\s*$/` drops, in time linear in the
+ * message, where the regex retries at every whitespace run inside it.
+ */
+export function didYouMean(message: string, suggestions: readonly string[]): string {
+  const list = suggestions.map((s) => `"${s}"`).join(', ');
+  return `${message.trimEnd().replace(/[.!?]$/, '')}. Did you mean: ${list}?`;
 }
 
 /**
@@ -168,7 +177,7 @@ export async function findCaseVariants(
   path: string,
 ): Promise<CaseVariants> {
   const { caseMatches } = await probeParentDir(ctx, svc, path);
-  const normalized = path.replace(/^\/+|\/+$/g, '');
+  const normalized = trimSlashes(path);
   return {
     exact: caseMatches.includes(normalized),
     variants: caseMatches.filter((match) => match !== normalized),
@@ -226,7 +235,7 @@ async function probeParentDir(
   path: string,
 ): Promise<ProbeResult> {
   const empty: ProbeResult = { caseMatches: [], extInsensitive: [] };
-  const normalized = path.replace(/^\/+|\/+$/g, '');
+  const normalized = trimSlashes(path);
   if (!normalized) return empty;
 
   const slash = normalized.lastIndexOf('/');

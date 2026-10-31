@@ -114,7 +114,9 @@ const { services } = await createApp({
  * the tool is disabled there). The server `instructions` and the active scope
  * on `path_forbidden` errors state the effective scope instead (write paths
  * are readable; a write needs read access), so the LLM (or operator) can
- * self-correct without scrolling the log.
+ * self-correct without scrolling the log. The deny list (`denyPaths`, present
+ * when set) appears only here: the agent-facing surfaces say paths are
+ * withheld without naming them.
  */
 const bannerCtx = requestContextService.createRequestContext({
   operation: 'startup',
@@ -136,6 +138,12 @@ services.logger.info(
 if (policy.readOnlyShadowsWritePaths) {
   services.logger.warning(
     'OBSIDIAN_WRITE_PATHS is set but ignored because OBSIDIAN_READ_ONLY=true. Unset one of the two to remove the conflict.',
+    bannerCtx,
+  );
+}
+for (const { variable, prefix } of policy.denyShadowedPaths) {
+  services.logger.warning(
+    `${variable} entry '${prefix}' lies inside OBSIDIAN_DENY_PATHS and grants nothing. Remove it, or narrow the deny entry that covers it.`,
     bannerCtx,
   );
 }

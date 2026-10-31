@@ -6,6 +6,7 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { ServerConfig } from '@/config/server-config.js';
 import { obsidianListTags } from '@/mcp-server/tools/definitions/obsidian-list-tags.tool.js';
 import {
   type ObsidianFetch,
@@ -369,7 +370,7 @@ describe('obsidian_list_tags / format() echoes the applied cap and filters', () 
 });
 
 /**
- * Under `OBSIDIAN_READ_PATHS`, tags come from readable notes only, counted as
+ * Under `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS`, tags come from readable notes only, counted as
  * readable notes carrying the tag or a tag nested under it. The stub serves a
  * vault-wide `/tags/` too, so a listing that ignored the scope would surface
  * `secret` and `proj/z` and the vault-wide `misc` count.
@@ -395,7 +396,7 @@ describe('obsidian_list_tags / OBSIDIAN_READ_PATHS scope', () => {
     setObsidianService(undefined);
   });
 
-  function scope(readPaths: string[]) {
+  function scope(config: Partial<ServerConfig>) {
     const vault = jsonLogicVault(NOTES);
     const fetchImpl: ObsidianFetch = async (url, init) => {
       if (new URL(url).pathname === '/search/') return vault.fetchImpl(url, init);
@@ -404,11 +405,11 @@ describe('obsidian_list_tags / OBSIDIAN_READ_PATHS scope', () => {
         headers: { 'content-type': 'application/json' },
       });
     };
-    setObsidianService(new ObsidianService(makeTestConfig({ readPaths }), fetchImpl));
+    setObsidianService(new ObsidianService(makeTestConfig(config), fetchImpl));
   }
 
   it('returns only readable-note tags with note counts on both wire surfaces', async () => {
-    scope(['work']);
+    scope({ readPaths: ['work'] });
     const res = await runToolContract(obsidianListTags, {});
 
     expect(res.isError).toBeFalsy();
@@ -440,7 +441,7 @@ describe('obsidian_list_tags / OBSIDIAN_READ_PATHS scope', () => {
   });
 
   it('applies nameRegex, minCount, limit, and truncated to the scoped set', async () => {
-    scope(['work']);
+    scope({ readPaths: ['work'] });
     const ctx = createMockContext({ errors: obsidianListTags.errors });
     const out = await obsidianListTags.handler(
       obsidianListTags.input.parse({ nameRegex: '^proj', minCount: 2, limit: 2 }),
@@ -456,19 +457,41 @@ describe('obsidian_list_tags / OBSIDIAN_READ_PATHS scope', () => {
     expect(enrichment.notice).toContain('Showing the 2 most-used of 3 matching tags.');
   });
 
-  it('reports an empty scoped listing with a notice that names the read scope', async () => {
-    scope(['nowhere']);
-    const ctx = createMockContext({ errors: obsidianListTags.errors });
-    const out = await obsidianListTags.handler(obsidianListTags.input.parse({}), ctx);
-    expect(out.tags).toEqual([]);
-    expect(getEnrichment(ctx).notice).toBe(
-      'No tags found in the notes OBSIDIAN_READ_PATHS makes readable.',
-    );
+  it.each([
+    ['a read scope', { readPaths: ['nowhere'] }],
+    ['a deny list covering every tagged note', { denyPaths: ['work', 'private'] }],
+  ] as Array<[string, Partial<ServerConfig>]>)(
+    'reports an empty listing under %s with the scoped notice',
+    async (_label, config) => {
+      scope(config);
+      const ctx = createMockContext({ errors: obsidianListTags.errors });
+      const out = await obsidianListTags.handler(obsidianListTags.input.parse({}), ctx);
+      expect(out.tags).toEqual([]);
+      expect(getEnrichment(ctx).notice).toBe(
+        'No tags found in the notes the path policy makes readable.',
+      );
+    },
+  );
+
+  it('under a deny list alone, counts readable notes and leaves the denied note out, on both surfaces', async () => {
+    scope({ denyPaths: ['private'] });
+    const res = await runToolContract(obsidianListTags, {});
+    expect(res.isError).toBeFalsy();
+    expect((res.structuredContent as { tags: unknown[] }).tags).toEqual([
+      { name: 'proj', count: 3 },
+      { name: 'proj/x', count: 2 },
+      { name: 'proj/y', count: 2 },
+      { name: 'misc', count: 1 },
+      { name: 'solo', count: 1 },
+    ]);
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('`#proj` (3)');
+    expect(text).not.toMatch(/secret|proj\/z/);
   });
 
-  it('describes count as readable notes under a read scope', () => {
+  it('describes count as readable notes under a read scope or deny list', () => {
     const count = obsidianListTags.output.shape.tags.element.shape.count.description ?? '';
-    expect(count).toMatch(/OBSIDIAN_READ_PATHS/);
+    expect(count).toMatch(/OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS is set/);
     expect(count).toMatch(/readable notes carrying the tag or a tag nested under it/);
   });
 });

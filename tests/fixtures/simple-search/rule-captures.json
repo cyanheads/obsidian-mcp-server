@@ -1,0 +1,391 @@
+{
+  "notes": [
+    {
+      "path": "zz-mcp-lane-a2/qxadj probe.md",
+      "body": "Adjacent qxadjqxadj and spaced qxadj qxadj here.\nOverlap qxovqxovqxov end.\nİİİ qxdot after dotted capitals.\nTab qxtab\tqxtail inside.\n"
+    },
+    {
+      "path": "zz-mcp-lane-a2/tie-b.md",
+      "body": "tie qxtie end\n"
+    },
+    {
+      "path": "zz-mcp-lane-a2/tie-a.md",
+      "body": "tie qxtie end\n"
+    },
+    {
+      "path": "zz-mcp-lane-a2/tie-c.md",
+      "body": "tie qxtie end\n"
+    },
+    {
+      "path": "zz-mcp-lane-a2/tie-d.md",
+      "body": "padding padding qxtie later\n"
+    },
+    {
+      "path": "zz-mcp-lane-a2/bom-crlf.md",
+      "body": "qxbom first\r\nsecond qxbom line\r\n"
+    }
+  ],
+  "vaultOrder": [
+    "zz-mcp-lane-a2/bom-crlf.md",
+    "zz-mcp-lane-a2/tie-d.md",
+    "zz-mcp-lane-a2/tie-c.md",
+    "zz-mcp-lane-a2/tie-a.md",
+    "zz-mcp-lane-a2/tie-b.md",
+    "zz-mcp-lane-a2/qxadj probe.md"
+  ],
+  "captures": [
+    {
+      "query": "qxadj",
+      "contextLength": 10,
+      "response": [
+        {
+          "filename": "zz-mcp-lane-a2/qxadj probe.md",
+          "score": -3.5246,
+          "matches": [
+            {
+              "match": {
+                "start": 0,
+                "end": 5,
+                "source": "filename"
+              },
+              "context": "qxadj probe"
+            },
+            {
+              "match": {
+                "start": 9,
+                "end": 14,
+                "source": "content"
+              },
+              "context": "Adjacent qxadjqxadj and "
+            },
+            {
+              "match": {
+                "start": 31,
+                "end": 36,
+                "source": "content"
+              },
+              "context": "nd spaced qxadj qxadj her"
+            },
+            {
+              "match": {
+                "start": 37,
+                "end": 42,
+                "source": "content"
+              },
+              "context": "ced qxadj qxadj here.\nOve"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "query": "qxovqxov",
+      "contextLength": 10,
+      "response": [
+        {
+          "filename": "zz-mcp-lane-a2/qxadj probe.md",
+          "score": -0.0946,
+          "matches": [
+            {
+              "match": {
+                "start": 57,
+                "end": 65,
+                "source": "content"
+              },
+              "context": ".\nOverlap qxovqxovqxov end.\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "query": "qxdot",
+      "contextLength": 10,
+      "response": [
+        {
+          "filename": "zz-mcp-lane-a2/qxadj probe.md",
+          "score": -0.1196,
+          "matches": [
+            {
+              "match": {
+                "start": 82,
+                "end": 87,
+                "source": "content"
+              },
+              "context": "d.\nİİİ qxdot after dotted"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "query": "qxtab\tqxtail",
+      "contextLength": 10,
+      "response": [
+        {
+          "filename": "zz-mcp-lane-a2/qxadj probe.md",
+          "score": -0.1526,
+          "matches": [
+            {
+              "match": {
+                "start": 115,
+                "end": 127,
+                "source": "content"
+              },
+              "context": "s.\nTab qxtab\tqxtail inside.\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "query": "qxadj qxtab",
+      "contextLength": 10,
+      "response": [
+        {
+          "filename": "zz-mcp-lane-a2/qxadj probe.md",
+          "score": -5.2446,
+          "matches": [
+            {
+              "match": {
+                "start": 0,
+                "end": 5,
+                "source": "filename"
+              },
+              "context": "qxadj probe"
+            },
+            {
+              "match": {
+                "start": 9,
+                "end": 14,
+                "source": "content"
+              },
+              "context": "Adjacent qxadjqxadj and "
+            },
+            {
+              "match": {
+                "start": 31,
+                "end": 36,
+                "source": "content"
+              },
+              "context": "nd spaced qxadj qxadj her"
+            },
+            {
+              "match": {
+                "start": 37,
+                "end": 42,
+                "source": "content"
+              },
+              "context": "ced qxadj qxadj here.\nOve"
+            },
+            {
+              "match": {
+                "start": 115,
+                "end": 120,
+                "source": "content"
+              },
+              "context": "s.\nTab qxtab\tqxtail insid"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "query": "probe\n\nadjacent",
+      "contextLength": 10,
+      "response": [
+        {
+          "filename": "zz-mcp-lane-a2/qxadj probe.md",
+          "score": -0.030600000000000002,
+          "matches": []
+        }
+      ]
+    },
+    {
+      "query": "qxadj probe\n",
+      "contextLength": 10,
+      "response": [
+        {
+          "filename": "zz-mcp-lane-a2/qxadj probe.md",
+          "score": -4.4546,
+          "matches": [
+            {
+              "match": {
+                "start": 0,
+                "end": 5,
+                "source": "filename"
+              },
+              "context": "qxadj probe"
+            },
+            {
+              "match": {
+                "start": 6,
+                "end": 11,
+                "source": "filename"
+              },
+              "context": "qxadj probe"
+            },
+            {
+              "match": {
+                "start": 9,
+                "end": 14,
+                "source": "content"
+              },
+              "context": "Adjacent qxadjqxadj and "
+            },
+            {
+              "match": {
+                "start": 31,
+                "end": 36,
+                "source": "content"
+              },
+              "context": "nd spaced qxadj qxadj her"
+            },
+            {
+              "match": {
+                "start": 37,
+                "end": 42,
+                "source": "content"
+              },
+              "context": "ced qxadj qxadj here.\nOve"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "query": "qxtie",
+      "contextLength": 5,
+      "response": [
+        {
+          "filename": "zz-mcp-lane-a2/tie-c.md",
+          "score": -0.0231,
+          "matches": [
+            {
+              "match": {
+                "start": 4,
+                "end": 9,
+                "source": "content"
+              },
+              "context": "tie qxtie end\n"
+            }
+          ]
+        },
+        {
+          "filename": "zz-mcp-lane-a2/tie-a.md",
+          "score": -0.0231,
+          "matches": [
+            {
+              "match": {
+                "start": 4,
+                "end": 9,
+                "source": "content"
+              },
+              "context": "tie qxtie end\n"
+            }
+          ]
+        },
+        {
+          "filename": "zz-mcp-lane-a2/tie-b.md",
+          "score": -0.0231,
+          "matches": [
+            {
+              "match": {
+                "start": 4,
+                "end": 9,
+                "source": "content"
+              },
+              "context": "tie qxtie end\n"
+            }
+          ]
+        },
+        {
+          "filename": "zz-mcp-lane-a2/tie-d.md",
+          "score": -0.036500000000000005,
+          "matches": [
+            {
+              "match": {
+                "start": 16,
+                "end": 21,
+                "source": "content"
+              },
+              "context": "ding qxtie late"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "query": "qxbom",
+      "contextLength": 3,
+      "response": [
+        {
+          "filename": "zz-mcp-lane-a2/bom-crlf.md",
+          "score": -1.2242,
+          "matches": [
+            {
+              "match": {
+                "start": 0,
+                "end": 5,
+                "source": "content"
+              },
+              "context": "qxbom fi"
+            },
+            {
+              "match": {
+                "start": 20,
+                "end": 25,
+                "source": "content"
+              },
+              "context": "nd qxbom li"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "query": "QXADJ  qxadj",
+      "contextLength": 10,
+      "response": [
+        {
+          "filename": "zz-mcp-lane-a2/qxadj probe.md",
+          "score": -3.4546,
+          "matches": [
+            {
+              "match": {
+                "start": 0,
+                "end": 5,
+                "source": "filename"
+              },
+              "context": "qxadj probe"
+            },
+            {
+              "match": {
+                "start": 9,
+                "end": 14,
+                "source": "content"
+              },
+              "context": "Adjacent qxadjqxadj and "
+            },
+            {
+              "match": {
+                "start": 31,
+                "end": 36,
+                "source": "content"
+              },
+              "context": "nd spaced qxadj qxadj her"
+            },
+            {
+              "match": {
+                "start": 37,
+                "end": 42,
+                "source": "content"
+              },
+              "context": "ced qxadj qxadj here.\nOve"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

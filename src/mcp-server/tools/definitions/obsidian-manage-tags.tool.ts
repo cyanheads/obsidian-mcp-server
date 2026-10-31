@@ -98,8 +98,9 @@ export const obsidianManageTags = tool('obsidian_manage_tags', {
       reason: 'path_forbidden',
       thrownBy: 'service',
       code: JsonRpcErrorCode.Forbidden,
-      when: '`list` requires the path to be readable; `add`/`remove` require it to be inside OBSIDIAN_WRITE_PATHS, with OBSIDIAN_READ_ONLY=false.',
-      recovery: 'Use a path inside the configured scope. The error data echoes the active scope.',
+      when: '`list` requires the path to be readable; `add`/`remove` require it to be inside OBSIDIAN_WRITE_PATHS, with OBSIDIAN_READ_ONLY=false. A path inside OBSIDIAN_DENY_PATHS is neither.',
+      recovery:
+        'Use a path inside the configured scope. The error data echoes the active scope; a `denied_path` denial carries none, since the operator withholds that path.',
     },
     {
       reason: 'tags_required',

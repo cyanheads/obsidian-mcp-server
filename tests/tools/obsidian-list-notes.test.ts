@@ -15,7 +15,13 @@ import {
   ObsidianService,
   setObsidianService,
 } from '@/services/obsidian/obsidian-service.js';
-import { contractErrorOf, makeTestConfig, mockResponse, setupHarness } from '../helpers.js';
+import {
+  contractErrorOf,
+  expectLinearCost,
+  makeTestConfig,
+  mockResponse,
+  setupHarness,
+} from '../helpers.js';
 
 const harness = setupHarness();
 
@@ -60,6 +66,28 @@ describe('obsidian_list_notes / non-recursive (depth: 1)', () => {
     );
     expect(out.path).toBe('/Projects/');
     expect(out.entries).toEqual([{ path: 'Projects/Plan.md', type: 'file' }]);
+  });
+
+  /**
+   * `path` is caller-sized, and its leading and trailing slashes are trimmed
+   * before any request: timed from 5k to 320k characters on a slash run that
+   * does not end the path.
+   */
+  it('trims a path holding a long slash run in linear time', async () => {
+    await expectLinearCost(
+      (n) => `/a${'/'.repeat(n)}b/`,
+      async (path) => {
+        harness
+          .current()
+          .pool.intercept({ path: '/vault/a/b/', method: 'GET' })
+          .reply(200, { files: ['Plan.md'] });
+        const out = await obsidianListNotes.handler(
+          obsidianListNotes.input.parse({ path, depth: 1 }),
+          createMockContext({ errors: obsidianListNotes.errors }),
+        );
+        expect(out.entries).toEqual([{ path: `${path.slice(1, -1)}/Plan.md`, type: 'file' }]);
+      },
+    );
   });
 });
 
@@ -546,6 +574,51 @@ describe('obsidian_list_notes / OBSIDIAN_READ_PATHS scope', () => {
     const out = await list({ depth: 3 });
     expect(out.excluded).toBeUndefined();
     expect(out.totals).toEqual({ entries: 4, files: 1, directories: 3 });
+  });
+
+  it('drops a denied folder at every level of a deny-only walk, on both wire surfaces', async () => {
+    scope({ denyPaths: ['private', 'projects/other'] });
+    const res = await runToolContract(obsidianListNotes, { depth: 5 });
+    expect(res.isError).toBeFalsy();
+    expect((res.structuredContent as { entries: unknown[] }).entries).toEqual([
+      { path: 'todo.md', type: 'file' },
+      { path: 'Projects', type: 'directory' },
+      { path: 'Projects/Work', type: 'directory' },
+      { path: 'Projects/Work/w.md', type: 'file' },
+      { path: 'Projects/Work/Deep', type: 'directory' },
+      { path: 'Projects/Work/Deep/d.md', type: 'file' },
+      { path: 'Projects/readme.md', type: 'file' },
+      { path: 'Proj', type: 'directory' },
+      { path: 'Proj/p.md', type: 'file' },
+    ]);
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('Work/');
+    expect(text).not.toMatch(/Private|Other/);
+    // A denied folder is never listed upstream either.
+    expect(listed).not.toContain('Private');
+    expect(listed).not.toContain('Projects/Other');
+  });
+
+  it('lists nothing on the way to an allow prefix inside a denied folder', async () => {
+    scope({ readPaths: ['projects/work/deep'], denyPaths: ['projects/work'] });
+    expect((await list({ depth: 5 })).entries).toEqual([]);
+    expect(listed).toEqual(['']);
+    expect(await contractErrorOf(obsidianListNotes, { path: 'Projects' })).toMatchObject({
+      data: { reason: 'path_forbidden', subreason: 'outside_read_paths', activeScope: [] },
+    });
+  });
+
+  it('refuses a denied `path` with denied_path, naming no scope', async () => {
+    scope({ denyPaths: ['private', 'projects/other'] });
+    for (const path of ['Private', 'Projects/Other', 'projects//other']) {
+      const error = await contractErrorOf(obsidianListNotes, { path });
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Forbidden,
+        data: { reason: 'path_forbidden', subreason: 'denied_path', path },
+      });
+      expect(error.data).not.toHaveProperty('activeScope');
+    }
+    expect(listed).toEqual([]);
   });
 
   it('leaves listings unchanged when OBSIDIAN_READ_PATHS is unset', async () => {

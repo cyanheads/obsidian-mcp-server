@@ -1,21 +1,22 @@
 /**
- * @fileoverview Test-side model of the Local REST API's `POST /search/simple/`
- * plus the real responses it was checked against.
+ * @fileoverview Real `POST /search/simple/` responses, and the upstream they
+ * came from as a fake for the unscoped text path's tests.
  *
- * `simulateSimpleSearch` ports plugin 5.2.0's `simpleSearch`: Obsidian's
- * `prepareSimpleSearch` tokenizes the query on whitespace, requires every
- * token (case-insensitively), and reports one span per occurrence, coalescing
- * only spans that overlap or touch. The plugin runs it over
- * `basename + "\n\n" + body`: spans inside the basename come back with the
- * basename as `context`, body spans with a `contextLength` window widened by
- * one code unit per side rather than split a surrogate pair. The captures in
- * this directory are real 5.2.0 responses over `probe-body.md`, and
- * `simple-search-simulator.test.ts` pins the model to them.
+ * The captures in this directory are real Local REST API 5.2.0 responses on
+ * Obsidian 1.14.5: one note per capture over `probe-body.md`, and in
+ * `rule-captures.json` a set of notes that separate Obsidian's matching rule
+ * from looser readings of it (a touching or overlapping repeat skipped, a
+ * single-space split, a span across the basename and body dropped, offsets
+ * that index the lower-cased text, ties in vault order).
+ * `tests/services/simple-search-simulator.test.ts` pins the server's own port
+ * (`SimpleSearch`) to every one of them, so `simulateSimpleSearch` can stand in
+ * for the upstream where the unscoped path's response handling is under test.
  *
  * @module tests/fixtures/simple-search/simulate
  */
 
 import { readFileSync } from 'node:fs';
+import { SimpleSearch } from '@/services/obsidian/simple-search.js';
 
 export interface RawSpan {
   context: string;
@@ -41,13 +42,13 @@ export interface SimulatedNote {
 
 const HERE = new URL('./', import.meta.url);
 
-/** The vault path of the scratch note every capture was taken against. */
+/** The vault path of the scratch note every per-query capture was taken against. */
 export const PROBE_PATH = '_mcp-validate-117/vexquorn-probe.md';
 
 /** The body of that note, byte for byte as the plugin read it back. */
 export const PROBE_BODY = readFileSync(new URL('probe-body.md', HERE), 'utf8');
 
-/** The query each capture answered, all at the default `contextLength` of 100. */
+/** The query each per-query capture answered, all at the default `contextLength` of 100. */
 export const CAPTURE_QUERIES = {
   adjacent: 'Vexquorn zorblatt:',
   'three-word': 'Vexquorn zorblatt: <script>',
@@ -67,54 +68,27 @@ export function loadCapture(name: CaptureName): RawHit[] {
   return JSON.parse(readFileSync(new URL(`${name}.json`, HERE), 'utf8')) as RawHit[];
 }
 
-const basenameOf = (path: string) => (path.split('/').pop() ?? path).replace(/\.[^./]+$/, '');
-
 /**
- * Upstream's `widenToCodePointBoundaries`: grow `[start, end)` by at most one
- * code unit per side so neither edge splits a surrogate pair.
+ * `rule-captures.json`: its notes, bodies as `GET /vault/{path}` reads them
+ * (the BOM note's leading U+FEFF stripped, as Obsidian's `cachedRead` strips
+ * it), the plugin's vault order, and each query's response restricted to
+ * those notes.
  */
-function widen(text: string, start: number, end: number): [number, number] {
-  let s = start;
-  if (s > 0 && s < text.length) {
-    const cu = text.charCodeAt(s);
-    if (cu >= 0xdc00 && cu <= 0xdfff) s -= 1;
-  }
-  let e = end;
-  if (e > 0 && e < text.length) {
-    const cu = text.charCodeAt(e - 1);
-    if (cu >= 0xd800 && cu <= 0xdbff) e += 1;
-  }
-  return [s, e];
+export interface RuleCaptures {
+  captures: Array<{ contextLength: number; query: string; response: RawHit[] }>;
+  notes: SimulatedNote[];
+  vaultOrder: string[];
 }
 
-/** Every occurrence of every token, overlapping or touching spans coalesced, in position order. */
-function simpleSearchSpans(text: string, query: string): Array<[number, number]> | undefined {
-  const lower = text.toLowerCase();
-  const tokens = [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
-  if (tokens.length === 0) return;
-  const spans: Array<[number, number]> = [];
-  for (const token of tokens) {
-    let found = false;
-    for (let i = lower.indexOf(token); i !== -1; i = lower.indexOf(token, i + 1)) {
-      spans.push([i, i + token.length]);
-      found = true;
-    }
-    if (!found) return;
-  }
-  spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const merged: Array<[number, number]> = [];
-  for (const span of spans) {
-    const last = merged[merged.length - 1];
-    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
-    else merged.push([span[0], span[1]]);
-  }
-  return merged;
+export function loadRuleCaptures(): RuleCaptures {
+  return JSON.parse(readFileSync(new URL('rule-captures.json', HERE), 'utf8')) as RuleCaptures;
 }
 
 /**
- * Model `POST /search/simple/` over `notes`. `withSource: false` drops
- * `match.source`, the shape a plugin older than 5.0.3 sends. Each span's
- * ground truth is returned alongside, in the same order.
+ * The response `POST /search/simple/` gives over `notes`, taken as the vault
+ * order. `withSource: false` drops `match.source`, the shape a plugin older
+ * than 5.0.3 sends. Each span's ground truth is returned alongside, in the
+ * same order.
  */
 export function simulateSimpleSearch(
   notes: SimulatedNote[],
@@ -123,36 +97,26 @@ export function simulateSimpleSearch(
   opts: { withSource?: boolean } = {},
 ): { hits: RawHit[]; truth: Map<string, SpanTruth[]> } {
   const withSource = opts.withSource ?? true;
+  const search = new SimpleSearch(query, contextLength);
+  for (const note of notes) search.add(note.path, note.body);
   const hits: RawHit[] = [];
   const truth = new Map<string, SpanTruth[]>();
-  for (const note of notes) {
-    const basename = basenameOf(note.path);
-    const prefix = `${basename}\n\n`;
-    const spans = simpleSearchSpans(prefix + note.body, query);
-    if (!spans) continue;
-    const matches: RawSpan[] = [];
-    const truths: SpanTruth[] = [];
-    for (const [s, e] of spans) {
-      if (s < prefix.length && e <= prefix.length) {
-        const end = Math.min(e, basename.length);
-        matches.push({
-          context: basename,
-          match: { start: s, end, ...(withSource ? { source: 'filename' as const } : {}) },
-        });
-        truths.push({ subject: 'filename', contextStart: s });
-      } else if (s >= prefix.length) {
-        const start = s - prefix.length;
-        const end = e - prefix.length;
-        const [ws, we] = widen(note.body, Math.max(start - contextLength, 0), end + contextLength);
-        matches.push({
-          context: note.body.slice(ws, we),
-          match: { start, end, ...(withSource ? { source: 'content' as const } : {}) },
-        });
-        truths.push({ subject: 'body', contextStart: start - ws });
-      }
-    }
-    hits.push({ filename: note.path, score: -1, matches });
-    truth.set(note.path, truths);
+  for (const hit of search.hits()) {
+    hits.push({
+      filename: hit.filename,
+      score: hit.score,
+      matches: hit.matches.map(({ context, match }) => ({
+        context,
+        match: withSource ? match : { start: match.start, end: match.end },
+      })),
+    });
+    truth.set(
+      hit.filename,
+      hit.matches.map((m) => ({
+        subject: m.match.source === 'filename' ? 'filename' : 'body',
+        contextStart: m.contextStart,
+      })),
+    );
   }
   return { hits, truth };
 }

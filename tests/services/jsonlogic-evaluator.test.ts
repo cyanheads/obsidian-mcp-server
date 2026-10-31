@@ -8,9 +8,11 @@
 
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  assertNoLinkFields,
   assertTreeDepth,
   createJsonLogicEvaluation,
   MAX_TREE_DEPTH,
@@ -19,14 +21,37 @@ import {
 import type { NoteContext } from '@/services/obsidian/jsonlogic-worker.js';
 import { rejectionOf } from '../helpers.js';
 
-/** A one-batch evaluation. */
-function evaluateJsonLogic(
+/** A one-batch evaluation, its worker closed once it answers. */
+async function evaluateJsonLogic(
   logic: unknown,
   notes: NoteContext[],
   opts?: Parameters<typeof createJsonLogicEvaluation>[1],
 ) {
-  return createJsonLogicEvaluation(logic, opts).evaluate(notes);
+  const evaluation = createJsonLogicEvaluation(logic, opts);
+  try {
+    return await evaluation.evaluate(notes);
+  } finally {
+    await evaluation.close();
+  }
 }
+
+/** Spy on every JSONLogic worker: the instances handed a batch, and those terminated. */
+function spyOnWorkers() {
+  const post = vi.spyOn(Worker.prototype, 'postMessage');
+  const terminate = vi.spyOn(Worker.prototype, 'terminate');
+  return {
+    batches: () =>
+      post.mock.calls.map(([request]) =>
+        (request as { notes: NoteContext[] }).notes.map((n) => n.path),
+      ),
+    instances: () => new Set(post.mock.contexts),
+    terminated: () => new Set(terminate.mock.contexts),
+  };
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 const note = (path: string, fields: Record<string, unknown> = {}) => ({
   tags: [],
@@ -104,7 +129,9 @@ describe('evaluateJsonLogic — plugin parity', () => {
   });
 
   it('answers an empty note set without evaluating', async () => {
+    const workers = spyOnWorkers();
     expect(await evaluateJsonLogic({ nope: [1] }, [])).toEqual([]);
+    expect(workers.instances().size).toBe(0);
   });
 
   it('reads note bodies on the plugin rule: the string "content" anywhere in the tree', () => {
@@ -112,6 +139,123 @@ describe('evaluateJsonLogic — plugin parity', () => {
     expect(readsContent({ '==': ['content', 'y'] })).toBe(true);
     expect(readsContent({ var: '' })).toBe(false);
     expect(readsContent({ var: 'contents' })).toBe(false);
+  });
+});
+
+describe('createJsonLogicEvaluation — one worker per search', () => {
+  it('evaluates every batch on one worker, terminated only once the evaluation closes', async () => {
+    const workers = spyOnWorkers();
+    const evaluation = createJsonLogicEvaluation({ var: 'path' });
+    for (const batch of [['a.md'], ['b.md', 'c.md'], ['d.md']]) {
+      expect(await evaluation.evaluate(batch.map((path) => note(path)))).toEqual(
+        batch.map((path) => ({ filename: path, result: path })),
+      );
+    }
+    expect(workers.batches()).toEqual([['a.md'], ['b.md', 'c.md'], ['d.md']]);
+    expect(workers.instances().size).toBe(1);
+    expect(workers.terminated().size).toBe(0);
+    await evaluation.close();
+    await evaluation.close();
+    expect(workers.terminated()).toEqual(workers.instances());
+  });
+
+  it.each([
+    ['fails on a note', { regexp: ['(', { var: 'path' }] }, 'logic_invalid'],
+    [
+      'passes a work budget',
+      { map: [Array.from({ length: 1_000 }, (_, i) => i), ['y'.repeat(100_000)]] },
+      'logic_too_costly',
+    ],
+  ])('terminates its worker when a batch %s', async (_label, logic, reason) => {
+    const workers = spyOnWorkers();
+    const evaluation = createJsonLogicEvaluation(logic);
+    const err = await rejectionOf<McpError>(evaluation.evaluate([note('a.md')]));
+    expect(err.data).toEqual({ reason });
+    expect(workers.instances().size).toBe(1);
+    expect(workers.terminated()).toEqual(workers.instances());
+  });
+
+  it('starts no worker for a search whose batches are all empty, and closes cleanly', async () => {
+    const workers = spyOnWorkers();
+    const evaluation = createJsonLogicEvaluation({ var: 'path' });
+    expect(await evaluation.evaluate([])).toEqual([]);
+    await evaluation.close();
+    expect(workers.instances().size).toBe(0);
+    expect(workers.terminated().size).toBe(0);
+  });
+});
+
+/**
+ * Under a read scope the note contexts carry no link fields, so a tree naming
+ * one in a `var` the note is read through fails at once, before any request,
+ * rather than evaluating to `null` on every note.
+ */
+describe('assertNoLinkFields', () => {
+  it.each([
+    ['a bare field', { var: 'links' }, 'links'],
+    ['a path into a field', { var: 'backlinks.0' }, 'backlinks'],
+    ['the array form with a default', { var: ['unresolvedLinks', []] }, 'unresolvedLinks'],
+    ['the array form without one', { var: ['links'] }, 'links'],
+    ['a key built from a literal array', { var: [['backlinks']] }, 'backlinks'],
+    ['a field read for its length', { var: 'links.length' }, 'links'],
+    ['a membership test', { in: ['Work/x', { var: 'unresolvedLinks' }] }, 'unresolvedLinks'],
+    [
+      'a test nested in boolean logic',
+      { and: [{ '==': [{ var: 'path' }, 'a.md'] }, { or: [false, { var: 'backlinks' }] }] },
+      'backlinks',
+    ],
+    ['the array a map walks', { map: [{ var: 'links' }, { var: '' }] }, 'links'],
+    [
+      "a reduce's initial value",
+      { reduce: [{ var: 'tags' }, { var: 'current' }, { var: 'links' }] },
+      'links',
+    ],
+    ['a var computing another var key', { var: [{ var: 'backlinks.0' }] }, 'backlinks'],
+    ['an element of an array literal', [1, { var: 'links' }], 'links'],
+  ])('rejects %s', (_label, logic, field) => {
+    let thrown: unknown;
+    try {
+      assertNoLinkFields(logic);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'link_fields_unavailable' },
+    });
+    expect((thrown as Error).message).toMatch(new RegExp(`^The JSONLogic tree reads \`${field}\``));
+  });
+
+  it.each([
+    ['a field whose name starts like one', { var: 'linksTo' }],
+    ['a frontmatter key named like one', { var: 'frontmatter.links' }],
+    ['a computed key', { var: { cat: ['back', 'links'] } }],
+    ['a computed key with a default', { var: [{ cat: ['un', 'resolvedLinks'] }, []] }],
+    ['the elements a map walks', { map: [{ var: 'frontmatter.items' }, { var: 'links' }] }],
+    ['the elements a filter tests', { filter: [{ var: 'tags' }, { var: 'backlinks' }] }],
+    ['the elements some tests', { some: [{ var: 'tags' }, { var: 'links.0' }] }],
+    ["a reduce's step", { reduce: [{ var: 'tags' }, { var: 'links' }, 0] }],
+    ['a missing check', { missing: ['links', 'backlinks'] }],
+    ['the field name as a string', { '==': [{ var: 'path' }, 'links'] }],
+    ['an object literal no operator reads', { a: { var: 'links' }, b: 1 }],
+    ['the whole note', { var: '' }],
+  ])('accepts %s', (_label, logic) => {
+    expect(() => assertNoLinkFields(logic)).not.toThrow();
+  });
+
+  it(`finds a link field at the bottom of a ${MAX_TREE_DEPTH}-level tree, and walks a wide one`, () => {
+    let deep: unknown = { var: ['backlinks'] };
+    for (let level = 4; level <= MAX_TREE_DEPTH; level += 2) deep = { '!!': [deep] };
+    expect(() => assertTreeDepth(deep)).not.toThrow();
+    expect(() => assertNoLinkFields(deep)).toThrow(
+      expect.objectContaining({ data: { reason: 'link_fields_unavailable' } }),
+    );
+    const wide = {
+      or: [...Array.from({ length: 100_000 }, () => ({ var: 'path' })), { var: 'links' }],
+    };
+    expect(() => assertNoLinkFields(wide)).toThrow(
+      expect.objectContaining({ data: { reason: 'link_fields_unavailable' } }),
+    );
   });
 });
 
@@ -127,7 +271,12 @@ describe('evaluateJsonLogic — the log operator', () => {
     // A promise chain rather than top-level await: Node evaluates `-e` as CommonJS,
     // and `--input-type` would be inherited by the evaluator's worker.
     const code = `import(${JSON.stringify(evaluator)})
-  .then(({ createJsonLogicEvaluation }) => createJsonLogicEvaluation({ log: { var: 'path' } }).evaluate([{ path: 'log-marker.md' }]))
+  .then(async ({ createJsonLogicEvaluation }) => {
+    const evaluation = createJsonLogicEvaluation({ log: { var: 'path' } });
+    const hits = await evaluation.evaluate([{ path: 'log-marker.md' }]);
+    await evaluation.close();
+    return hits;
+  })
   .then((hits) => process.stderr.write(JSON.stringify(hits)));`;
     const child = spawnSync(process.execPath, ['-e', code], { encoding: 'utf8', timeout: 30_000 });
     expect(child.stderr).toBe('[{"filename":"log-marker.md","result":"log-marker.md"}]');
@@ -483,6 +632,23 @@ describe('evaluateJsonLogic — deadline and cancellation', () => {
     const err = await run;
     expect(err).toBe(controller.signal.reason);
     expect(err.name).toBe('AbortError');
+  });
+
+  it('terminates its worker at the deadline and on cancellation, before any close', async () => {
+    const workers = spyOnWorkers();
+    const pastDeadline = watch(
+      createJsonLogicEvaluation(catastrophic, { deadlineMs: 500 }).evaluate(stuck),
+    );
+    await vi.advanceTimersByTimeAsync(500);
+    await tooCostly(pastDeadline.outcome);
+    const controller = new AbortController();
+    const cancelled = rejectionOf(
+      createJsonLogicEvaluation(catastrophic, { signal: controller.signal }).evaluate(stuck),
+    );
+    controller.abort();
+    expect(await cancelled).toBe(controller.signal.reason);
+    expect(workers.instances().size).toBe(2);
+    expect(workers.terminated()).toEqual(workers.instances());
   });
 
   it('rejects at once when the signal has already aborted', async () => {

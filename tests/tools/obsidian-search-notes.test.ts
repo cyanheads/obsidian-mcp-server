@@ -5,6 +5,7 @@
  * @module tests/tools/obsidian-search-notes.test
  */
 
+import { Worker } from 'node:worker_threads';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -24,6 +25,7 @@ import {
   deepNoteFetch,
   jsonLogicVault,
   makeTestConfig,
+  markdownText,
   mockResponse,
   type ReplyFn,
   rejectionOf,
@@ -50,6 +52,45 @@ async function captureError(
   } catch (e) {
     return e as { code: number; data?: Record<string, unknown> };
   }
+}
+
+/** The rendered line for each reason `truncated` can be true in omnisearch mode. */
+const OMNISEARCH_LINES = {
+  cap_reached:
+    '_Truncated (cap_reached): Omnisearch returned its 50-hit cap, so more matches may exist. Narrow with `path:`, `ext:`, or more plain terms, which Omnisearch applies before the cap._',
+  filtered_after_cap:
+    '_Truncated (filtered_after_cap): Omnisearch keeps its top 50 matches before it applies quoted terms and `-exclusion` terms, so matches past the cap were never checked. Narrow with `path:`, `ext:`, or more plain terms, which apply before the cap, or rerun without the quoted and excluded terms to see whether the cap was reached._',
+  read_scope:
+    '_Truncated (read_scope): Omnisearch keeps its top 50 matches across the whole vault before the read scope filters them, so readable matches may be missing. Add a `path:` term naming a readable folder, which Omnisearch applies before the cap._',
+} as const;
+
+/**
+ * One omnisearch call through the production envelope, against an Omnisearch
+ * that answers every query with a hit per path in `paths`, in that order.
+ */
+async function omnisearchCall(query: string, paths: string[], config: Partial<ServerConfig> = {}) {
+  const queries: string[] = [];
+  const fetchImpl: ObsidianFetch = async (url) => {
+    const u = new URL(url);
+    if (u.port !== '51361' || u.pathname !== '/search') throw new Error(`unexpected ${url}`);
+    queries.push(u.searchParams.get('q') ?? '');
+    const hits = paths.map((path) => ({
+      basename: path.replace(/^.*\//, '').replace(/\.md$/, ''),
+      excerpt: '',
+      foundWords: ['x'],
+      matches: [],
+      path,
+      score: 1,
+    }));
+    return mockResponse(JSON.stringify(hits), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  setObsidianService(new ObsidianService(makeTestConfig(config), fetchImpl));
+  const res = await runToolContract(omnisearchTool, { mode: 'omnisearch', query });
+  const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+  return { queries, res, structured: res.structuredContent as Record<string, unknown>, text };
 }
 
 describe('obsidian_search_notes / text', () => {
@@ -451,6 +492,66 @@ describe('obsidian_search_notes / omnisearch (mode-conditional)', () => {
   });
 });
 
+/**
+ * Omnisearch 1.31.0 filters `ext:`, `path:`, and `-path:` before it keeps its
+ * top 50, and quoted terms and `-exclusion` text after. A query with the
+ * latter can come back short of 50 while the cap cut matches. Issue #172.
+ */
+describe('obsidian_search_notes / omnisearch truncated — filters applied after the cap', () => {
+  it.each([
+    ['no hits', 'deploy', 0],
+    ['49 hits', 'deploy', 49],
+    ['a path: filter', 'deploy path:work', 10],
+    ['an ext: filter', 'deploy ext:pdf', 10],
+    ['a -path: exclusion', 'deploy -path:archive', 10],
+    ['a hyphen inside a word', 'pre-deploy', 10],
+    ['an apostrophe inside a word', "don't deploy", 10],
+    ['a lone dash', 'deploy -', 10],
+  ])('reports a complete result for %s', async (_label, query, count) => {
+    const paths = Array.from({ length: count }, (_, i) => `n${i}.md`);
+    const { queries, structured, text } = await omnisearchCall(query, paths);
+    expect(queries).toEqual([query]);
+    const result = (structured as { result: Record<string, unknown> }).result;
+    expect(result.truncated).toBe(false);
+    expect(result).not.toHaveProperty('truncatedReason');
+    expect(text).not.toContain('Truncated');
+  });
+
+  it.each([
+    ['the cap reached', 'deploy', 50, 'cap_reached'],
+    ['the cap reached with an exclusion', 'deploy -the', 50, 'cap_reached'],
+    ['a -exclusion', 'deploy -the', 21, 'filtered_after_cap'],
+    ['a -exclusion that removed every hit', 'deploy -the', 0, 'filtered_after_cap'],
+    ['a quoted phrase', '"deploy the"', 3, 'filtered_after_cap'],
+    ['a quoted single word', 'deploy "the"', 3, 'filtered_after_cap'],
+    ['a single-quoted phrase', "deploy 'next week'", 0, 'filtered_after_cap'],
+    ['a quoted exclusion', 'deploy -"the plan"', 5, 'filtered_after_cap'],
+  ] as const)('reports truncated for %s', async (_label, query, count, reason) => {
+    const paths = Array.from({ length: count }, (_, i) => `n${i}.md`);
+    const { structured, text } = await omnisearchCall(query, paths);
+    expect(structured).toMatchObject({
+      result: { truncated: true, truncatedReason: reason, totalCount: count },
+    });
+    expect(text).toContain(`\n${OMNISEARCH_LINES[reason]}\n`);
+  });
+
+  it('names only the filters Omnisearch applies before its cap as the way to narrow', () => {
+    const shape = (
+      omnisearchTool.output.shape.result as unknown as {
+        options: Array<{ shape: Record<string, { description?: string }> }>;
+      }
+    ).options.find((o) => o.shape.truncatedReason)?.shape;
+    const truncated = shape?.truncated?.description ?? '';
+    expect(truncated).toContain('`path:`, `ext:`, or more plain terms');
+    expect(truncated).toContain('after its cap');
+    expect(truncated).toContain('OBSIDIAN_READ_PATHS');
+    expect(truncated).not.toMatch(/narrow the query to surface/i);
+    const mode = omnisearchTool.input.shape.mode.description ?? '';
+    expect(mode).not.toMatch(/upstream caps results at 50\./);
+    expect(mode).toContain('after the cap');
+  });
+});
+
 describe('obsidian_search_notes / probeOmnisearch', () => {
   afterEach(() => {
     setObsidianService(undefined);
@@ -647,28 +748,25 @@ describe('obsidian_search_notes / format()', () => {
     );
   });
 
-  it('warns about omnisearch truncation when the upstream cap was hit', () => {
-    const blocks = omnisearchTool.format!({
-      result: {
-        mode: 'omnisearch',
-        hits: [
-          {
-            basename: 'n0',
-            excerpt: '',
-            filename: 'n0.md',
-            foundWords: ['x'],
-            matches: [],
-            score: 1,
-          },
-        ],
-        totalCount: 50,
-        truncated: true,
-      },
-    });
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('50-hit cap');
-    expect(text).toContain('Narrow');
-  });
+  it.each(Object.keys(OMNISEARCH_LINES) as Array<keyof typeof OMNISEARCH_LINES>)(
+    'says why a result is truncated, and how to narrow it: %s',
+    (reason) => {
+      const blocks = omnisearchTool.format!({
+        result: {
+          mode: 'omnisearch',
+          hits: [],
+          totalCount: 0,
+          truncated: true,
+          truncatedReason: reason,
+        },
+      });
+      expect((blocks[0] as { text: string }).text).toBe(
+        ['**Search (omnisearch) — 0 on this page · 0 total**', OMNISEARCH_LINES[reason], ''].join(
+          '\n',
+        ),
+      );
+    },
+  );
 });
 
 describe('obsidian_search_notes / contextLength drives the rendered text', () => {
@@ -732,32 +830,9 @@ describe('obsidian_search_notes — path-policy post-filter', () => {
   });
 
   it('drops text hits outside readPaths silently and shrinks totalCount', async () => {
-    const fetchImpl: ObsidianFetch = async (url) => {
-      const u = new URL(url);
-      if (u.pathname.startsWith('/search/simple/')) {
-        return mockResponse(
-          JSON.stringify([
-            {
-              filename: 'public/a.md',
-              score: 1,
-              matches: [{ context: 'a', match: { start: 0, end: 1 } }],
-            },
-            {
-              filename: 'secret/b.md',
-              score: 1,
-              matches: [{ context: 'b', match: { start: 0, end: 1 } }],
-            },
-            {
-              filename: 'public/sub/c.md',
-              score: 1,
-              matches: [{ context: 'c', match: { start: 0, end: 1 } }],
-            },
-          ]),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
-      }
-      throw new Error(`unexpected ${u.pathname}`);
-    };
+    const { fetchImpl } = jsonLogicVault(
+      ['public/a.md', 'secret/b.md', 'public/sub/c.md'].map((path) => ({ path, content: 'x' })),
+    );
     const svc = new ObsidianService(makeTestConfig({ readPaths: ['public'] }), fetchImpl);
     setObsidianService(svc);
 
@@ -784,35 +859,201 @@ describe('obsidian_search_notes — path-policy post-filter', () => {
     expect(out.result.totalCount).toBe(1);
   });
 
-  it('filters omnisearch hits against readPaths but computes truncated against the raw upstream', async () => {
-    const fiftyRaw = Array.from({ length: 50 }, (_, i) => ({
-      basename: `n${i}`,
-      excerpt: '',
-      foundWords: ['x'],
-      matches: [],
-      path: i < 5 ? `public/n${i}.md` : `secret/n${i}.md`,
-      score: 1,
-    }));
-    const fetchImpl: ObsidianFetch = async (url) => {
-      if (url.includes(':51361/search')) {
-        return mockResponse(JSON.stringify(fiftyRaw), {
+  /**
+   * Omnisearch caps the whole vault at 50 before the read scope filters, so
+   * whether the cap cut a readable match is knowable only from out-of-scope
+   * notes: under a scope `truncated` is always true. Issue #163.
+   */
+  it.each([
+    ['readPaths', { readPaths: ['public'] }],
+    ['a deny list alone', { denyPaths: ['secret'] }],
+  ] as Array<[string, Partial<ServerConfig>]>)(
+    'filters omnisearch hits under %s, and reports truncated whatever the upstream returned',
+    async (_label, config) => {
+      for (const count of [0, 1, 20, 49, 50]) {
+        const raw = Array.from({ length: count }, (_, i) =>
+          i % 4 === 0 ? `public/n${i}.md` : `secret/n${i}.md`,
+        );
+        const { structured, text } = await omnisearchCall('x', raw, config);
+        const readable = raw.filter((p) => p.startsWith('public/'));
+        expect(structured, `${count} upstream hits`).toMatchObject({
+          result: { totalCount: readable.length, truncated: true, truncatedReason: 'read_scope' },
+        });
+        expect(text).toContain(OMNISEARCH_LINES.read_scope);
+        expect(text).not.toMatch(/returned its 50-hit cap/);
+        expect(`${JSON.stringify(structured)}${text}`).not.toMatch(/secret/);
+      }
+    },
+  );
+
+  /** OBSIDIAN_DENY_PATHS with no allowlist: denied hits leave both surfaces in every mode. */
+  describe('under a deny list alone', () => {
+    const DENIED = { denyPaths: ['secret', 'public/hidden'] };
+    const textOf = (blocks: ReturnType<NonNullable<typeof obsidianSearchNotes.format>>) =>
+      blocks.map((b) => (b as { text?: string }).text ?? '').join('\n');
+
+    it('drops denied text hits', async () => {
+      const { fetchImpl } = jsonLogicVault(
+        ['public/a.md', 'secret/b.md', 'Public/Hidden/c.md', 'publicity/d.md'].map((path) => ({
+          path,
+          content: 'x',
+        })),
+      );
+      setObsidianService(new ObsidianService(makeTestConfig(DENIED), fetchImpl));
+      const res = await runToolContract(obsidianSearchNotes, { mode: 'text', query: 'x' });
+      const result = (
+        res.structuredContent as {
+          result: { hits: Array<{ filename: string }>; totalCount: number };
+        }
+      ).result;
+      expect(result.hits.map((h) => h.filename)).toEqual(['public/a.md', 'publicity/d.md']);
+      expect(result.totalCount).toBe(2);
+      const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+      expect(text).toContain('publicity/d.md');
+      expect(text).not.toMatch(/secret|Hidden/);
+    });
+
+    it('drops denied omnisearch hits', async () => {
+      const raw = ['public/a.md', 'secret/b.md', 'public/hidden/c.md'].map((path) => ({
+        basename: path,
+        excerpt: '',
+        foundWords: ['x'],
+        matches: [],
+        path,
+        score: 1,
+      }));
+      const fetchImpl: ObsidianFetch = async () =>
+        mockResponse(JSON.stringify(raw), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
-      }
-      throw new Error(`unexpected ${url}`);
-    };
-    const svc = new ObsidianService(makeTestConfig({ readPaths: ['public'] }), fetchImpl);
-    setObsidianService(svc);
+      setObsidianService(new ObsidianService(makeTestConfig(DENIED), fetchImpl));
+      const out = await omnisearchTool.handler(
+        omnisearchTool.input.parse({ mode: 'omnisearch', query: 'x' }),
+        createMockContext({ errors: omnisearchTool.errors }),
+      );
+      if (out.result.mode !== 'omnisearch') throw new Error('expected omnisearch branch');
+      expect(out.result.hits.map((h) => h.filename)).toEqual(['public/a.md']);
+      expect(textOf(omnisearchTool.format!(out))).not.toMatch(/secret|hidden/);
+    });
 
-    const out = await omnisearchTool.handler(
-      omnisearchTool.input.parse({ mode: 'omnisearch', query: 'x' }),
-      createMockContext({ errors: omnisearchTool.errors }),
+    it('evaluates jsonlogic over readable notes, and refuses the link fields without naming a deny prefix', async () => {
+      const vault = serveVault(
+        [
+          { path: 'public/a.md', links: ['secret/b.md', 'public/c.md'], tags: ['t'] },
+          { path: 'secret/b.md', links: ['public/a.md'], tags: ['t'] },
+          { path: 'public/c.md', unresolvedLinks: ['public/hidden/new', 'elsewhere'] },
+        ],
+        DENIED,
+      );
+      const tags = await jsonLogicCall({ in: ['t', { var: 'tags' }] });
+      expect(tags.res.isError).toBeFalsy();
+      expect((tags.structured.result as { hits: unknown[] }).hits).toEqual([
+        { filename: 'public/a.md', result: true },
+      ]);
+      expect(tags.text).not.toMatch(/secret|hidden/);
+      const requests = vault.requests.length;
+      for (const logic of [{ var: 'links' }, { var: 'backlinks' }, { var: 'unresolvedLinks' }]) {
+        const { res, text } = await jsonLogicCall(logic);
+        expect(res.isError).toBe(true);
+        expect(
+          (res.structuredContent as { error: { data: { reason: string } } }).error.data.reason,
+        ).toBe('link_fields_unavailable');
+        expect(JSON.stringify(res)).not.toMatch(/secret|hidden/);
+        expect(markdownText(text)).toContain('(reason link_fields_unavailable');
+      }
+      expect(vault.requests).toHaveLength(requests);
+    });
+  });
+});
+
+/**
+ * Under a read scope text mode never calls `/search/simple/`, whose match
+ * windows span the whole vault: the server matches the readable notes itself.
+ * Issue #163.
+ */
+describe('obsidian_search_notes / text under a read scope', () => {
+  afterEach(() => {
+    setObsidianService(undefined);
+  });
+
+  const textCall = async (input: Record<string, unknown>) => {
+    const res = await runToolContract(obsidianSearchNotes, { mode: 'text', ...input });
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    return { res, structured: res.structuredContent as Record<string, unknown>, text };
+  };
+
+  it('answers from the readable notes on both surfaces, with no /search/simple/ request', async () => {
+    const vault = serveVault(
+      [
+        { path: 'Work/plan.md', content: 'ship the alpha build, then alpha docs' },
+        { path: 'Secret/alpha.md', content: 'alpha alpha alpha' },
+      ],
+      { denyPaths: ['secret'] },
     );
-    if (out.result.mode !== 'omnisearch') throw new Error('expected omnisearch branch');
-    expect(out.result.hits).toHaveLength(5);
-    expect(out.result.totalCount).toBe(5);
-    expect(out.result.truncated).toBe(true);
+    const { structured, text } = await textCall({ query: 'alpha', contextLength: 5 });
+    expect(structured).toEqual({
+      result: {
+        mode: 'text',
+        totalCount: 1,
+        hits: [
+          {
+            filename: 'Work/plan.md',
+            matches: [
+              {
+                context: ' the alpha buil',
+                match: { start: 9, end: 14, contextStart: 5, contextEnd: 10 },
+              },
+              {
+                context: 'then alpha docs',
+                match: { start: 27, end: 32, contextStart: 5, contextEnd: 10 },
+              },
+            ],
+          },
+        ],
+      },
+      effectiveQuery: 'alpha',
+    });
+    expect(text).toContain('subject[27–32]');
+    expect(text).toContain('then alpha docs');
+    expect(text).not.toMatch(/secret/i);
+    expect(vault.requests).toEqual(['POST /search/', 'GET /vault/Work/plan.md']);
+  });
+
+  it('fails past the response ceiling with the declared context_length_too_large, decided by readable matches', async () => {
+    const needles = 'needle '.repeat(20_000);
+    const declared = obsidianSearchNotes.errors!.find(
+      (e) => e.reason === 'context_length_too_large',
+    )!;
+    serveVault(
+      [
+        { path: 'Work/a.md', content: 'one needle' },
+        { path: 'Secret/b.md', content: needles },
+      ],
+      { denyPaths: ['secret'] },
+    );
+    const fits = await textCall({ query: 'needle', contextLength: 2 ** 28 });
+    expect(fits.res.isError).toBeFalsy();
+    serveVault([{ path: 'Work/a.md', content: needles }], { denyPaths: ['secret'] });
+    const { res, text } = await textCall({ query: 'needle', contextLength: 2 ** 28 });
+    expect(res.isError).toBe(true);
+    expect((res.structuredContent as { error: unknown }).error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'context_length_too_large',
+        contextLength: 2 ** 28,
+        recovery: { hint: declared.recovery },
+      },
+    });
+    expect(markdownText(text)).toContain('(reason context_length_too_large');
+  });
+
+  it('declares text_search_too_costly, the scoped search past its deadline, with levers the caller holds', () => {
+    const declared = obsidianSearchNotes.errors!.find((e) => e.reason === 'text_search_too_costly');
+    expect(declared).toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+    expect(declared?.when).toContain('45 s');
+    expect(declared?.recovery).toMatch(/rarer/);
+    expect(declared?.recovery).toContain('OBSIDIAN_READ_PATHS');
   });
 });
 
@@ -881,28 +1122,45 @@ describe('obsidian_search_notes / jsonlogic under OBSIDIAN_READ_PATHS', () => {
   }
 
   it.each([
-    ['links', { var: 'links' }, [{ filename: 'Work/a.md', result: ['Work/b.md'] }]],
-    ['backlinks', { var: 'backlinks' }, [{ filename: 'Work/b.md', result: ['Work/a.md'] }]],
-    [
-      'unresolvedLinks',
-      { var: 'unresolvedLinks' },
-      [{ filename: 'Work/b.md', result: ['Work/missing'] }],
-    ],
-    [
-      'a value derived from links',
-      { map: [{ var: 'links' }, { substr: [{ var: '' }, 0, 4] }] },
-      [{ filename: 'Work/a.md', result: ['Work'] }],
-    ],
-  ])('keeps only in-scope entries in %s, on both surfaces', async (_label, logic, expected) => {
-    serve();
-    const { res, structured, text } = await search(logic);
-    expect(res.isError).toBeFalsy();
-    expect(hitsOf(structured)).toEqual(expected);
-    expect(text).toContain(JSON.stringify(expected[0]?.result, null, 2));
-    expect(JSON.stringify(res)).not.toMatch(/priv/i);
+    ['links', { var: 'links' }],
+    ['backlinks.0', { var: 'backlinks.0' }],
+    ['unresolvedLinks with a default', { var: ['unresolvedLinks', []] }],
+    ['an unresolved link test', { in: ['Work/x', { var: 'unresolvedLinks' }] }],
+    ['a backlink test', { in: ['Work/sub/b.md', { var: 'backlinks' }] }],
+  ])(
+    'refuses a tree reading %s with the declared link_fields_unavailable, before any request',
+    async (_label, logic) => {
+      const vault = serve();
+      const declared = obsidianSearchNotes.errors!.find(
+        (e) => e.reason === 'link_fields_unavailable',
+      )!;
+      const { res, text } = await search(logic);
+      expect(res.isError).toBe(true);
+      expect((res.structuredContent as { error: unknown }).error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'link_fields_unavailable', recovery: { hint: declared.recovery } },
+      });
+      expect(markdownText(text)).toContain(`Recovery: ${declared.recovery}`);
+      expect(vault.requests).toEqual([]);
+    },
+  );
+
+  it('gives the link_fields_unavailable recovery the backlinks recipe the `logic` field documents', () => {
+    const recipeOf = (text: string) => {
+      const recipe = /`(\{"regexp": \[.*?\]\})`/.exec(text)?.[1];
+      if (!recipe) throw new Error(`no backlinks recipe in: ${text}`);
+      return (JSON.parse(recipe) as { regexp: [string, unknown] }).regexp;
+    };
+    const declared = obsidianSearchNotes.errors!.find(
+      (e) => e.reason === 'link_fields_unavailable',
+    )!;
+    expect(recipeOf(declared.recovery)).toEqual(
+      recipeOf(obsidianSearchNotes.input.shape.logic.description ?? ''),
+    );
+    expect(declared.recovery).toContain('`obsidian_get_note` with `includeLinks: true`');
   });
 
-  it('hands back the whole note context with no out-of-scope path in it', async () => {
+  it('hands back the whole note context with no out-of-scope path and no link field in it', async () => {
     serve();
     const { res, structured } = await search({ var: '' });
     const hits = hitsOf(structured);
@@ -913,9 +1171,6 @@ describe('obsidian_search_notes / jsonlogic under OBSIDIAN_READ_PATHS', () => {
       stat: { ctime: 1, mtime: 2, size: VAULT[0]?.content?.length },
       path: 'Work/a.md',
       content: '',
-      links: ['Work/b.md'],
-      backlinks: [],
-      unresolvedLinks: [],
     });
     expect(JSON.stringify(res)).not.toMatch(/priv/i);
   });
@@ -928,11 +1183,15 @@ describe('obsidian_search_notes / jsonlogic under OBSIDIAN_READ_PATHS', () => {
 
   it.each([
     [
-      'a query over backlinks',
-      (path: string) => ({ in: [path, { var: 'backlinks' }] }),
+      'a query over backlinks by a computed key',
+      (path: string) => ({ in: [path, { var: { cat: ['back', 'links'] } }] }),
       'Private/y.md',
     ],
-    ['a query over links', (path: string) => ({ in: [path, { var: 'links' }] }), 'Private/x.md'],
+    [
+      'a query over links by a computed key with a default',
+      (path: string) => ({ in: [path, { var: [{ cat: ['lin', 'ks'] }, []] }] }),
+      'Private/x.md',
+    ],
     [
       'a query over the note path',
       (path: string) => ({
@@ -951,6 +1210,43 @@ describe('obsidian_search_notes / jsonlogic under OBSIDIAN_READ_PATHS', () => {
     },
   );
 
+  /**
+   * Obsidian resolves a link across the whole vault, so which note it points
+   * to can change with notes outside the scope. Every tree answers the same
+   * whichever notes exist outside it.
+   */
+  it.each([
+    ['an unresolved link test', 'Work/x', 'unresolvedLinks'],
+    ['a backlink test', 'Work/sub/b.md', 'backlinks'],
+  ])(
+    'answers %s the same whether Obsidian resolves the link inside the scope or outside it',
+    async (_label, target, field) => {
+      const before: VaultNote[] = [
+        { path: 'Work/a.md', unresolvedLinks: ['Work/x'] },
+        { path: 'Work/sub/b.md', links: ['Work/deep/y.md'] },
+        { path: 'Work/deep/y.md' },
+      ];
+      const after: VaultNote[] = [
+        { path: 'Work/a.md', links: ['Archive/Work/x.md'] },
+        { path: 'Work/sub/b.md', links: ['Archive/y.md'] },
+        { path: 'Work/deep/y.md' },
+        { path: 'Archive/Work/x.md' },
+        { path: 'Archive/y.md' },
+      ];
+      const half = Math.ceil(field.length / 2);
+      const trees = [
+        { in: [target, { var: field }] },
+        { in: [target, { var: { cat: [field.slice(0, half), field.slice(half)] } }] },
+      ];
+      for (const logic of trees) {
+        serveVault(before, { readPaths: ['work'] });
+        const inScope = await outcomeOf(logic);
+        serveVault(after, { readPaths: ['work'] });
+        expect(await outcomeOf(logic)).toEqual(inScope);
+      }
+    },
+  );
+
   it('returns the same outcome whatever an out-of-scope note contains', async () => {
     serve();
     const probe = (token: string) => ({
@@ -963,20 +1259,22 @@ describe('obsidian_search_notes / jsonlogic under OBSIDIAN_READ_PATHS', () => {
     expect(await outcomeOf(probe('secret'))).toEqual(await outcomeOf(probe('zz-absent')));
   });
 
-  it('never sends the caller tree upstream, and asks for note bodies only when the tree names content', async () => {
+  it('never sends the caller tree upstream, and reads note bodies only when the tree names content', async () => {
     const vault = serve();
-    await search({ in: ['Private/y.md', { var: 'backlinks' }] });
-    expect(vault.bodies).toHaveLength(1);
+    await search({ in: ['Private/y.md', { var: 'path' }] });
+    expect(vault.requests).toEqual(['POST /search/']);
     expect(vault.bodies[0]).not.toContain('Private/y.md');
     expect(vault.bodies[0]).not.toContain('"content"');
 
     const { structured } = await search({ in: ['alpha', { var: 'content' }] });
-    // Contexts first, then the readable notes' bodies in their own request.
-    expect(vault.bodies).toHaveLength(3);
+    // Contexts first, then one read per readable note's body.
+    expect(vault.requests.slice(1)).toEqual([
+      'POST /search/',
+      'GET /vault/Work/a.md',
+      'GET /vault/Work/b.md',
+    ]);
     expect(vault.bodies[1]).not.toContain('"content"');
-    expect(vault.bodies[2]).toContain('"content"');
-    expect(vault.bodies[2]).not.toContain('alpha');
-    expect(vault.bodies[2]).not.toMatch(/private/i);
+    expect(vault.bodies[1]).not.toContain('alpha');
     expect(hitsOf(structured)).toEqual([{ filename: 'Work/a.md', result: true }]);
   });
 
@@ -1063,13 +1361,20 @@ describe('obsidian_search_notes / scoped jsonlogic paged walks', () => {
     return { res, page, files: page.hits.map((h) => h.filename), text };
   }
 
+  /**
+   * Each evaluation makes one context search, so `vault.bodies` (the search
+   * bodies sent) counts evaluations; a page served from a stored walk makes no
+   * request at all.
+   */
   it('evaluates a three-page walk once and serves the later pages from its stored hits', async () => {
     const vault = serve();
     const first = await pageOf(tree);
+    const firstPageRequests = [...vault.requests];
     const second = await pageOf(tree, first.page.nextCursor);
     const third = await pageOf(tree, second.page.nextCursor);
-    // The first page's two requests (contexts, then one body batch) are the walk's only ones.
-    expect(vault.bodies).toHaveLength(2);
+    // The first page's requests (contexts, then one read per readable body) are the walk's only ones.
+    expect(firstPageRequests).toEqual(['POST /search/', ...WORK.map((p) => `GET /vault/${p}`)]);
+    expect(vault.requests).toEqual(firstPageRequests);
     expect([...first.files, ...second.files, ...third.files]).toEqual(WORK);
     expect([first, second, third].map((p) => p.page.totalCount)).toEqual([120, 120, 120]);
     expect(third.page.nextCursor).toBeUndefined();
@@ -1086,9 +1391,10 @@ describe('obsidian_search_notes / scoped jsonlogic paged walks', () => {
     const first = await pageOf(tree);
     const position = decodeCursor(first.page.nextCursor!) as Record<string, unknown>;
     const pastEnd = Buffer.from(JSON.stringify({ ...position, offset: 120 })).toString('base64url');
+    const requests = vault.requests.length;
     const page = await pageOf(tree, pastEnd);
     expect(page.page).toEqual({ mode: 'jsonlogic', hits: [], totalCount: 120 });
-    expect(vault.bodies).toHaveLength(2);
+    expect(vault.requests).toHaveLength(requests);
   });
 
   it("evaluates a different tree fresh rather than reading another walk's hits", async () => {
@@ -1097,7 +1403,7 @@ describe('obsidian_search_notes / scoped jsonlogic paged walks', () => {
     const odd = await pageOf({ in: ['odd', { var: 'content' }] }, all.page.nextCursor);
     expect(odd.page.totalCount).toBe(60);
     expect(odd.files).toEqual(ODD.slice(50));
-    expect(vault.bodies).toHaveLength(4);
+    expect(vault.bodies).toHaveLength(2);
   });
 
   it("evaluates under the current read scope rather than reading a wider scope's hits", async () => {
@@ -1109,7 +1415,8 @@ describe('obsidian_search_notes / scoped jsonlogic paged walks', () => {
     expect(narrow.page.totalCount).toBe(120);
     expect(narrow.files).toEqual(WORK.slice(50, 100));
     expect(JSON.stringify(narrow.res)).not.toMatch(/private/i);
-    expect(vault.bodies).toHaveLength(2);
+    expect(vault.bodies).toHaveLength(1);
+    expect(vault.requests.filter((r) => /private/i.test(r))).toEqual([]);
   });
 
   it('evaluates again once a stored walk sits unread past its lifetime', async () => {
@@ -1123,14 +1430,14 @@ describe('obsidian_search_notes / scoped jsonlogic paged walks', () => {
     const second = await pageOf(tree, first.page.nextCursor);
     vi.setSystemTime(start + 598_000);
     expect((await pageOf(tree, second.page.nextCursor)).files).toEqual(WORK.slice(100));
-    expect(vault.bodies).toHaveLength(2);
+    expect(vault.bodies).toHaveLength(1);
     // Unread for longer than that: the cursor's page is evaluated again, and stored again.
     vi.setSystemTime(start + 899_000);
     const again = await pageOf(tree, first.page.nextCursor);
     expect(again.files).toEqual(WORK.slice(50, 100));
-    expect(vault.bodies).toHaveLength(4);
+    expect(vault.bodies).toHaveLength(2);
     expect((await pageOf(tree, again.page.nextCursor)).files).toEqual(WORK.slice(100));
-    expect(vault.bodies).toHaveLength(4);
+    expect(vault.bodies).toHaveLength(2);
   });
 
   it('sends an unscoped search upstream for every page, its cursor a plain position', async () => {
@@ -1144,10 +1451,10 @@ describe('obsidian_search_notes / scoped jsonlogic paged walks', () => {
 
   it('stores nothing for a cancelled first page, and the next walk stores its own hits', async () => {
     const controller = new AbortController();
-    // Cancelled once the body batch has arrived, before the tree is evaluated over it.
+    // Cancelled once the last readable body has arrived, before the tree is evaluated over them.
     const vault = serveVault(VAULT, { readPaths: ['work'] }, (v) => async (url, init) => {
       const res = await v.fetchImpl(url, init);
-      if (v.bodies.length === 2) controller.abort();
+      if (v.requests.length === 1 + WORK.length) controller.abort();
       return res;
     });
     const err = await rejectionOf(
@@ -1162,7 +1469,7 @@ describe('obsidian_search_notes / scoped jsonlogic paged walks', () => {
     const first = await pageOf(tree);
     const second = await pageOf(tree, first.page.nextCursor);
     expect(second.files).toEqual(WORK.slice(50, 100));
-    expect(vault.bodies).toHaveLength(4);
+    expect(vault.bodies).toHaveLength(2);
   });
 
   it('hands the service its page size, and stores no walk for a search that fits one page', async () => {
@@ -1186,25 +1493,28 @@ describe('obsidian_search_notes / scoped jsonlogic paged walks', () => {
   it('stores nothing when the cancellation lands after the evaluation answers', async () => {
     const controller = new AbortController();
     const { signal } = controller;
-    // The evaluation stops listening for the abort once its worker has answered; cancel right then.
-    const removeListener = signal.removeEventListener.bind(signal);
-    signal.removeEventListener = (...args: Parameters<typeof removeListener>) => {
-      removeListener(...args);
-      if (args[0] === 'abort') controller.abort();
-    };
+    // The search closes its evaluation's worker once the worker has answered; cancel right then.
+    const terminate = Worker.prototype.terminate;
+    const terminated = vi.spyOn(Worker.prototype, 'terminate').mockImplementation(function (
+      this: Worker,
+    ) {
+      controller.abort();
+      return terminate.call(this);
+    });
     const vault = serve();
     const { result } = await obsidianSearchNotes.handler(
       obsidianSearchNotes.input.parse({ mode: 'jsonlogic', logic: tree }),
       createMockContext({ signal, errors: obsidianSearchNotes.errors }),
     );
+    terminated.mockRestore();
     expect(signal.aborted).toBe(true);
     expect(result.hits.map((hit) => hit.filename)).toEqual(WORK.slice(0, 50));
-    expect(vault.bodies).toHaveLength(2);
+    expect(vault.bodies).toHaveLength(1);
     expect(decodeCursor(result.nextCursor!)).toEqual({ offset: 50, limit: 50 });
     // No walk was stored, so the next page evaluates the tree again.
     const second = await pageOf(tree, result.nextCursor);
     expect(second.files).toEqual(WORK.slice(50, 100));
-    expect(vault.bodies).toHaveLength(4);
+    expect(vault.bodies).toHaveLength(2);
   });
 });
 
@@ -1264,10 +1574,10 @@ describe('obsidian_search_notes / scoped jsonlogic failures the server raises', 
   it('names the link fields and the scoped walk in its parameter descriptions', () => {
     const shape = obsidianSearchNotes.input.shape;
     expect(shape.mode.description).toContain(
-      '`links`, `backlinks`, and `unresolvedLinks` (on plugin versions that provide them; under OBSIDIAN_READ_PATHS, readable entries only)',
+      '`links`, `backlinks`, and `unresolvedLinks` (on plugin versions that provide them; not under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS, where a tree that reads them is rejected)',
     );
     expect(shape.cursor.description).toContain(
-      'Under OBSIDIAN_READ_PATHS, later `jsonlogic` pages come from the hit list the first page computed.',
+      'Under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS, later `jsonlogic` pages come from the hit list the first page computed.',
     );
   });
 });
@@ -1697,11 +2007,11 @@ describe('obsidian_search_notes / format() cannot be broken out of by upstream t
 });
 
 /**
- * The Local REST API materializes a context window per hit before responding,
- * so it runs out of string capacity somewhere along `contextLength × hit
- * count` and answers HTTP 500 with a V8 `RangeError`. Untyped, that reaches
- * the caller as a bare -32603 naming neither the parameter at fault nor the
- * two levers that fix it.
+ * The Local REST API serializes every match before responding, its window
+ * plus about 150 characters of offsets and framing, so it runs out of string
+ * capacity once the matches pass V8's longest string and answers HTTP 500
+ * with a V8 `RangeError`. Untyped, that reaches the caller as a bare -32603
+ * naming neither the parameter at fault nor the levers that fix it.
  */
 describe('obsidian_search_notes / context_length_too_large', () => {
   const declaredRecovery = obsidianSearchNotes.errors!.find(
@@ -1740,6 +2050,15 @@ describe('obsidian_search_notes / context_length_too_large', () => {
     // caller whose query is simply too broad.
     expect(declaredRecovery).toMatch(/contextLength/);
     expect(declaredRecovery).toMatch(/narrow|fewer|filter/i);
+    // Each match costs about 150 characters beside its window, so a common
+    // token can fail at any window; the hint must not promise otherwise.
+    expect(declaredRecovery).toMatch(/common token/);
+    expect(declaredRecovery).toContain('`contextLength` 0');
+    const declared = obsidianSearchNotes.errors!.find(
+      (e) => e.reason === 'context_length_too_large',
+    );
+    expect(declared?.when).toContain('about 150 characters');
+    expect(declared?.when).toContain('OBSIDIAN_DENY_PATHS');
   });
 
   it('maps the upstream RangeError to a typed, recoverable validation error', async () => {

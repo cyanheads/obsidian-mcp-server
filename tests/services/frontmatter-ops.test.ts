@@ -18,7 +18,7 @@ import {
   type TagReconcileResult,
   wikilinkCloser,
 } from '@/services/obsidian/frontmatter-ops.js';
-import { expectLinearCpu } from '../helpers.js';
+import { expectLinearCost } from '../helpers.js';
 
 /**
  * Both mutation helpers return either an edit or the reason they refused. Most
@@ -1405,7 +1405,7 @@ describe('wikilink spans stay linear in note length', () => {
     ['one long line opening with an unclosed link', (n) => `[[${'x'.repeat(n)}\ny #t`],
     ['openers over line breaks throughout', (n) => fill('[[  \r\n', n)],
   ])('scans %s in linear time', async (_label, build) => {
-    await expectLinearCpu(build, (input) => listTagsFromContent(input, {}));
+    await expectLinearCost(build, (input) => listTagsFromContent(input, {}));
   });
 });
 

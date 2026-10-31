@@ -196,7 +196,12 @@ export function sectionBody(content: string, path: string): SectionBody | undefi
  * The 1.x engine lexes the frontmatter-stripped body with its line endings
  * normalized, then applies the token offsets to the note's own bytes unmapped;
  * these offsets are computed the same way, so on a CRLF note they drift as the
- * engine's do.
+ * engine's do. They also sum the kept tokens alone, as the engine does, so
+ * after a definition `marked` drops (a repeated label) they fall short by its
+ * length as the engine's do. A label first defined inside a list item, or in
+ * a blockquote the scan leaves unlexed, is the exception: the scan keeps the
+ * later definition the engine drops, so the span there stays on the note's
+ * headings.
  */
 export function v1HeadingSpan(
   content: string,
@@ -204,9 +209,11 @@ export function v1HeadingSpan(
 ): { end: number; start: number } | undefined {
   const bodyStart = PLUGIN_FRONTMATTER.exec(content)?.[0].length ?? 0;
   const { normalized } = normalizeLineEndings(content.slice(bodyStart));
-  const headings = [...topLevelTokens(normalized)].flatMap((top) => {
-    const heading = headingOf(normalized, top);
-    return heading ? [{ ...heading, raw: top.token.raw }] : [];
+  let kept = 0;
+  const headings = [...topLevelTokens(normalized)].flatMap(({ token }) => {
+    const heading = headingOf(normalized, { offset: kept, token });
+    kept += token.raw.length;
+    return heading ? [{ ...heading, raw: token.raw }] : [];
   });
   const h = headingPaths(headings).indexOf(path);
   const heading = headings[h];
@@ -234,15 +241,27 @@ interface TopLevelToken {
 /**
  * The top-level block tokens `marked` reads in `markdown` (line endings
  * already `\n`), each with its offset — the running sum of the `raw` lengths
- * before it, which cover the input exactly.
+ * before it. Those lengths cover the input except where `marked` drops a
+ * definition, so each dropped definition's length joins the sum where the
+ * definition stood.
  */
 function* topLevelTokens(markdown: string): Generator<TopLevelToken> {
   const tokenizer = new HeadingScanTokenizer();
   const lexer = new Lexer({ ...getDefaults(), tokenizer });
   const { rules } = tokenizer;
   tokenizer.rules = { ...rules, block: { ...rules.block, paragraph: PARAGRAPH } };
+  const tokens = lexer.blockTokens(markdown);
+  const { droppedDefinitions } = tokenizer;
   let offset = 0;
-  for (const token of lexer.blockTokens(markdown)) {
+  let dropped = 0;
+  for (const token of tokens) {
+    for (
+      let gap = droppedDefinitions[dropped];
+      gap && markdown.length - gap.remaining === offset;
+      gap = droppedDefinitions[++dropped]
+    ) {
+      offset += gap.length;
+    }
     yield { offset, token };
     offset += token.raw.length;
   }
@@ -290,9 +309,56 @@ const PARAGRAPH = ((): RegExp => {
  *   the whole blockquote whatever the lines hold, so its extent is known
  *   without lexing it. The token then carries no child tokens, which nothing
  *   here reads. Any other shape — a lazy continuation line — goes to the
- *   stock rule, which still costs a pass per nesting level.
+ *   stock rule, which costs a pass per nesting level and recurses a call
+ *   deeper for each, until `MAX_LAZY_QUOTE_DEPTH` stock calls are open. Past
+ *   that, a blockquote takes the rule's own match as its extent, unlexed: the
+ *   lines right after innermost code then join the quote where stock `marked`
+ *   ends it at the code, so a paragraph there becomes part of the quote, and
+ *   a setext heading's text and underline drop out of the heading scan.
+ * - `list`: the stock rule fixes every item's `raw`, and the list's, before it
+ *   lexes each item's content as a document of its own — one call deeper per
+ *   nesting level, so a line of list markers costs time quadratic in their
+ *   count and overflows the stack. That lex only fills child tokens and
+ *   looseness, so it is skipped, leaving `lexer.state.top` true as the lex
+ *   would. Definitions inside an item then go unregistered, as those inside
+ *   an unlexed blockquote do, so a later top-level definition of the same
+ *   label stays a `def` block where stock `marked` drops it.
+ * - `def`: `marked` drops a top-level definition whose label is already
+ *   registered but still consumes its text. Each one is recorded in
+ *   `droppedDefinitions`, so the scan's offsets cover the note exactly.
  */
 class HeadingScanTokenizer extends Tokenizer {
+  /**
+   * Each top-level definition `marked` drops, in order: the length of the
+   * source left when it was read — its position counted from the end — and
+   * its own length.
+   */
+  readonly droppedDefinitions: Array<{ length: number; remaining: number }> = [];
+  /** Stock blockquote calls open on the stack; only within one does a nested lex run. */
+  #quoteDepth = 0;
+
+  override def(src: string): Tokens.Def | undefined {
+    const token = super.def(src);
+    if (token && this.#quoteDepth === 0 && this.lexer.tokens.links[token.tag]) {
+      this.droppedDefinitions.push({ length: token.raw.length, remaining: src.length });
+    }
+    return token;
+  }
+
+  override list(src: string): Tokens.List | undefined {
+    const { lexer } = this;
+    const { blockTokens } = lexer;
+    lexer.blockTokens = ((_src: string, tokens: Token[] = []) => {
+      lexer.state.top = true;
+      return tokens;
+    }) as typeof blockTokens;
+    try {
+      return super.list(src);
+    } finally {
+      lexer.blockTokens = blockTokens;
+    }
+  }
+
   override table(src: string): Tokens.Table | undefined {
     const headerEnd = src.indexOf('\n');
     const delimiterEnd = headerEnd === -1 ? -1 : src.indexOf('\n', headerEnd + 1);
@@ -311,18 +377,41 @@ class HeadingScanTokenizer extends Tokenizer {
       end = lineEnd;
       next = lineEnd + 1;
     }
+    if (end === -1) return super.blockquote(src);
     /**
      * A run of `>` lines that ends the note or meets an empty line is the whole
      * blockquote: only a non-empty line can continue it lazily.
      */
-    if (end === -1 || (next < src.length && src[next] !== '\n')) return super.blockquote(src);
-    const raw = src.slice(0, end);
+    let raw = src.slice(0, end);
+    if (next < src.length && src[next] !== '\n') {
+      if (this.#quoteDepth < MAX_LAZY_QUOTE_DEPTH) {
+        this.#quoteDepth++;
+        try {
+          return super.blockquote(src);
+        } finally {
+          this.#quoteDepth--;
+        }
+      }
+      const cap = this.rules.block.blockquote.exec(src);
+      if (!cap) return;
+      raw = trimTrailingLineFeeds(cap[0]);
+    }
     const text = raw
       .replace(blockquoteSetextReplace, '\n    $1')
       .replace(blockquoteSetextReplace2, '');
     return { type: 'blockquote', raw, text, tokens: [] };
   }
 }
+
+/**
+ * Stock blockquote calls the scan lets open at once. Each `>` level a lazy
+ * line reaches through opens one, and so does each return of a nested quote
+ * after a lazy line (`> > a`, `lazy`, `> > b`, …). Below the bound a lazily
+ * continued quote reads as in stock `marked`, at a cost of at most this many
+ * passes over its lines; past it only the lines right after innermost code
+ * read differently, joining the quote.
+ */
+const MAX_LAZY_QUOTE_DEPTH = 16;
 
 /**
  * `text` with every `\r\n` and lone `\r` read as `\n` — what `marked` lexes —
@@ -352,6 +441,17 @@ function normalizeLineEndings(text: string): {
       return offset + lo;
     },
   };
+}
+
+/**
+ * `text` less its trailing run of `\n`, as `/\n+$/` leaves it, found by a scan
+ * back from the end: the regex retries at every `\n` of a run that does not
+ * end the text, in time quadratic in the run.
+ */
+function trimTrailingLineFeeds(text: string): string {
+  let end = text.length;
+  while (text[end - 1] === '\n') end--;
+  return text.slice(0, end);
 }
 
 /**
@@ -539,7 +639,7 @@ function extractHeading(content: string, target: string): SectionExtraction {
     : paths.filter((_, i) => headings[i]?.text === leaf);
 
   return {
-    value: content.slice(hit.start, end?.start).replace(/\n+$/, ''),
+    value: trimTrailingLineFeeds(content.slice(hit.start, end?.start)),
     sectionTarget: resolved,
     ...(candidates.length > 1 ? { candidates } : {}),
   };

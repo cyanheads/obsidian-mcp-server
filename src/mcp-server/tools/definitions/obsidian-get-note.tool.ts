@@ -154,9 +154,9 @@ export const obsidianGetNote = tool('obsidian_get_note', {
       reason: 'path_forbidden',
       thrownBy: 'service',
       code: JsonRpcErrorCode.Forbidden,
-      when: 'The target path is outside OBSIDIAN_READ_PATHS (and OBSIDIAN_WRITE_PATHS, since write paths imply read access).',
+      when: 'The target path is outside OBSIDIAN_READ_PATHS (and OBSIDIAN_WRITE_PATHS, since write paths imply read access), or inside OBSIDIAN_DENY_PATHS.',
       recovery:
-        'Use a path inside the configured read scope. The error data echoes the active scope.',
+        'Use a path inside the configured read scope. The error data echoes the active scope; a `denied_path` denial carries none, since the operator withholds that path.',
     },
     {
       reason: 'note_missing',
@@ -366,7 +366,8 @@ export const obsidianGetNote = tool('obsidian_get_note', {
           lines.push(`- [${l.type}] ${escapeMarkdownInline(l.target)}`);
         }
       }
-      lines.push('', '**Content**', result.content);
+      // The blank line keeps the raw body's first line out of the label's block.
+      lines.push('', '**Content**', '', result.content);
       return [{ type: 'text', text: lines.join('\n') }];
     }
     if (result.format === 'document-map') {
@@ -401,7 +402,7 @@ export const obsidianGetNote = tool('obsidian_get_note', {
     if (result.candidates && result.candidates.length > 0) {
       lines.push(`*Candidates:* ${result.candidates.map(escapeMarkdownInline).join(', ')}`);
     }
-    lines.push('', '**Value:**', value);
+    lines.push('', '**Value:**', '', value);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

@@ -1,10 +1,12 @@
 /**
  * @fileoverview Server-side JSONLogic evaluation for searches scoped by
- * OBSIDIAN_READ_PATHS. The caller's tree runs here, on a worker thread, over
- * the readable notes alone, instead of upstream over the whole vault: no hit,
- * result, or error reads a note outside the read scope. The notes' link
- * fields arrive cut to readable entries, but which note a link resolves to is
- * still Obsidian's vault-wide resolution (#165).
+ * OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS. The caller's tree runs here, on
+ * a worker thread, over the readable notes alone, instead of upstream over the
+ * whole vault: no hit, result, or error reads a note outside the read scope.
+ * The notes carry no link fields: which note a link resolves to is Obsidian's
+ * vault-wide resolution, so `links`, `backlinks`, and `unresolvedLinks` would
+ * change with notes outside the scope (#165). A tree that names one fails with
+ * `link_fields_unavailable` before the search makes a request.
  *
  * Every evaluation is bounded — tree depth, work budgets the worker enforces
  * (per note for what each note's evaluation builds, per search for what kept
@@ -90,6 +92,87 @@ export function assertTreeDepth(logic: unknown): void {
   }
 }
 
+/** The note fields a scoped search leaves out: each follows Obsidian's link resolution across the whole vault. */
+const LINK_FIELDS: ReadonlySet<string> = new Set(['links', 'backlinks', 'unresolvedLinks']);
+
+/**
+ * json-logic-js operations that apply their second operand to each element of
+ * the first (`reduce`: to `{ current, accumulator }`) rather than to the note.
+ */
+const PER_ELEMENT_OPERATIONS: ReadonlySet<string> = new Set([
+  'map',
+  'filter',
+  'reduce',
+  'all',
+  'some',
+  'none',
+]);
+
+/**
+ * Reject a tree with a `var` that reads a link field of the note. A scoped
+ * search's notes carry none, so such a `var` would read `null` on every note:
+ * `{"in": [X, {"var": "backlinks"}]}` would answer "nothing links here". Only a
+ * key fixed by the tree is caught — `"links"`, `"backlinks.0"`, the array form
+ * with a default — while a computed key reads `null`, and a `var` applied to
+ * the elements a `map`, `filter`, `reduce`, `all`, `some`, or `none` walks
+ * reads the element, not the note. An object of other than one key is data
+ * json-logic-js never evaluates. Iterative; the tree's depth is already held
+ * to {@link MAX_TREE_DEPTH}.
+ */
+export function assertNoLinkFields(logic: unknown): void {
+  const pending: unknown[] = [logic];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (Array.isArray(node)) {
+      for (const item of node) pending.push(item);
+      continue;
+    }
+    if (node === null || typeof node !== 'object' || Object.keys(node).length !== 1) continue;
+    const [[operation, raw]] = Object.entries(node) as [[string, unknown]];
+    const operands = Array.isArray(raw) ? raw : [raw];
+    if (operation === 'var') {
+      const field = staticKey(operands[0])?.split('.')[0];
+      if (field !== undefined && LINK_FIELDS.has(field)) throw linkFieldsUnavailable(field);
+    }
+    for (const [index, operand] of operands.entries()) {
+      if (index !== 1 || !PER_ELEMENT_OPERATIONS.has(operation)) pending.push(operand);
+    }
+  }
+}
+
+/**
+ * The key a `var` operand evaluates to when the tree alone fixes it, as the
+ * worker's `var` reads it (`String(key)`); `undefined` when it is computed or
+ * names the whole note. json-logic-js evaluates an array element by element,
+ * so a literal array is fixed when every element is, and returns an object of
+ * other than one key as it is.
+ */
+function staticKey(operand: unknown): string | undefined {
+  const value = staticValue(operand);
+  if (value === COMPUTED || value === undefined || value === null || value === '') return;
+  return String(value);
+}
+
+const COMPUTED = Symbol('computed');
+
+function staticValue(operand: unknown): unknown {
+  if (Array.isArray(operand)) {
+    const values = operand.map(staticValue);
+    return values.includes(COMPUTED) ? COMPUTED : values;
+  }
+  if (operand !== null && typeof operand === 'object' && Object.keys(operand).length === 1) {
+    return COMPUTED;
+  }
+  return operand;
+}
+
+function linkFieldsUnavailable(field: string): Error {
+  return validationError(
+    `The JSONLogic tree reads \`${field}\`, which a search under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS does not provide: \`links\`, \`backlinks\`, and \`unresolvedLinks\` follow Obsidian's link resolution across the whole vault.`,
+    { reason: 'link_fields_unavailable' },
+  );
+}
+
 /**
  * Deepest object/array nesting in `value`, which is level 1, measured until
  * it passes `limit`. Iterative, so it measures data too deep for any
@@ -107,6 +190,14 @@ function nestingDepth(value: unknown, limit = Number.POSITIVE_INFINITY): number 
   return deepest;
 }
 
+/** One search's evaluation; see {@link createJsonLogicEvaluation}. */
+export interface JsonLogicEvaluation {
+  /** Terminate the worker, if one started. Idempotent; the search calls it however it ends. */
+  close(): Promise<void>;
+  /** Evaluate the next batch of readable notes, in vault order. */
+  evaluate(notes: NoteContext[]): Promise<StructuredSearchHit[]>;
+}
+
 /**
  * One search's evaluation of `logic`. `evaluate` takes the readable notes in
  * vault order, all at once or in successive batches; the budget for kept
@@ -117,30 +208,86 @@ function nestingDepth(value: unknown, limit = Number.POSITIVE_INFINITY): number 
  * `logic_invalid` when the tree fails on a note, `logic_too_costly` past
  * either budget or the deadline, `note_too_deep` for a note the worker
  * hand-off cannot carry, and the abort reason when `signal` aborts first.
+ *
+ * One worker evaluates every batch: started with the first batch that holds a
+ * note, it is terminated when a batch fails, passes a bound, or is cancelled,
+ * and otherwise by `close`.
  */
 export function createJsonLogicEvaluation(
   logic: unknown,
   opts: { signal?: AbortSignal | undefined; deadlineMs?: number } = {},
-): { evaluate: (notes: NoteContext[]) => Promise<StructuredSearchHit[]> } {
+): JsonLogicEvaluation {
   const { signal, deadlineMs = EVALUATION_DEADLINE_MS } = opts;
   let keptUnitsLeft = KEPT_RESULT_UNITS;
   let msLeft = deadlineMs;
+  let worker: Worker | undefined;
+  /** The batch the worker is evaluating, settled by its reply, its failure, or its exit. */
+  let pending:
+    | { resolve: (r: EvaluationResponse) => void; reject: (e: unknown) => void }
+    | undefined;
   const pastDeadline = () =>
     tooCostly(
       `Evaluating the JSONLogic tree over the readable notes ran past ${deadlineMs / 1000} s.`,
     );
+
+  const start = (): Worker => {
+    const started = new Worker(WORKER_URL);
+    started.on('message', (response: EvaluationResponse) => pending?.resolve(response));
+    started.on('error', (err) => pending?.reject(err));
+    started.on('exit', (code) => {
+      pending?.reject(new Error(`JSONLogic worker exited with code ${code} before answering`));
+      if (worker === started) worker = undefined;
+    });
+    return started;
+  };
+
+  const close = async () => {
+    const running = worker;
+    worker = undefined;
+    await running?.terminate();
+  };
+
+  /** Hand `request` to the worker and wait for its reply, the deadline, or the abort. */
+  const answer = async (request: EvaluationRequest): Promise<EvaluationResponse> => {
+    worker ??= start();
+    const { promise, resolve, reject } = Promise.withResolvers<EvaluationResponse>();
+    pending = { resolve, reject };
+    const timer = setTimeout(() => reject(pastDeadline()), msLeft);
+    const onAbort = () => reject(signal?.reason);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      worker.postMessage(request);
+    } catch (err) {
+      // Rejected before the await below takes the promise, so the exit `close` raises settles nothing.
+      reject(handOffError(err, request.notes));
+    }
+    try {
+      return await promise;
+    } finally {
+      pending = undefined;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    }
+  };
+
   return {
     async evaluate(notes) {
       if (notes.length === 0) return [];
       signal?.throwIfAborted();
       if (msLeft <= 0) throw pastDeadline();
       const started = performance.now();
-      const response = await runWorker(
-        { logic, notes, keptUnits: keptUnitsLeft, noteUnits: NOTE_BUILD_UNITS },
-        msLeft,
-        pastDeadline,
-        signal,
-      );
+      let response: EvaluationResponse;
+      try {
+        response = await answer({
+          logic,
+          notes,
+          keptUnits: keptUnitsLeft,
+          noteUnits: NOTE_BUILD_UNITS,
+        });
+      } catch (err) {
+        await close();
+        throw err;
+      }
       msLeft -= performance.now() - started;
       if (response.ok) {
         keptUnitsLeft = response.keptUnitsLeft;
@@ -149,8 +296,10 @@ export function createJsonLogicEvaluation(
           result: JSON.parse(hit.json),
         }));
       }
+      await close();
       throw failureError(response);
     },
+    close,
   };
 }
 
@@ -177,38 +326,6 @@ function failureError(response: Extract<EvaluationResponse, { ok: false }>): Err
       return tooCostly(
         `The JSONLogic tree's results over the readable notes held more than the search's work budget of ${KEPT_RESULT_UNITS.toLocaleString('en-US')} units: each result over 1,024 characters pays for what it holds beyond its own note's size.`,
       );
-  }
-}
-
-/** One worker per batch, terminated however it ends. */
-async function runWorker(
-  request: EvaluationRequest,
-  deadlineMs: number,
-  pastDeadline: () => Error,
-  signal: AbortSignal | undefined,
-): Promise<EvaluationResponse> {
-  const worker = new Worker(WORKER_URL);
-  const { promise, resolve, reject } = Promise.withResolvers<EvaluationResponse>();
-  const timer = setTimeout(() => reject(pastDeadline()), deadlineMs);
-  const onAbort = () => reject(signal?.reason);
-  signal?.addEventListener('abort', onAbort, { once: true });
-  worker.once('message', resolve);
-  worker.once('error', reject);
-  worker.once('exit', (code) =>
-    reject(new Error(`JSONLogic worker exited with code ${code} before answering`)),
-  );
-  try {
-    worker.postMessage(request);
-  } catch (err) {
-    // Rejected before the await below takes the promise, so the exit `terminate` raises settles nothing.
-    reject(handOffError(err, request.notes));
-  }
-  try {
-    return await promise;
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', onAbort);
-    await worker.terminate();
   }
 }
 

@@ -26,7 +26,7 @@ import {
   sectionLevel,
 } from '@/services/obsidian/section-extractor.js';
 import type { PatchInstruction } from '@/services/obsidian/types.js';
-import { repeatKey } from '../helpers.js';
+import { expectLinearCost, repeatKey } from '../helpers.js';
 
 describe('patchFormatFor', () => {
   it.each([
@@ -257,6 +257,61 @@ describe('canonicalContent', () => {
     ['only whitespace', ' \n\t\n', ''],
   ])('reduces %s as markdown-patch 2.0 reduces a plain write', (_l, content, expected) => {
     expect(canonicalContent(content)).toBe(expected);
+  });
+
+  /** The reduction as three regex replaces, the form markdown-patch 2.0.0 writes it in. */
+  const regexReduction = (content: string) =>
+    content
+      .replace(/\r\n?/g, '\n')
+      .replace(/^(?:[^\S\n]*\n)+/, '')
+      .replace(/\s+$/, '');
+
+  it.each([
+    ['empty content', '', ''],
+    [
+      'every whitespace code point ECMAScript names',
+      ' \t\n\v\f\r\u{a0}\u{1680}\u{2000}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}',
+      '',
+    ],
+    ['mixed CRLF, CR, and LF breaks', 'a\r\n\r\n \r\nb\r \r\n\n', 'a\n\n \nb'],
+    ['trailing no-break spaces', 'a\u{a0}\u{a0}', 'a'],
+    ['an interior no-break space', 'a\u{a0}b', 'a\u{a0}b'],
+    ['a trailing line separator', 'a\u{2028}', 'a'],
+    ['a leading line separator on a blank line', '\u{2028}\na', 'a'],
+    ['a trailing byte order mark', 'a\u{feff}', 'a'],
+    ['trailing whitespace after a non-BMP character', 'a\u{1F600} \n', 'a\u{1F600}'],
+    ['a trailing non-BMP character', 'a\u{1D7D8}', 'a\u{1D7D8}'],
+    ['a trailing next-line control, which is not whitespace', 'a\u{85}', 'a\u{85}'],
+    ['a trailing Mongolian vowel separator, which is not whitespace', 'a\u{180e}', 'a\u{180e}'],
+    ['a trailing zero-width space, which is not whitespace', 'a\u{200b}', 'a\u{200b}'],
+    ['a trailing lone surrogate', 'a\u{d800}', 'a\u{d800}'],
+  ])('reduces %s exactly as the regex reduction does', (_l, content, expected) => {
+    expect(regexReduction(content)).toBe(expected);
+    expect(canonicalContent(content)).toBe(expected);
+  });
+
+  it('trims the same trailing code units as `/\\s+$/`, every BMP code unit tried', () => {
+    const differ: string[] = [];
+    for (let unit = 0; unit <= 0xffff; unit++) {
+      const content = `a${String.fromCharCode(unit)}`;
+      if (canonicalContent(content) !== regexReduction(content)) differ.push(unit.toString(16));
+    }
+    expect(differ).toEqual([]);
+  });
+
+  /**
+   * Heading appends and prepends reduce caller-sized content, so the reduction
+   * is timed from 5k to 320k characters (`expectLinearCost`) on a whitespace
+   * run that does not end the content: one long line ending in a break, and a
+   * run with breaks throughout.
+   */
+  it.each([
+    ['one long line ending in a break', (n: number) => `a${' '.repeat(n)}b\n`],
+    ['breaks throughout', (n: number) => `a${' \n'.repeat(n / 2)}b`],
+  ])('reduces a whitespace run on %s in linear time', async (_l, build) => {
+    await expectLinearCost(build, (content) => {
+      expect(canonicalContent(content)).toBe(content.slice(0, content.lastIndexOf('b') + 1));
+    });
   });
 });
 

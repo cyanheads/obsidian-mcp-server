@@ -17,10 +17,15 @@ import {
   unauthorized,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import { httpStatusToErrorCode, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { createPacer, httpStatusToErrorCode, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Agent, type Dispatcher, type RequestInit, fetch as undiciFetch } from 'undici';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
-import { assertTreeDepth, createJsonLogicEvaluation, readsContent } from './jsonlogic-evaluator.js';
+import {
+  assertNoLinkFields,
+  assertTreeDepth,
+  createJsonLogicEvaluation,
+  readsContent,
+} from './jsonlogic-evaluator.js';
 import type { NoteContext } from './jsonlogic-worker.js';
 import {
   canonicalContent,
@@ -38,7 +43,7 @@ import {
   v2Instruction,
   type Within,
 } from './patch-instruction.js';
-import { PathPolicy } from './path-policy.js';
+import { caseFoldedPattern, PathPolicy } from './path-policy.js';
 import {
   atxHeadingMarkers,
   blockKinds,
@@ -47,6 +52,12 @@ import {
   sectionBody,
   sectionLevel,
 } from './section-extractor.js';
+import {
+  isHighSurrogate,
+  isLowSurrogate,
+  SimpleSearch,
+  simpleSearchTokens,
+} from './simple-search.js';
 import type {
   ApiExtension,
   DocumentMap,
@@ -149,20 +160,18 @@ interface RawStructuredSearchHit {
 
 /**
  * A hit of the scoped context fetch: the plugin's per-note JSONLogic context
- * (`getFileMetadataObject`, plugin 5.x). `path` is not read — the gated
- * `filename` stands in for it. The link fields are absent on plugins that
- * predate them; a malformed one fails the path-policy filter that reads it.
+ * (`getFileMetadataObject`, plugin 5.x), as far as it is read. `path` is not
+ * read — the gated `filename` stands in for it — and neither are `links`,
+ * `backlinks`, and `unresolvedLinks`, which follow Obsidian's link resolution
+ * across the whole vault (`assertNoLinkFields`).
  */
 interface RawNoteContextHit {
   filename: string;
   result: {
-    backlinks?: string[];
     content: string;
     frontmatter: Record<string, unknown>;
-    links?: string[];
     stat: { ctime: number; mtime: number; size: number };
     tags: string[];
-    unresolvedLinks?: string[];
   };
 }
 
@@ -170,18 +179,71 @@ interface RawNoteContextHit {
 type ScopedNote = NoteContext & Pick<RawNoteContextHit['result'], 'stat' | 'tags'>;
 
 /**
- * Most note-body bytes (by `stat.size`) a scoped JSONLogic search fetches and
- * evaluates at once. Each batch costs one upstream search, during which the
- * plugin reads every vault note's body, since the body-fetch tree names
- * `content`; so this trades those vault-wide reads against how much of the
- * readable vault sits in memory.
+ * Most note-body bytes (by `stat.size`) a scoped JSONLogic search holds and
+ * evaluates at once, so a broad scope never holds every readable body. Each
+ * body is its own `GET /vault/{path}`, so the batch size sets memory, not the
+ * number of upstream reads.
  */
 const CONTENT_BATCH_BYTES = 32 * 1024 * 1024;
 
+/**
+ * Most note-body reads in flight at once, across every search the service
+ * runs, so concurrent searches share the bound rather than each taking it.
+ * The plugin serves every read from Obsidian's own event loop, so each request
+ * in flight queues there; 32 keeps a whole-vault read well inside
+ * {@link SCOPED_SEARCH_DEADLINE_MS} without queuing more than that.
+ */
+const BODY_READ_CONCURRENCY = 32;
+
+/**
+ * Wall-clock ceiling on one scoped JSONLogic search: the context fetch, every
+ * body read with its retries, and the evaluation. One deadline for the whole
+ * search, not one per request, so a search over a broad scope answers or fails
+ * inside the 60 s an MCP client waits for a response by default.
+ */
+const SCOPED_SEARCH_DEADLINE_MS = 45_000;
+
+/**
+ * Most characters the plugin's `/search/simple/` response may take for the
+ * hits of a scoped text search: V8's longest string (2^29 − 24 on 64-bit),
+ * where the plugin's `res.json` fails serializing it. `SimpleSearch` counts
+ * that response as the plugin writes it, each match's offsets, escaped window,
+ * and framing with every hit's filename and score, so a scoped search fails
+ * with `context_length_too_large` where the plugin would fail over the
+ * readable notes alone, and never holds more matches than such a response.
+ */
+const SCOPED_TEXT_RESPONSE_CHARS = 2 ** 29 - 24;
+
+/**
+ * Run a scoped search under {@link SCOPED_SEARCH_DEADLINE_MS}: `run` gets a
+ * signal that aborts with `ctx.signal` or at the deadline, and a failure
+ * caused by the deadline alone is replaced by `tooCostly(cause)`.
+ */
+async function withScopedDeadline<T>(
+  ctx: Context,
+  tooCostly: (cause: unknown) => Error,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  // A timer rather than `AbortSignal.timeout`, which can fail on a realm mismatch under Bun's stdio transport.
+  const deadline = new AbortController();
+  const timer = setTimeout(
+    () => deadline.abort(new DOMException('Scoped search deadline', 'TimeoutError')),
+    SCOPED_SEARCH_DEADLINE_MS,
+  );
+  try {
+    return await run(AbortSignal.any([ctx.signal, deadline.signal]));
+  } catch (err) {
+    if (!deadline.signal.aborted || ctx.signal.aborted) throw err;
+    throw tooCostly(err);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Split `notes`, in order, into runs whose bodies total at most {@link CONTENT_BATCH_BYTES}; a larger note gets a run of its own. */
-function contentBatches(notes: readonly ScopedNote[]): ScopedNote[][] {
-  const batches: ScopedNote[][] = [];
-  let current: ScopedNote[] = [];
+function contentBatches<T extends { stat: { size: number } }>(notes: readonly T[]): T[][] {
+  const batches: T[][] = [];
+  let current: T[] = [];
   let bytes = 0;
   for (const note of notes) {
     if (current.length > 0 && bytes + note.stat.size > CONTENT_BATCH_BYTES) {
@@ -354,6 +416,16 @@ export class ObsidianService {
   #walkChars = 0;
 
   /**
+   * The queue every note-body read of a scoped JSONLogic search waits in, so
+   * {@link BODY_READ_CONCURRENCY} bounds the reads in flight across concurrent
+   * searches rather than per search.
+   */
+  readonly #bodyReads = createPacer({
+    name: 'obsidian-note-bodies',
+    maxConcurrent: BODY_READ_CONCURRENCY,
+  });
+
+  /**
    * @param config - Validated server config (api key, base URL, TLS, timeouts).
    * @param fetchImpl - Optional fetch override for tests. Defaults to undici's
    *   `fetch`, which honors the constructed TLS dispatcher in production.
@@ -387,14 +459,16 @@ export class ObsidianService {
 
   /**
    * Close the undici dispatcher, releasing its keep-alive sockets to the Local
-   * REST API and Omnisearch. Wired through `createApp({ teardown })`; waits for
-   * in-flight requests to settle rather than aborting them.
+   * REST API and Omnisearch, after rejecting the note-body reads still queued.
+   * Wired through `createApp({ teardown })`; waits for in-flight requests to
+   * settle rather than aborting them.
    *
    * Bun resolves `undici` to a built-in shim whose `Agent` is an inert object
    * with no `close` — Bun's `fetch` pools sockets itself and ignores the
    * dispatcher — so there is nothing to release there.
    */
   async close(): Promise<void> {
+    this.#bodyReads.dispose();
     const dispatcher: Partial<Pick<Dispatcher, 'close'>> = this.#dispatcher;
     await dispatcher.close?.();
   }
@@ -638,7 +712,7 @@ export class ObsidianService {
     let url = '/vault/';
     let normalized = '';
     if (dirPath) {
-      normalized = dirPath.replace(/^\/+|\/+$/g, '');
+      normalized = trimSlashes(dirPath);
       if (normalized) url = `/vault/${encodeVaultPath(normalized)}/`;
     }
     /**
@@ -660,9 +734,10 @@ export class ObsidianService {
   /**
    * Vault tags with usage counts, hierarchical parents included. Unscoped, the
    * plugin's `/tags/` with its occurrence counts. That payload carries no
-   * per-note attribution, so under OBSIDIAN_READ_PATHS the tags are read from
-   * the readable notes' contexts instead (one upstream search, no bodies), and
-   * each one counts the readable notes carrying it or a tag nested under it.
+   * per-note attribution, so under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS
+   * the tags are read from the readable notes' contexts instead (one upstream
+   * search, no bodies), and each one counts the readable notes carrying it or a
+   * tag nested under it.
    */
   async listTags(ctx: Context): Promise<ObsidianTag[]> {
     if (this.#policy.restrictsReads) {
@@ -686,13 +761,17 @@ export class ObsidianService {
    * (`contextRelativeSpan`), then a multi-token query's spans are merged into
    * match locations (`mergeIntoLocations`).
    *
-   * The upstream materializes one context window per matching note before it
-   * responds, so an oversized `contextLength` on a broad query exhausts V8's
-   * string capacity and comes back as an opaque 500 — caught here and
-   * re-thrown typed, the way `searchOmnisearch` re-throws its own reachability
-   * failure.
+   * The upstream serializes every match in the vault, its context window and
+   * about 150 characters of offsets and framing, into one response, so a
+   * broad query exhausts V8's string capacity, even at a small
+   * `contextLength`, and comes back as an opaque 500 — caught
+   * here and re-thrown typed, the way `searchOmnisearch` re-throws its own
+   * reachability failure. Under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS
+   * that would make the outcome depend on notes outside the scope, so the
+   * search runs here instead (`#searchTextScoped`).
    */
   async searchText(ctx: Context, query: string, contextLength = 100): Promise<TextSearchHit[]> {
+    if (this.#policy.restrictsReads) return await this.#searchTextScoped(ctx, query, contextLength);
     const params = new URLSearchParams({ query, contextLength: String(contextLength) });
     let res: UndiciResponse;
     try {
@@ -706,7 +785,7 @@ export class ObsidianService {
        * server side for the log record.
        */
       throw validationError(
-        `The Local REST API ran out of string capacity assembling match contexts for this search (contextLength ${contextLength}). It builds a context window for every matching note before responding, so the ceiling tracks contextLength multiplied by the number of matches rather than either alone.`,
+        `The Local REST API ran out of string capacity serializing the matches for this search (contextLength ${contextLength}). Each match costs its context window plus about 150 characters of offsets and framing, so the total tracks the number of matches as well as contextLength.`,
         {
           reason: 'context_length_too_large',
           contextLength,
@@ -715,60 +794,171 @@ export class ObsidianService {
       );
     }
     const raw = (await res.json()) as RawSimpleSearchHit[];
-    const tokens = queryTokens(query);
-    // Upstream returns a constant `score` that carries no ranking signal for
-    // text mode — drop it on the way out so consumers don't mistake it for
-    // relevance. Omnisearch is the source of real BM25 ranking.
+    const tokens = simpleSearchTokens(query);
+    // Upstream's `score` orders the hits but is not a relevance measure — drop
+    // it on the way out so consumers don't mistake it for one. Omnisearch is
+    // the source of real BM25 ranking.
     return raw.map((h) => ({
       filename: h.filename,
       matches: mergeIntoLocations(
         h.matches.map((m) => contextRelativeSpan(m, h.filename, contextLength, tokens)),
         tokens.length,
         contextLength,
-      ).map(({ context, match }) => ({ context, match })),
+      ),
     }));
   }
 
   /**
+   * Text search under a read scope, with no `/search/simple/` request: one
+   * `/search/` guarded by the read scope and, per token, a case-folded
+   * `regexp` on `path` or `content` (`#textCandidates`) names the readable
+   * notes that may hold every token, their bodies are read one GET each
+   * (`#bodyBatches`), and `SimpleSearch` matches them the way the plugin
+   * does, in the plugin's order. `context_length_too_large` then counts the
+   * plugin's response over the readable notes alone, against
+   * `SCOPED_TEXT_RESPONSE_CHARS`. Every request shares `ctx.signal` and one
+   * deadline, `SCOPED_SEARCH_DEADLINE_MS`; past it the search fails with
+   * `text_search_too_costly`.
+   */
+  async #searchTextScoped(
+    ctx: Context,
+    query: string,
+    contextLength: number,
+  ): Promise<TextSearchHit[]> {
+    const search = new SimpleSearch(query, contextLength, SCOPED_TEXT_RESPONSE_CHARS);
+    await withScopedDeadline(
+      ctx,
+      (cause) =>
+        validationError(
+          `The scoped text search ran past ${SCOPED_SEARCH_DEADLINE_MS / 1000} s reading and matching the readable notes.`,
+          { reason: 'text_search_too_costly' },
+          { cause },
+        ),
+      async (signal) => {
+        const notes = await this.#textCandidates(ctx, search.tokens, signal);
+        // With no token every note matches with no span, and no body can change that.
+        if (search.tokens.length === 0) for (const note of notes) search.add(note.path, '');
+        else {
+          for await (const batch of this.#bodyBatches(ctx, notes, signal)) {
+            for (const note of batch) search.add(note.path, note.content);
+          }
+        }
+      },
+    );
+    return search.hits().map((h) => ({
+      filename: h.filename,
+      matches: mergeIntoLocations(
+        h.matches.map(({ context, contextStart, match }) => ({
+          context,
+          match: {
+            start: match.start,
+            end: match.end,
+            contextStart,
+            contextEnd: contextStart + match.end - match.start,
+          },
+          subject: match.source === 'filename' ? 'filename' : 'body',
+        })),
+        search.tokens.length,
+        contextLength,
+      ),
+    }));
+  }
+
+  /**
+   * The readable notes that may hold every token of a scoped text search, in
+   * vault order, from one upstream search: the read-scope guard
+   * (`PathPolicy.readScopePattern`) and, per token, a case-folded `regexp`
+   * (`caseFoldedPattern`) on `path` or `content`, the two places the plugin's
+   * search looks. A token with a character the folding cannot express, or a
+   * line break that could span the basename and the body the plugin joins,
+   * sends no `regexp`, so the notes returned always include every readable
+   * match; `filterReadable` decides what is kept. With no `regexp` at all the
+   * tree never names `content`, so the plugin reads no bodies.
+   */
+  async #textCandidates(
+    ctx: Context,
+    tokens: readonly string[],
+    signal: AbortSignal,
+  ): Promise<Array<{ path: string; stat: { size: number } }>> {
+    const clauses: unknown[] = [{ regexp: [this.#policy.readScopePattern(), { var: 'path' }] }];
+    for (const token of tokens) {
+      const pattern = token.includes('\n') ? undefined : caseFoldedPattern(token);
+      if (pattern === undefined) continue;
+      clauses.push({
+        or: [{ regexp: [pattern, { var: 'path' }] }, { regexp: [pattern, { var: 'content' }] }],
+      });
+    }
+    const guard = { if: [{ and: clauses }, { var: 'stat' }, null] };
+    const res = await this.#postJsonLogic(ctx, guard, signal);
+    const hits = (await res.json()) as Array<{ filename: string; result: { size: number } }>;
+    return this.#policy
+      .filterReadable(hits)
+      .map(({ filename, result }) => ({ path: filename, stat: result }));
+  }
+
+  /**
    * JSONLogic search. Unscoped, the tree goes to the plugin unchanged. Under
-   * OBSIDIAN_READ_PATHS the plugin would evaluate it against every note in
-   * the vault, so the tree stays here instead: the readable notes' contexts
+   * OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS (`restrictsReads`) the plugin
+   * would evaluate it against every note in the vault, denied ones included,
+   * so the tree stays here instead: the readable notes' contexts
    * are fetched and the tree is evaluated over those alone
    * (`createJsonLogicEvaluation`), the way the plugin evaluates it. No hit,
-   * result, or error then reads a note outside the read scope; which note a
-   * link resolves to is still Obsidian's vault-wide resolution, so `links`,
-   * `backlinks`, and `unresolvedLinks` can change when a note outside the
-   * scope is created or removed.
+   * result, or error then reads a note outside the read scope. The contexts
+   * carry no `links`, `backlinks`, or `unresolvedLinks`, since which note a
+   * link resolves to depends on notes outside the scope; a tree that names
+   * one fails before any request (`assertNoLinkFields`).
    *
    * The plugin hands a tree note bodies only when its JSON holds the string
-   * `"content"` (`readsContent`); such a tree gets them here too, fetched
-   * and evaluated in batches of at most `CONTENT_BATCH_BYTES` so a broad
-   * scope never holds every readable body at once.
+   * `"content"` (`readsContent`); such a tree gets them here too, one read
+   * per readable note, evaluated in batches of at most `CONTENT_BATCH_BYTES`
+   * so a broad scope never holds every readable body at once. Every request
+   * the search makes shares `ctx.signal` and one deadline,
+   * `SCOPED_SEARCH_DEADLINE_MS`; past it the search fails with
+   * `logic_too_costly`.
    */
   async searchJsonLogic(
     ctx: Context,
     logic: Record<string, unknown>,
   ): Promise<StructuredSearchHit[]> {
-    if (this.#policy.restrictsReads) {
-      assertTreeDepth(logic);
-      const evaluation = createJsonLogicEvaluation(logic, { signal: ctx.signal });
-      const notes = await this.#readableNoteContexts(ctx);
-      if (!readsContent(logic)) return evaluation.evaluate(notes);
-      const hits: StructuredSearchHit[] = [];
-      for (const batch of contentBatches(notes)) {
-        const bodies = await this.#noteBodies(ctx, batch);
-        const withBodies = batch.map((note) => ({ ...note, content: bodies.get(note.path) ?? '' }));
-        hits.push(...(await evaluation.evaluate(withBodies)));
-      }
-      return hits;
+    if (!this.#policy.restrictsReads) {
+      const res = await this.#postJsonLogic(ctx, logic);
+      return (await res.json()) as RawStructuredSearchHit[];
     }
-    const res = await this.#postJsonLogic(ctx, logic);
-    return (await res.json()) as RawStructuredSearchHit[];
+    assertTreeDepth(logic);
+    assertNoLinkFields(logic);
+    return await withScopedDeadline(
+      ctx,
+      (cause) =>
+        validationError(
+          `The scoped JSONLogic search ran past ${SCOPED_SEARCH_DEADLINE_MS / 1000} s reading and evaluating the readable notes.`,
+          {
+            reason: 'logic_too_costly',
+            recovery: {
+              hint: 'A tree that names `content` reads the body of every readable note. Test `path`, `tags`, `frontmatter`, or `stat` instead where they can answer, or ask the operator to narrow OBSIDIAN_READ_PATHS or extend OBSIDIAN_DENY_PATHS.',
+            },
+          },
+          { cause },
+        ),
+      async (signal) => {
+        const evaluation = createJsonLogicEvaluation(logic, { signal });
+        try {
+          const notes = await this.#readableNoteContexts(ctx, signal);
+          if (!readsContent(logic)) return await evaluation.evaluate(notes);
+          const hits: StructuredSearchHit[] = [];
+          for await (const batch of this.#bodyBatches(ctx, notes, signal)) {
+            hits.push(...(await evaluation.evaluate(batch)));
+          }
+          return hits;
+        } finally {
+          await evaluation.close();
+        }
+      },
+    );
   }
 
   /**
    * A JSONLogic search for a caller paging through its hits `pageSize` at a
-   * time. Unscoped, it is `searchJsonLogic`. Under OBSIDIAN_READ_PATHS a call
+   * time. Unscoped, it is `searchJsonLogic`. Under a read scope a call
    * without `walk` evaluates fresh and, when the hits run past one page,
    * stores the full ordered hit list under a new walk id, returned as `walk`;
    * a call naming that id with the same tree is served from the stored list
@@ -823,11 +1013,16 @@ export class ObsidianService {
   }
 
   /** One upstream JSONLogic search: `tree` posted to `/search/`. */
-  #postJsonLogic(ctx: Context, tree: unknown): Promise<UndiciResponse> {
+  #postJsonLogic(
+    ctx: Context,
+    tree: unknown,
+    signal: AbortSignal = ctx.signal,
+  ): Promise<UndiciResponse> {
     return this.#request(ctx, '/search/', {
       method: 'POST',
       headers: { 'Content-Type': JSONLOGIC_CT },
       body: JSON.stringify(tree),
+      signal,
     });
   }
 
@@ -836,14 +1031,17 @@ export class ObsidianService {
    * leaves them, in vault order, from one upstream search whose tree is the
    * server's own: a `regexp` guard on the path (`PathPolicy.readScopePattern`)
    * narrows what the plugin returns, and `filterReadable` decides what is
-   * kept. Each context carries only the fields the plugin documents, its link
-   * fields reduced to readable entries.
+   * kept. Each context carries only the fields the plugin documents, less the
+   * link fields (`RawNoteContextHit`).
    */
-  async #readableNoteContexts(ctx: Context): Promise<ScopedNote[]> {
+  async #readableNoteContexts(
+    ctx: Context,
+    signal: AbortSignal = ctx.signal,
+  ): Promise<ScopedNote[]> {
     const guard = {
       if: [{ regexp: [this.#policy.readScopePattern(), { var: 'path' }] }, { var: '' }, null],
     };
-    const res = await this.#postJsonLogic(ctx, guard);
+    const res = await this.#postJsonLogic(ctx, guard, signal);
     const hits = (await res.json()) as RawNoteContextHit[];
     return this.#policy.filterReadable(hits).map(({ filename, result }) => ({
       tags: result.tags,
@@ -851,27 +1049,66 @@ export class ObsidianService {
       stat: result.stat,
       path: filename,
       content: result.content,
-      links: result.links && this.#policy.keepReadable(result.links),
-      backlinks: result.backlinks && this.#policy.keepReadable(result.backlinks),
-      unresolvedLinks: result.unresolvedLinks && this.#policy.keepReadable(result.unresolvedLinks),
     }));
   }
 
   /**
-   * Bodies of `notes`, already-gated contexts, by path, from one upstream
-   * search for exactly those paths. A body for any other path is dropped; an
-   * empty body is absent, as the plugin's search drops a falsy result.
+   * The bodies of `notes` — readable notes, already gated — in their order,
+   * as runs whose `stat.size` totals at most `CONTENT_BATCH_BYTES` (a larger
+   * note gets a run of its own). Each body is one `GET /vault/{path}`, which
+   * reads that file alone, where a JSONLogic search naming `content` would
+   * read every vault note's body. Reads wait in the service's queue, at most
+   * `BODY_READ_CONCURRENCY` in flight. A run is read only when the caller
+   * asks for the next one, so one run is held at a time. A note gone by the
+   * time it is read has an empty body, as the plugin's search gives it; any
+   * other failure stops the run's remaining reads, waits for the ones in
+   * flight to settle, and is thrown. Every request carries `signal`.
    */
-  async #noteBodies(ctx: Context, notes: readonly ScopedNote[]): Promise<Map<string, string>> {
-    const paths = notes.map((note) => note.path);
-    const guard = { if: [{ in: [{ var: 'path' }, paths] }, { var: 'content' }, null] };
-    const res = await this.#postJsonLogic(ctx, guard);
-    const wanted = new Set(paths);
-    const bodies = new Map<string, string>();
-    for (const hit of (await res.json()) as Array<{ filename: string; result: string }>) {
-      if (wanted.has(hit.filename)) bodies.set(hit.filename, hit.result);
+  async *#bodyBatches<T extends { path: string; stat: { size: number } }>(
+    ctx: Context,
+    notes: readonly T[],
+    signal: AbortSignal,
+  ): AsyncGenerator<Array<T & { content: string }>> {
+    for (const run of contentBatches(notes)) {
+      const stop = new AbortController();
+      const reads = AbortSignal.any([signal, stop.signal]);
+      const queue = run.entries();
+      const withBodies: Array<T & { content: string }> = [];
+      let failure: { error: unknown } | undefined;
+      const lane = async () => {
+        while (failure === undefined) {
+          const next = queue.next();
+          if (next.done) return;
+          const [index, note] = next.value;
+          try {
+            const content = await this.#bodyReads.run(
+              (granted) => this.#noteBody(ctx, note.path, granted),
+              { signal: reads },
+            );
+            withBodies[index] = { ...note, content };
+          } catch (error) {
+            failure ??= { error };
+            stop.abort();
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(BODY_READ_CONCURRENCY, run.length) }, lane));
+      if (failure) throw failure.error;
+      yield withBodies;
     }
-    return bodies;
+  }
+
+  /** One note's body, read raw as UTF-8 the way the plugin's search reads it; `""` once the note is gone. */
+  async #noteBody(ctx: Context, path: string, signal: AbortSignal): Promise<string> {
+    const res = await this.#request(ctx, `/vault/${encodeVaultPath(path)}`, {
+      method: 'GET',
+      headers: { Accept: 'text/markdown' },
+      noteRead: true,
+      missingOk: true,
+      signal,
+    });
+    const body = await res.text();
+    return res.status === 404 ? '' : body;
   }
 
   /**
@@ -1386,22 +1623,24 @@ export class ObsidianService {
    * on the spot, while an unreachable plugin comes back as a transient
    * `ServiceUnavailable` and keeps its retries (issues #133 and #136). A
    * rejection that is neither passes through untouched, and so does anything
-   * thrown after the caller aborted — a cancellation is not a network fault.
+   * thrown after the request's signal aborted — `ctx.signal`, or the signal of
+   * the search it belongs to — since a cancellation is not a network fault.
    */
   async #send(
     ctx: Context,
     url: string,
     init: { method: string; headers: Record<string, string>; body?: string },
+    signal: AbortSignal = ctx.signal,
   ): Promise<UndiciResponse> {
     try {
       return await this.#fetch(url, {
         ...init,
         dispatcher: this.#dispatcher,
         ...this.#tlsInit(url),
-        signal: ctx.signal,
+        signal,
       });
     } catch (err) {
-      if (ctx.signal?.aborted) throw err;
+      if (signal.aborted) throw err;
       throw classifyFetchRejection(err) ?? err;
     }
   }
@@ -1423,6 +1662,10 @@ export class ObsidianService {
        * from the wire shape would re-derive it one layer too late.
        */
       listRead?: boolean;
+      /** Set on note reads that answer a missing note themselves: a 404 comes back as the response rather than `note_missing`. */
+      missingOk?: boolean;
+      /** The request's cancellation, when it is narrower than `ctx.signal` (a search's deadline). */
+      signal?: AbortSignal;
     },
   ): Promise<UndiciResponse> {
     const url = `${this.#config.baseUrl}${pathAndQuery}`;
@@ -1430,13 +1673,20 @@ export class ObsidianService {
       ...(init.headers ?? {}),
       Authorization: `Bearer ${this.#config.apiKey}`,
     };
+    const signal = init.signal ?? ctx.signal;
 
     const exec = async (): Promise<UndiciResponse> => {
-      const res = await this.#send(ctx, url, {
-        method: init.method,
-        headers,
-        ...(init.body !== undefined ? { body: init.body } : {}),
-      });
+      const res = await this.#send(
+        ctx,
+        url,
+        {
+          method: init.method,
+          headers,
+          ...(init.body !== undefined ? { body: init.body } : {}),
+        },
+        signal,
+      );
+      if (res.status === 404 && init.missingOk) return res;
       if (!res.ok) {
         await this.#throwForStatus(res, pathAndQuery, ctx, {
           method: init.method,
@@ -1468,7 +1718,7 @@ export class ObsidianService {
       },
       baseDelayMs: 200,
       maxRetries: 3,
-      signal: ctx.signal,
+      signal,
     });
   }
 
@@ -1887,13 +2137,27 @@ function countTagsPerNote(notes: readonly Pick<ScopedNote, 'tags'>[]): ObsidianT
 }
 
 /**
+ * `path` less its leading and trailing `/` runs, as `/^\/+|\/+$/g` leaves it,
+ * found by scanning in from each end: the regex retries at every `/` of a run
+ * inside the path, in time quadratic in the run.
+ */
+export function trimSlashes(path: string): string {
+  let start = 0;
+  let end = path.length;
+  while (start < end && path[start] === '/') start++;
+  while (end > start && path[end - 1] === '/') end--;
+  return path.slice(start, end);
+}
+
+/**
  * Encode a vault-relative path for the URL. Splits on `/` and `\` (so
  * Windows-style separators are honored), URL-encodes each segment, and
  * rejoins with `/` since the Local REST API plugin expects forward slashes.
  *
  * Rejects `.` and `..` segments here rather than relying on the upstream Local
- * REST API plugin to normalize them — `PathPolicy` short-circuits to "allow"
- * when `OBSIDIAN_READ_PATHS` is unset, and `..` is unreserved per RFC 3986 so
+ * REST API plugin to normalize them — with `OBSIDIAN_READ_PATHS` unset,
+ * `PathPolicy` allows every path no deny prefix covers, and `..` is
+ * unreserved per RFC 3986 so
  * `encodeURIComponent` leaves it intact. This is the single chokepoint before
  * URL construction, so guard vault escape here. Backslash is treated as a
  * separator so `..\..\etc` traverses identically to `../../etc` and can't
@@ -1920,17 +2184,6 @@ export function encodeVaultPath(path: string): string {
   }
   return segments.map((seg) => encodeURIComponent(seg)).join('/');
 }
-
-/**
- * The query as Obsidian's `prepareSimpleSearch` reads it: split on whitespace,
- * case-folded, each distinct token required. Quotes are ordinary characters.
- */
-function queryTokens(query: string): string[] {
-  return [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
-}
-
-const isHighSurrogate = (cu: number) => cu >= 0xd800 && cu <= 0xdbff;
-const isLowSurrogate = (cu: number) => cu >= 0xdc00 && cu <= 0xdfff;
 
 /**
  * Locate the match span inside the `context` window the upstream ships with
@@ -2020,9 +2273,10 @@ function bodyWindowOffset(
 }
 
 /**
- * Merge a hit's spans into match locations. `prepareSimpleSearch` reports one
- * span per token occurrence and coalesces only spans that touch, so each word
- * of a phrase arrives as its own span with a near-identical window.
+ * Merge a hit's spans into the match locations `TextSearchHit` carries.
+ * `prepareSimpleSearch` coalesces only token occurrences that overlap or
+ * touch, so each word of a phrase arrives as its own span with a
+ * near-identical window.
  *
  * Walking the spans in upstream order, a location takes the next span when all
  * of these hold:
@@ -2046,8 +2300,8 @@ function mergeIntoLocations(
   spans: ResolvedSpan[],
   distinctTokens: number,
   contextLength: number,
-): ResolvedSpan[] {
-  if (distinctTokens < 2) return spans;
+): TextSearchHit['matches'] {
+  if (distinctTokens < 2) return spans.map(({ context, match }) => ({ context, match }));
   const locations: ResolvedSpan[] = [];
   let current: { location: ResolvedSpan; texts: Set<string> } | undefined;
   for (const span of spans) {
@@ -2064,7 +2318,7 @@ function mergeIntoLocations(
     current = { location: span, texts: new Set([text]) };
   }
   if (current) locations.push(current.location);
-  return locations;
+  return locations.map(({ context, match }) => ({ context, match }));
 }
 
 function matchedText(span: ResolvedSpan): string {
@@ -2377,12 +2631,13 @@ function parseContentLength(res: UndiciResponse, url: string): number {
 /**
  * Resolve the Omnisearch URL. Override wins. Otherwise: take the host from
  * `OBSIDIAN_BASE_URL`, force `http:` (Omnisearch is HTTP-only), swap port
- * `27123/27124` → `51361`. `127.0.0.1` is mapped to `localhost` since
- * Omnisearch's current Node listener binds IPv4 only but the platform's
- * loopback resolver is flexible — `localhost` insulates us if a future
- * build switches binding. Falls back to `http://localhost:51361` on any
- * URL parse failure (config validation catches malformed `baseUrl`, so this
- * is belt-and-suspenders).
+ * `27123/27124` → `51361`. `127.0.0.1` is mapped to `localhost` because
+ * Omnisearch (1.31.0) listens on host `localhost` by default, which binds the
+ * one address `localhost` resolves to first — `::1` on a macOS host, so a
+ * literal `127.0.0.1` would be refused there — and requesting `localhost`
+ * reaches whichever address that is. Falls back to `http://localhost:51361`
+ * on any URL parse failure (config validation catches malformed `baseUrl`, so
+ * this is belt-and-suspenders).
  */
 function deriveOmnisearchUrl(config: ServerConfig): string {
   if (config.omnisearchUrl) return config.omnisearchUrl.replace(/\/+$/, '');
