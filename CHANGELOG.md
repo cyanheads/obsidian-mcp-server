@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [3.8.0](changelog/3.8.x/3.8.0.md) — 2026-10-30 · ⚠️ Breaking · 🛡️ Security
+
+OBSIDIAN_DENY_PATHS withholds paths from reads and writes. Under a read scope, text and JSONLogic searches now read only readable notes, so out-of-scope notes no longer change their errors or results; a scoped JSONLogic tree naming link fields by a fixed var key is rejected. Fixes the .mcpb bundle failing to boot.
+
 ## [3.7.2](changelog/3.7.x/3.7.2.md) — 2026-10-25
 
 Vault text in content[] (paths, tags, headings, frontmatter keys and values, command names, search terms) reads back as written under a CommonMark parse. Adopts mcp-ts-core ^0.13.18, which escapes error text and renders enrichment trailer strings as code spans.

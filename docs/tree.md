@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-10-26 03:45:02
+Generated on: 2026-10-31 03:22:23
 
 ```text
 obsidian-mcp-server/
@@ -32,6 +32,7 @@ obsidian-mcp-server/
 │   ├── 3.5.x/
 │   ├── 3.6.x/
 │   ├── 3.7.x/
+│   ├── 3.8.x/
 │   └── template.md
 ├── docs/
 │   └── openapi.yaml
@@ -189,6 +190,7 @@ obsidian-mcp-server/
 │   │       ├── patch-instruction.ts
 │   │       ├── path-policy.ts
 │   │       ├── section-extractor.ts
+│   │       ├── simple-search.ts
 │   │       └── types.ts
 │   ├── index.ts
 │   └── instructions.ts
@@ -205,6 +207,7 @@ obsidian-mcp-server/
 │   │       ├── overlap.json
 │   │       ├── probe-body.md
 │   │       ├── repeated.json
+│   │       ├── rule-captures.json
 │   │       ├── simulate.ts
 │   │       ├── surrogate.json
 │   │       └── three-word.json
