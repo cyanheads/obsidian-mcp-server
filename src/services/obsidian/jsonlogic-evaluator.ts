@@ -109,15 +109,17 @@ const PER_ELEMENT_OPERATIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Reject a tree with a `var` that reads a link field of the note. A scoped
- * search's notes carry none, so such a `var` would read `null` on every note:
- * `{"in": [X, {"var": "backlinks"}]}` would answer "nothing links here". Only a
- * key fixed by the tree is caught — `"links"`, `"backlinks.0"`, the array form
- * with a default — while a computed key reads `null`, and a `var` applied to
- * the elements a `map`, `filter`, `reduce`, `all`, `some`, or `none` walks
- * reads the element, not the note. An object of other than one key is data
- * json-logic-js never evaluates. Iterative; the tree's depth is already held
- * to {@link MAX_TREE_DEPTH}.
+ * Reject a tree that reads a link field of the note through `var`, `missing`,
+ * or `missing_some`. A scoped search's notes carry none, so such a read would
+ * see `null` on every note: `{"in": [X, {"var": "backlinks"}]}` would answer
+ * "nothing links here", and `{"missing": ["backlinks"]}` would report the
+ * field missing everywhere. Only a key fixed by the tree is caught —
+ * `"links"`, `"backlinks.0"`, the array form with a default — while a computed
+ * key reads `null`, and a `var` or `missing` applied to the elements a `map`,
+ * `filter`, `reduce`, `all`, `some`, or `none` walks reads the element, not
+ * the note. An object of other than one key is data json-logic-js never
+ * evaluates. Iterative; the tree's depth is already held to
+ * {@link MAX_TREE_DEPTH}.
  */
 export function assertNoLinkFields(logic: unknown): void {
   const pending: unknown[] = [logic];
@@ -130,14 +132,40 @@ export function assertNoLinkFields(logic: unknown): void {
     if (node === null || typeof node !== 'object' || Object.keys(node).length !== 1) continue;
     const [[operation, raw]] = Object.entries(node) as [[string, unknown]];
     const operands = Array.isArray(raw) ? raw : [raw];
-    if (operation === 'var') {
-      const field = staticKey(operands[0])?.split('.')[0];
+    const keys =
+      operation === 'var'
+        ? [raw]
+        : operation === 'missing'
+          ? missingKeys(raw)
+          : operation === 'missing_some'
+            ? missingKeys(operands[1])
+            : [];
+    for (const key of keys) {
+      const field = varField(key);
       if (field !== undefined && LINK_FIELDS.has(field)) throw linkFieldsUnavailable(field);
     }
     for (const [index, operand] of operands.entries()) {
       if (index !== 1 || !PER_ELEMENT_OPERATIONS.has(operation)) pending.push(operand);
     }
   }
+}
+
+/**
+ * The keys `missing` reads, each through `{"var": key}`, as json-logic-js
+ * picks them from its arguments: the first argument when it is an array,
+ * otherwise every argument. `missing_some` hands its second operand to
+ * `missing` the same way. None when a computed first argument leaves the
+ * choice to the note.
+ */
+function missingKeys(raw: unknown): readonly unknown[] {
+  const args = Array.isArray(raw) ? raw : [raw];
+  if (Array.isArray(args[0])) return args[0];
+  return staticValue(args[0]) === COMPUTED ? [] : args;
+}
+
+/** The note field `{"var": raw}` reads when the tree fixes its key; `undefined` otherwise. */
+function varField(raw: unknown): string | undefined {
+  return staticKey(Array.isArray(raw) ? raw[0] : raw)?.split('.')[0];
 }
 
 /**

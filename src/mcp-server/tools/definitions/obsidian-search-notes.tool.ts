@@ -337,7 +337,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       reason: 'link_fields_unavailable',
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'With OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS set, the JSONLogic tree names `links`, `backlinks`, or `unresolvedLinks` in a `var`. Scoped searches leave these fields out, since Obsidian resolves each link across the whole vault, notes outside the scope included; a computed `var` key reads them as null.',
+      when: 'With OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS set, the JSONLogic tree names `links`, `backlinks`, or `unresolvedLinks` by a fixed `var`, `missing`, or `missing_some` key. Scoped searches leave these fields out, since Obsidian resolves each link across the whole vault, notes outside the scope included; a computed key reads them as null.',
       recovery:
         'Find backlinks by body text: `{"regexp": ["\\\\[\\\\[Target Note(\\\\\\\\?\\\\||#|\\\\]\\\\])", {"var": "content"}]}` matches every readable note that wikilinks or embeds `Target Note`. For a note\'s outgoing links, call `obsidian_get_note` with `includeLinks: true`.',
     },

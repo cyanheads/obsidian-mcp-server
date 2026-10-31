@@ -1127,6 +1127,13 @@ describe('obsidian_search_notes / jsonlogic under OBSIDIAN_READ_PATHS', () => {
     ['unresolvedLinks with a default', { var: ['unresolvedLinks', []] }],
     ['an unresolved link test', { in: ['Work/x', { var: 'unresolvedLinks' }] }],
     ['a backlink test', { in: ['Work/sub/b.md', { var: 'backlinks' }] }],
+    ['a missing key', { missing: ['path', 'backlinks'] }],
+    ['a missing key in one array argument', { missing: [['links.0']] }],
+    ['a missing_some key', { missing_some: [1, ['unresolvedLinks', 'tags']] }],
+    [
+      'a missing test in the array some walks',
+      { some: [{ missing: ['backlinks.0'] }, { '==': [{ var: '' }, 'x'] }] },
+    ],
   ])(
     'refuses a tree reading %s with the declared link_fields_unavailable, before any request',
     async (_label, logic) => {
@@ -1140,6 +1147,7 @@ describe('obsidian_search_notes / jsonlogic under OBSIDIAN_READ_PATHS', () => {
         code: JsonRpcErrorCode.ValidationError,
         data: { reason: 'link_fields_unavailable', recovery: { hint: declared.recovery } },
       });
+      expect(markdownText(text)).toContain('(reason link_fields_unavailable');
       expect(markdownText(text)).toContain(`Recovery: ${declared.recovery}`);
       expect(vault.requests).toEqual([]);
     },

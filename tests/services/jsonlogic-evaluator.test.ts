@@ -187,8 +187,9 @@ describe('createJsonLogicEvaluation — one worker per search', () => {
 
 /**
  * Under a read scope the note contexts carry no link fields, so a tree naming
- * one in a `var` the note is read through fails at once, before any request,
- * rather than evaluating to `null` on every note.
+ * one by a `var`, `missing`, or `missing_some` key the note is read through
+ * fails at once, before any request, rather than evaluating to `null` on
+ * every note.
  */
 describe('assertNoLinkFields', () => {
   it.each([
@@ -235,10 +236,98 @@ describe('assertNoLinkFields', () => {
     ['the elements a filter tests', { filter: [{ var: 'tags' }, { var: 'backlinks' }] }],
     ['the elements some tests', { some: [{ var: 'tags' }, { var: 'links.0' }] }],
     ["a reduce's step", { reduce: [{ var: 'tags' }, { var: 'links' }, 0] }],
-    ['a missing check', { missing: ['links', 'backlinks'] }],
     ['the field name as a string', { '==': [{ var: 'path' }, 'links'] }],
     ['an object literal no operator reads', { a: { var: 'links' }, b: 1 }],
     ['the whole note', { var: '' }],
+  ])('accepts %s', (_label, logic) => {
+    expect(() => assertNoLinkFields(logic)).not.toThrow();
+  });
+
+  /**
+   * `missing` reads each key through `var`. json-logic-js takes its keys from
+   * a first argument that is an array, and otherwise from every argument;
+   * `missing_some` hands its second operand to `missing` as those arguments.
+   */
+  it.each([
+    ['missing keys spread as arguments', { missing: ['links', 'backlinks'] }, 'links'],
+    ['missing keys in one array argument', { missing: [['path', 'backlinks']] }, 'backlinks'],
+    ['missing with a lone key', { missing: 'unresolvedLinks' }, 'unresolvedLinks'],
+    ['a dotted missing key', { missing: ['path', 'backlinks.0'] }, 'backlinks'],
+    ['a dotted key in one array argument', { missing: [['links.0']] }, 'links'],
+    ['a missing key written as a literal array', { missing: ['path', ['backlinks']] }, 'backlinks'],
+    [
+      'a fixed missing key beside a computed one',
+      { missing: [[{ var: 'frontmatter.key' }, 'unresolvedLinks']] },
+      'unresolvedLinks',
+    ],
+    [
+      'a fixed first missing key before a computed one',
+      { missing: ['backlinks', { var: 'frontmatter.key' }] },
+      'backlinks',
+    ],
+    ['missing_some keys', { missing_some: [1, ['path', 'links']] }, 'links'],
+    ['a dotted missing_some key', { missing_some: [2, ['tags', 'backlinks.0']] }, 'backlinks'],
+    [
+      'missing_some keys in one array argument',
+      { missing_some: [1, [['unresolvedLinks', 'path']]] },
+      'unresolvedLinks',
+    ],
+    ['missing_some with a lone key', { missing_some: [1, 'backlinks'] }, 'backlinks'],
+    [
+      'missing_some with a computed count',
+      { missing_some: [{ var: 'frontmatter.n' }, ['links']] },
+      'links',
+    ],
+    ['a missing test in if', { if: [{ missing: ['links'] }, 'none', 'some'] }, 'links'],
+    [
+      'a missing_some test nested in and/or',
+      {
+        and: [
+          { '==': [{ var: 'path' }, 'a.md'] },
+          { or: [false, { missing_some: [1, ['backlinks.0']] }] },
+        ],
+      },
+      'backlinks',
+    ],
+    [
+      'the array some walks, built by missing',
+      { some: [{ missing: ['backlinks'] }, { '==': [{ var: '' }, 'backlinks'] }] },
+      'backlinks',
+    ],
+    [
+      'the array a map walks, built by missing_some',
+      { map: [{ missing_some: [1, ['links', 'tags']] }, { var: '' }] },
+      'links',
+    ],
+  ])('rejects %s', (_label, logic, field) => {
+    expect(() => assertNoLinkFields(logic)).toThrow(
+      expect.objectContaining({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'link_fields_unavailable' },
+        message: expect.stringMatching(new RegExp(`^The JSONLogic tree reads \`${field}\``)),
+      }),
+    );
+  });
+
+  it.each([
+    ['missing keys none of which is a link field', { missing: ['frontmatter.links', 'linksTo'] }],
+    ['missing_some keys none of which is a link field', { missing_some: [1, ['path', 'tags.0']] }],
+    ['a computed missing key', { missing: ['path', { cat: ['back', 'links'] }] }],
+    ['a computed key in one array argument', { missing: [[{ cat: ['lin', 'ks'] }]] }],
+    ['a computed missing key list', { missing: { merge: [['backlinks']] } }],
+    [
+      'a key list whose form a computed first argument decides',
+      { missing: [{ var: 'frontmatter.keys' }, 'backlinks'] },
+    ],
+    ['a computed missing_some key list', { missing_some: [1, { var: 'frontmatter.keys' }] }],
+    ['a key after a first array argument, which missing ignores', { missing: [['path'], 'links'] }],
+    ['missing on the elements some tests', { some: [{ var: 'tags' }, { missing: ['links'] }] }],
+    [
+      'missing_some on the elements a filter tests',
+      { filter: [{ var: 'frontmatter.items' }, { missing_some: [1, ['backlinks', 'x']] }] },
+    ],
+    ['missing on the elements all tests', { all: [{ var: 'tags' }, { missing: [['backlinks']] }] }],
+    ['missing on the elements a map walks', { map: [{ var: 'tags' }, { missing: 'links.0' }] }],
   ])('accepts %s', (_label, logic) => {
     expect(() => assertNoLinkFields(logic)).not.toThrow();
   });

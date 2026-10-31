@@ -811,6 +811,79 @@ describe('searchJsonLogic — OBSIDIAN_READ_PATHS evaluates over readable notes 
       expect(vault.requests).toEqual([]);
     },
   );
+
+  /**
+   * `missing` and `missing_some` read each key through `var`, so a fixed key
+   * naming a link field would report it missing on every scoped note.
+   */
+  describe('missing and missing_some keys', () => {
+    const VAULT: VaultNote[] = [
+      { path: 'Work/a.md', frontmatter: { status: 'open' }, tags: ['x'], links: ['Work/b.md'] },
+      { path: 'Work/b.md', unresolvedLinks: ['ghost'] },
+      { path: 'Private/p.md', links: ['Work/a.md'] },
+    ];
+
+    it.each([
+      ['{"missing": ["backlinks"]}', { missing: ['backlinks'] }, 'backlinks'],
+      ['{"missing": [["path", "links.0"]]}', { missing: [['path', 'links.0']] }, 'links'],
+      [
+        '{"missing_some": [1, ["unresolvedLinks", "tags"]]}',
+        { missing_some: [1, ['unresolvedLinks', 'tags']] },
+        'unresolvedLinks',
+      ],
+      [
+        'a missing test nested in if',
+        { if: [{ missing: ['backlinks.0'] }, { var: 'path' }, false] },
+        'backlinks',
+      ],
+    ])(
+      'rejects %s from searchJsonLogic with link_fields_unavailable before any upstream request',
+      async (_label, logic, field) => {
+        const vault = jsonLogicVault(VAULT);
+        const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), vault.fetchImpl);
+        const err = await rejectionOf<McpError>(svc.searchJsonLogic(ctx, logic));
+        expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(err.data).toEqual({ reason: 'link_fields_unavailable' });
+        expect(err.message).toMatch(new RegExp(`^The JSONLogic tree reads \`${field}\``));
+        expect(vault.requests).toEqual([]);
+      },
+    );
+
+    it('answers a computed key, which reads a link field as null', async () => {
+      const vault = jsonLogicVault(VAULT);
+      const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), vault.fetchImpl);
+      expect(await svc.searchJsonLogic(ctx, { missing: [{ cat: ['back', 'links'] }] })).toEqual([
+        { filename: 'Work/a.md', result: ['backlinks'] },
+        { filename: 'Work/b.md', result: ['backlinks'] },
+      ]);
+      expect(vault.requests).toEqual(['POST /search/']);
+    });
+
+    it('answers keys that name no link field over the readable notes', async () => {
+      const vault = jsonLogicVault(VAULT);
+      const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), vault.fetchImpl);
+      expect(await svc.searchJsonLogic(ctx, { missing: ['frontmatter.status', 'tags.0'] })).toEqual(
+        [{ filename: 'Work/b.md', result: ['frontmatter.status', 'tags.0'] }],
+      );
+      expect(
+        await svc.searchJsonLogic(ctx, { missing_some: [2, ['path', 'frontmatter.status', 'x']] }),
+      ).toEqual([{ filename: 'Work/b.md', result: ['frontmatter.status', 'x'] }]);
+    });
+
+    it('sends an unscoped tree to the plugin unchanged, link fields included', async () => {
+      const vault = jsonLogicVault(VAULT);
+      const svc = new ObsidianService(makeTestConfig({ writePaths: ['work'] }), vault.fetchImpl);
+      const logic = { missing_some: [1, ['backlinks.0', 'unresolvedLinks.0']] };
+      // Nothing links to Private/p.md, and only Work/b.md has an unresolved link.
+      expect(await svc.searchJsonLogic(ctx, logic)).toEqual([
+        { filename: 'Private/p.md', result: ['backlinks.0', 'unresolvedLinks.0'] },
+      ]);
+      expect(await svc.searchJsonLogic(ctx, { missing: ['backlinks.0'] })).toEqual([
+        { filename: 'Private/p.md', result: ['backlinks.0'] },
+      ]);
+      expect(vault.bodies.map((b) => JSON.parse(b))).toEqual([logic, { missing: ['backlinks.0'] }]);
+    });
+  });
 });
 
 /**
