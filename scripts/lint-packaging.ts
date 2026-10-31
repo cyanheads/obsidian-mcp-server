@@ -233,7 +233,9 @@ export const CRITICAL_RUNTIME_PATHS = [
 /**
  * Agent-doc entries under `node_modules/` that must not ship in a bundle.
  * `framework-skills/` is this framework's tree; `skills/` covers any other
- * dependency that vendors agent skills.
+ * dependency that vendors agent skills, at the package's root only — a
+ * `skills/` deeper inside a package (the MCP SDK's `dist/ext/skills/`) is
+ * runtime code.
  * KEEP IN SYNC with `AGENT_DOC_ENTRY` in `scripts/clean-mcpb.ts` (the strip
  * step this check verifies) — edit both literals together. The assertion that
  * they match lives in the mcp-ts-core repository's own test suite; `tests/` is
@@ -241,7 +243,7 @@ export const CRITICAL_RUNTIME_PATHS = [
  * these scripts were copied into.
  */
 export const AGENT_DOC_ENTRY =
-  /^node_modules\/.*(?:\/framework-skills\/|\/skills\/|\/\.claude\/|\/\.agents\/|\/SKILL\.md$)/;
+  /^node_modules\/(?:.*\/node_modules\/)?(?:@[^/]+\/)?[^/]+\/(?:(?:framework-skills|skills|\.claude|\.agents)\/|(?:.*\/)?SKILL\.md$)/;
 
 /**
  * Platform-specific native binding packages that must not ship in a bundle.

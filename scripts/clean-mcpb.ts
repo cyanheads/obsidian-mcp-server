@@ -38,7 +38,10 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * Agent-doc entries under `node_modules/` that must not ship in a bundle.
+ * Agent-doc entries under `node_modules/` that must not ship in a bundle:
+ * agent trees at an installed package's root (scoped and nested packages
+ * included) and `SKILL.md` files. A `skills/` deeper inside a package is
+ * runtime code — the MCP SDK's `dist/ext/skills/` is imported at startup.
  * KEEP IN SYNC with `AGENT_DOC_ENTRY` in `scripts/lint-packaging.ts`
  * (post-bundle content check) — edit both literals together. The assertion that
  * they match lives in the mcp-ts-core repository's own test suite; `tests/` is
@@ -46,7 +49,7 @@ import { fileURLToPath } from 'node:url';
  * these scripts were copied into.
  */
 export const AGENT_DOC_ENTRY =
-  /^node_modules\/.*(?:\/framework-skills\/|\/skills\/|\/\.claude\/|\/\.agents\/|\/SKILL\.md$)/;
+  /^node_modules\/(?:.*\/node_modules\/)?(?:@[^/]+\/)?[^/]+\/(?:(?:framework-skills|skills|\.claude|\.agents)\/|(?:.*\/)?SKILL\.md$)/;
 
 /**
  * Platform-specific native binding packages, which must not ship in a bundle.
