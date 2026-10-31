@@ -51,13 +51,19 @@
         },
         {
           "name": "OBSIDIAN_READ_PATHS",
-          "description": "Optional comma-separated vault-relative folder allowlist for reads. Prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault. Write paths are implicitly readable. Example: 'public/,projects/'.",
+          "description": "Optional comma-separated vault-relative folder allowlist for reads. Prefix-based with implicit recursion; case-insensitive; backslashes read as slashes, repeated and trailing slashes and '.' segments dropped, and names normalized to Unicode NFC; an entry naming the vault root ('.') is rejected at startup. Unset = full vault. Write paths are implicitly readable. Example: 'public/,projects/'.",
           "format": "string",
           "isRequired": false
         },
         {
           "name": "OBSIDIAN_WRITE_PATHS",
-          "description": "Optional comma-separated vault-relative folder allowlist for writes. Same syntax as OBSIDIAN_READ_PATHS. Unset = full vault, or the read scope when reads are restricted. Example: 'projects/,scratch/'.",
+          "description": "Optional comma-separated vault-relative folder allowlist for writes. Same syntax as OBSIDIAN_READ_PATHS. Unset = full vault, or the read scope when reads are restricted; paths in OBSIDIAN_DENY_PATHS stay denied. Example: 'projects/,scratch/'.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "OBSIDIAN_DENY_PATHS",
+          "description": "Optional comma-separated vault-relative paths withheld from reads and writes. Same syntax as OBSIDIAN_READ_PATHS. Wins over both allowlists; denied paths are left out of listings, search results, and tag counts. Unset = nothing denied. Example: 'private/,journal/therapy/'.",
           "format": "string",
           "isRequired": false
         },
@@ -142,13 +148,19 @@
         },
         {
           "name": "OBSIDIAN_READ_PATHS",
-          "description": "Optional comma-separated vault-relative folder allowlist for reads. Prefix-based with implicit recursion; case-insensitive; trailing slashes normalized. Unset = full vault. Write paths are implicitly readable. Example: 'public/,projects/'.",
+          "description": "Optional comma-separated vault-relative folder allowlist for reads. Prefix-based with implicit recursion; case-insensitive; backslashes read as slashes, repeated and trailing slashes and '.' segments dropped, and names normalized to Unicode NFC; an entry naming the vault root ('.') is rejected at startup. Unset = full vault. Write paths are implicitly readable. Example: 'public/,projects/'.",
           "format": "string",
           "isRequired": false
         },
         {
           "name": "OBSIDIAN_WRITE_PATHS",
-          "description": "Optional comma-separated vault-relative folder allowlist for writes. Same syntax as OBSIDIAN_READ_PATHS. Unset = full vault, or the read scope when reads are restricted. Example: 'projects/,scratch/'.",
+          "description": "Optional comma-separated vault-relative folder allowlist for writes. Same syntax as OBSIDIAN_READ_PATHS. Unset = full vault, or the read scope when reads are restricted; paths in OBSIDIAN_DENY_PATHS stay denied. Example: 'projects/,scratch/'.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "OBSIDIAN_DENY_PATHS",
+          "description": "Optional comma-separated vault-relative paths withheld from reads and writes. Same syntax as OBSIDIAN_READ_PATHS. Wins over both allowlists; denied paths are left out of listings, search results, and tag counts. Unset = nothing denied. Example: 'private/,journal/therapy/'.",
           "format": "string",
           "isRequired": false
         },

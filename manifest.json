@@ -31,6 +31,7 @@
         "OBSIDIAN_ENABLE_COMMANDS": "${user_config.OBSIDIAN_ENABLE_COMMANDS}",
         "OBSIDIAN_READ_PATHS": "${user_config.OBSIDIAN_READ_PATHS}",
         "OBSIDIAN_WRITE_PATHS": "${user_config.OBSIDIAN_WRITE_PATHS}",
+        "OBSIDIAN_DENY_PATHS": "${user_config.OBSIDIAN_DENY_PATHS}",
         "OBSIDIAN_READ_ONLY": "${user_config.OBSIDIAN_READ_ONLY}",
         "OBSIDIAN_DELETE_ELICITATION": "${user_config.OBSIDIAN_DELETE_ELICITATION}",
         "OBSIDIAN_OMNISEARCH_URL": "${user_config.OBSIDIAN_OMNISEARCH_URL}",
@@ -89,7 +90,14 @@
     },
     "OBSIDIAN_WRITE_PATHS": {
       "title": "Write Path Allowlist",
-      "description": "Comma-separated vault-relative folder allowlist for writes. Unset = full vault, or the read scope when reads are restricted. Example: 'projects/,scratch/'.",
+      "description": "Comma-separated vault-relative folder allowlist for writes. Unset = full vault, or the read scope when reads are restricted; paths in OBSIDIAN_DENY_PATHS stay denied. Example: 'projects/,scratch/'.",
+      "type": "string",
+      "required": false,
+      "default": ""
+    },
+    "OBSIDIAN_DENY_PATHS": {
+      "title": "Denied Paths",
+      "description": "Comma-separated vault-relative paths withheld from reads and writes, overriding both allowlists. Unset = nothing denied. Example: 'private/,journal/therapy/'.",
       "type": "string",
       "required": false,
       "default": ""

@@ -68,7 +68,7 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 
 - Walks from `path` (default vault root) to `depth` 1–20 (default 2), filtered by `extension` and `nameRegex` (≤256 chars); a folder that fails `nameRegex` is not walked
 - Returns `entries[]` (`file` / `directory`), `totals`, and `appliedFilters`; the walk stops at 1,000 entries with `excluded.reason: "entry_cap"`, and a folder the depth limit stopped carries `truncated: true`
-- With `OBSIDIAN_READ_PATHS` set, a listing holds only readable entries and the folders leading to the scope; those folders are walked and accepted as `path`
+- With `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS` set, a listing holds only readable entries and the folders leading to the scope; those folders are walked and accepted as `path`, and a denied folder is absent at every depth
 
 ---
 
@@ -76,15 +76,15 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 
 - `nameRegex` (≤256 chars) and `minCount` narrow the set, then tags are ranked by count and capped at `limit` (default 200, max 10000); hierarchical parents count (`work/tasks` adds to `work`)
 - When the cap withholds tags, the response carries `truncated`, `shown`, and `cap`
-- With `OBSIDIAN_READ_PATHS` set, only tags from readable notes are listed, and `count` is the number of readable notes carrying the tag or a tag nested under it
+- With `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS` set, only tags from readable notes are listed, and `count` is the number of readable notes carrying the tag or a tag nested under it
 
 ---
 
 ### `obsidian_search_notes` <sub>tool</sub>
 
-- `mode: "text"` requires every whitespace-split token of `query` as a case-insensitive substring of the filename or body (quotes are literal), shaped by `contextLength` (default 100), `pathPrefix`, and `maxMatchesPerHit` (default 10); `mode: "jsonlogic"` evaluates a `logic` tree over `path`, `content`, `frontmatter.<key>`, `tags`, and `stat` (plus `links`, `backlinks`, and `unresolvedLinks` on plugin versions that provide them), with `glob` / `regexp` taking `[PATTERN, VALUE]`
+- `mode: "text"` requires every space-separated token of `query` as a case-insensitive substring of the filename or body (quotes are literal), shaped by `contextLength` (default 100), `pathPrefix`, and `maxMatchesPerHit` (default 10); `mode: "jsonlogic"` evaluates a `logic` tree over `path`, `content`, `frontmatter.<key>`, `tags`, and `stat` (plus `links`, `backlinks`, and `unresolvedLinks` on plugin versions that provide them, and not under `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS`), with `glob` / `regexp` taking `[PATTERN, VALUE]`
 - `result.mode` discriminates the payload; every mode reports `totalCount` and pages via `nextCursor`, and a text hit clipped to `maxMatchesPerHit` carries `truncated` and `totalMatches`
-- `mode: "omnisearch"` (BM25 ranking, quoted phrases, `-exclusion`, `path:` / `ext:` filters) is offered only when the Omnisearch plugin answered at startup; its 50-hit upstream cap sets `truncated: true`
+- `mode: "omnisearch"` (BM25 ranking, quoted phrases, `-exclusion`, `path:` / `ext:` filters) is offered only when the Omnisearch plugin answered at startup. It keeps its top 50 hits; `path:`, `ext:`, and plain terms apply before that cap, quoted phrases and `-exclusion` after it. `truncated: true` marks a result the cap may have cut, with `truncatedReason` `cap_reached`, `filtered_after_cap`, or `read_scope`; under `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS` it is always `true`, and a hit's membership and `score` still depend on the whole vault
 
 ---
 
@@ -138,7 +138,7 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 
 - Takes a `target` (path, active file, or periodic note) and checks it against the write scope first; a folder path fails with `path_is_directory`. There is no API-level undo, only Obsidian's local trash
 - The path must match exactly, letter case included, even on a case-insensitive filesystem. A different-case or extension-less spelling fails `note_missing` before anything is deleted, naming the near matches in `suggestions`
-- By default the note is deleted on the first call, with no confirmation; `OBSIDIAN_WRITE_PATHS` and `OBSIDIAN_READ_ONLY` bound what it can reach
+- By default the note is deleted on the first call, with no confirmation; `OBSIDIAN_WRITE_PATHS`, `OBSIDIAN_DENY_PATHS`, and `OBSIDIAN_READ_ONLY` bound what it can reach
 - With `OBSIDIAN_DELETE_ELICITATION=true`, the first call answers with a confirmation request naming the path and byte size, and the note is deleted only after the user accepts. Declining fails with `cancelled`, and a client without elicitation support cannot delete
 - In that mode an answer counts only against the single-use consent record stored when the prompt was shown, bound to the caller, the path, and the note's content then. A pre-supplied or replayed answer, or one given after the note changed, gets a fresh prompt instead
 - Consent records live in the server's storage provider (`STORAGE_PROVIDER_TYPE`, default `in-memory`, process-local). That works for stdio or a single HTTP instance; several instances behind one endpoint need a shared provider (`filesystem`, `supabase`, or `cloudflare-d1`, never `cloudflare-kv`)
@@ -178,7 +178,7 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 ### `obsidian://tags` <sub>resource</sub>
 
 - Every tag with its `count`, uncapped and unsorted, hierarchical parents included
-- With `OBSIDIAN_READ_PATHS` set, only tags from readable notes, counted the same way as `obsidian_list_tags`
+- With `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS` set, only tags from readable notes, counted the same way as `obsidian_list_tags`
 - No ranking or filters; `obsidian_list_tags` gives the count-ranked, capped view
 
 ---
@@ -196,7 +196,7 @@ Obsidian-specific:
 
 - Typed client for the [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin; section writes speak markdown-patch 2.0 to plugin v5.0 and later and 1.x to v4.x, chosen from the reported plugin version
 - Heading targets take a full `Parent::Child` path or a bare leaf name; writes reject an ambiguous one with `ambiguous_section` and its `candidates`, unless exactly one match is a top-level heading. On plugin v5.0 and later, content added to a heading is set off by a blank line (a list item continues an adjacent list), and a heading inside it must sit below the section's level (`heading_outside_section`)
-- Folder-scoped read/write permissions, a read-only switch, and an opt-in command-palette pair (see [Path policy](#path-policy)); server-level `instructions` on `initialize` report the active policy
+- Folder-scoped read/write permissions, a deny list that withholds paths from both, a read-only switch, and an opt-in command-palette pair (see [Path policy](#path-policy)); server-level `instructions` on `initialize` report the active policy
 - `obsidian_get_note` and `obsidian_open_in_ui` retry a case-mismatched path against the real filename, disclosed as `requestedPath` plus a `notice`, and add `Did you mean` suggestions to a miss; writes and deletes match the exact path
 - Regex inputs are capped (`nameRegex` at 256 chars, `useRegex` at 1024) and rejected with `regex_unsafe` when they nest quantifiers
 - Backlinks have no dedicated tool; `obsidian_search_notes` in `jsonlogic` mode finds them with `{"regexp": ["\\[\\[Target Note(\\\\?\\||#|\\]\\])", {"var": "content"}]}`, which also matches the table-safe `[[Target Note\|Alias]]`
@@ -252,6 +252,7 @@ Generate the key in Obsidian under **Settings → Community Plugins → Local RE
 | `OBSIDIAN_ENABLE_COMMANDS` | Enable `obsidian_list_commands` and `obsidian_execute_command`. Commands are opaque and can be destructive. | `false` |
 | `OBSIDIAN_READ_PATHS` | Comma-separated folder allowlist for reads. See [Path policy](#path-policy). | unset (full vault) |
 | `OBSIDIAN_WRITE_PATHS` | Comma-separated folder allowlist for writes. See [Path policy](#path-policy). | unset (the read scope, or the full vault without one) |
+| `OBSIDIAN_DENY_PATHS` | Comma-separated paths withheld from reads and writes alike, overriding both allowlists. See [Path policy](#path-policy). | unset (nothing denied) |
 | `OBSIDIAN_READ_ONLY` | Deny every write and disable the command-palette pair. | `false` |
 | `OBSIDIAN_DELETE_ELICITATION` | Ask the user to confirm each `obsidian_delete_note` call through an elicitation form before deleting. Needs a client that renders elicitation, and a stateful session over HTTP (not required when `OBSIDIAN_READ_ONLY=true` disables the tool). Off, the delete runs on the first call. | `false` |
 | `OBSIDIAN_OMNISEARCH_URL` | [Omnisearch](https://github.com/scambier/obsidian-omnisearch) HTTP server URL. Unset derives from the `OBSIDIAN_BASE_URL` host on port `51361`. Probed once at startup; the `omnisearch` search mode appears only if it answers. | derived |
@@ -267,20 +268,27 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Path policy
 
-Three optional env vars limit which vault paths the tools can touch. Unset, reads and writes cover the full vault.
+Four optional env vars limit which vault paths the tools can touch. Unset, reads and writes cover the full vault.
 
 | Goal | Config |
 |:---|:---|
 | Read everywhere, write only in `projects/` and `scratch/` | `OBSIDIAN_WRITE_PATHS=projects/,scratch/` |
 | Read only `public/`, write only `public/inbox/` | `OBSIDIAN_READ_PATHS=public/`, `OBSIDIAN_WRITE_PATHS=public/inbox/` |
+| Read and write everywhere except `private/` | `OBSIDIAN_DENY_PATHS=private/` |
+| Read and write only `projects/`, except `projects/secret/` | `OBSIDIAN_READ_PATHS=projects/`, `OBSIDIAN_DENY_PATHS=projects/secret/` |
 | No writes anywhere | `OBSIDIAN_READ_ONLY=true` |
 
-- Matching is by prefix, recursive, and case-insensitive; trailing slashes are normalized. Write paths are also readable.
+- Matching is by prefix, recursive, and case-insensitive. Entries are normalized the way a path reaches the plugin: `\` becomes `/`, repeated and trailing slashes collapse, `.` segments drop, and names are compared in Unicode NFC, so `journal//therapy` and `./private` cover the folders they name. Request paths get the same slash, case, and NFC folding, so `notes//private/x.md` or an NFD spelling of a denied name is refused like the plain one. An entry naming the vault root (`.`, `./`) fails startup. Write paths are also readable.
+- `OBSIDIAN_DENY_PATHS` wins over both allowlists, write-implies-read included: a denied path is neither readable nor writable, and it is left out of listings, search hits, and tag counts. An allow entry inside a deny entry grants nothing, and the startup log warns about it.
 - `OBSIDIAN_READ_ONLY=true` removes every write tool and the command-palette pair from `tools/list`, including `obsidian_manage_frontmatter` and `obsidian_manage_tags` (so their `get` / `list` go too). `obsidian_open_in_ui` still opens existing files but won't create one.
-- A denial fails with `path_forbidden`, echoing the active scope in `data.activeScope` and the recovery hint. A denial on an `active` or `periodic` target names the target (`(active file)`, `daily note for 2026-10-01`), not the note it resolved to. `obsidian_list_notes` lists only readable entries plus the folders leading to the scope, so a nested scope can be browsed to from the root.
-- Under `OBSIDIAN_READ_PATHS`, searches return readable notes only, and a JSONLogic tree never reads a note outside the scope: the server evaluates it over the readable notes, with `links`, `backlinks`, and `unresolvedLinks` holding readable entries only. Which note a link points to is still Obsidian's resolution across the whole vault, so those three fields can change when a note outside the scope is created or removed; match link text in `content` when that matters. That evaluation is bounded — 1,000 levels of nesting, a work budget per note for the values a tree builds and one per search for the results it keeps, 10 s — and a tree past a bound fails with `logic_too_costly`. A readable note whose data is nested too deep to hand to the evaluator (about 3,500 levels under Node) fails the search with `note_too_deep`. Without a read scope the tree goes to the plugin unchanged.
-- Tag listings (`obsidian_list_tags`, `obsidian://tags`) under `OBSIDIAN_READ_PATHS` cover readable notes only, counting notes rather than occurrences. Write paths and read-only alone leave them vault-wide.
-- The server `instructions` state the effective scope: readable is the read paths plus the write paths, and writable is the write paths, or the read scope when only reads are restricted. The startup log prints the configured lists.
+- A denial fails with `path_forbidden`, echoing the active scope in `data.activeScope` and the recovery hint. A path the deny list withholds fails with subreason `denied_path` instead, which carries no `activeScope` and names `OBSIDIAN_DENY_PATHS` but none of its entries; a path outside an allowlist reports `outside_read_paths` or `outside_write_paths` even when it is also denied. A denial on an `active` or `periodic` target names the target (`(active file)`, `daily note for 2026-10-01`), not the note it resolved to. `obsidian_list_notes` lists only readable entries plus the folders leading to the scope, so a nested scope can be browsed to from the root; a denied folder never appears, even on the way to an allow entry.
+- Under `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS`, searches return readable notes only. With neither set, a JSONLogic tree goes to the plugin unchanged; with either:
+  - JSONLogic: the server evaluates the tree over the readable notes, so it never reads a note outside the scope. Notes carry no `links`, `backlinks`, or `unresolvedLinks`, since Obsidian resolves a link across the whole vault: a tree naming one fails with `link_fields_unavailable`, and a computed key reads `null`. Match link text in `content` instead. A tree that names `content` reads each readable note with one request per note, at most 32 in flight across the server.
+  - Evaluation is bounded (1,000 levels of nesting, a work budget per note and per search, 10 s of evaluation, 45 s for the whole search); a tree past a bound fails with `logic_too_costly`. A readable note nested too deep for the evaluator (about 3,500 levels under Node) fails the search with `note_too_deep`.
+  - Text: the server never calls the plugin's text search. It asks the plugin which readable notes may hold every token, reads each candidate note, and applies Obsidian's search rule itself, so hits and context windows match the unscoped search. Past 45 s it fails with `text_search_too_costly`, and `context_length_too_large` fails where the plugin's response for the readable matches alone would pass its size ceiling.
+  - Omnisearch ranks the whole vault before the scope filters it (see `obsidian_search_notes`).
+- Tag listings (`obsidian_list_tags`, `obsidian://tags`) under `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS` cover readable notes only, counting notes rather than occurrences. Write paths and read-only alone leave them vault-wide.
+- The server `instructions` state the effective scope: readable is the read paths plus the write paths, and writable is the write paths, or the read scope when only reads are restricted. With a deny list set, each scope reads "…, except paths the operator withholds", naming none of them, and an empty scope reads `none`. The startup log prints the configured lists, the deny list included.
 
 ## Running the server
 
