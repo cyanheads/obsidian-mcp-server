@@ -199,13 +199,18 @@ export async function contractErrorOf<T extends AnyToolDefinition>(
 }
 
 /**
- * Thread-CPU milliseconds per call of `run`: the fastest of three samples, each
- * repeating `run` until it has used `floorMs` of CPU and dividing by the calls,
- * so a call shorter than the clock's tick still reads true. CPU rather than
+ * Thread-CPU milliseconds per call of `run`: the fastest of up to three
+ * samples, each repeating `run` until it has used `floorMs` of CPU and dividing
+ * by the calls, so a call shorter than the clock's tick still reads true.
+ * Sampling stops once the fastest so far satisfies `enough`. CPU rather than
  * wall-clock time, so a test worker descheduled under a parallel run cannot
  * fail a cost budget.
  */
-async function cpuMs(run: () => unknown, floorMs = 1): Promise<number> {
+async function cpuMs(
+  run: () => unknown,
+  floorMs: number,
+  enough: (ms: number) => boolean = () => false,
+): Promise<number> {
   let best = Number.POSITIVE_INFINITY;
   for (let sample = 0; sample < 3; sample++) {
     const start = process.threadCpuUsage();
@@ -218,6 +223,7 @@ async function cpuMs(run: () => unknown, floorMs = 1): Promise<number> {
       usedMs = (user + system) / 1000;
     } while (usedMs < floorMs);
     best = Math.min(best, usedMs / calls);
+    if (enough(best)) break;
   }
   return best;
 }
@@ -225,15 +231,21 @@ async function cpuMs(run: () => unknown, floorMs = 1): Promise<number> {
 /** CPU budget for one scan, at every size. */
 const BUDGET_MS = 1_000;
 
+/** Bound on the cost ratio across the span: the geometric midpoint of linear (64×) and quadratic (4,096×) growth. */
+const MAX_RATIO = 256;
+
 /**
  * Asserts that `scan`, sync or async, costs linear time over `build`'s inputs,
  * including calls too fast to time one at a time. Sizes double from `from` to
  * 64× `from`, and each scans inside `BUDGET_MS` before the next is built, so a
  * quadratic scan fails at the first size it outgrows rather than minutes later
  * at the largest. Over the span a linear scan's cost grows ~64× and a
- * quadratic one's ~4,096×, so the ratio must stay under 256, their geometric
- * midpoint. The two ends are sampled at a 5 ms floor, and re-sampled
- * alternately before a ratio fails.
+ * quadratic one's ~4,096×, so the ratio must stay under `MAX_RATIO`, their
+ * geometric midpoint. The two ends are sampled at a 5 ms floor, and re-sampled
+ * alternately before a ratio fails. Each size's checks pass when its fastest
+ * sample does, so above `from` sampling stops at the first sample that passes
+ * them, the verdict the fastest of three would give; `from` keeps all three,
+ * since a slower baseline would lower the ratio.
  */
 export async function expectLinearCost(
   build: (size: number) => string,
@@ -245,12 +257,19 @@ export async function expectLinearCost(
   let largeMs = Number.POSITIVE_INFINITY;
   for (let size = from; size <= to; size *= 2) {
     const input = build(size);
-    const ms = await cpuMs(() => scan(input), size === from || size === to ? 5 : 1);
+    const ms =
+      size === from
+        ? await cpuMs(() => scan(input), 5)
+        : await cpuMs(
+            () => scan(input),
+            size === to ? 5 : 1,
+            (best) => best < BUDGET_MS && (size < to || best / smallMs < MAX_RATIO),
+          );
     expect(ms, `${size} characters`).toBeLessThan(BUDGET_MS);
     if (size === from) smallMs = ms;
     if (size === to) largeMs = ms;
   }
-  if (largeMs / smallMs >= 256) {
+  if (largeMs / smallMs >= MAX_RATIO) {
     const small = build(from);
     const large = build(to);
     for (let round = 0; round < 3; round++) {
@@ -261,7 +280,7 @@ export async function expectLinearCost(
   expect(
     largeMs / smallMs,
     `${largeMs.toFixed(2)} ms at ${to} characters, ${smallMs.toFixed(3)} ms at ${from}`,
-  ).toBeLessThan(256);
+  ).toBeLessThan(MAX_RATIO);
 }
 
 /**

@@ -223,12 +223,14 @@ describe('SimpleSearch response budget', () => {
 
 /**
  * The scan runs over caller-sized note text and a caller-written query, so
- * each shape below is timed from 5k to 320k characters (`expectLinearCost`).
- * Every shape carries both line-break forms: one long line ending in a break,
- * and breaks throughout. Each sample runs the search a fixed number of times so
- * the smallest size still spends measurable thread CPU, and the parsed span
- * count is checked at every size, so a search that matched nothing would fail
- * rather than time nothing.
+ * each shape below is timed from 5k to 320k characters (`expectLinearCost`,
+ * which repeats a scan until its sample spends measurable thread CPU). Every
+ * shape carries both line-break forms: one long line ending in a break, and
+ * breaks throughout. The parsed span count is checked at every size, so a
+ * search that matched nothing would fail rather than time nothing; a shape
+ * whose 5k search costs about as much as that check repeats the search within
+ * one scan, so the check's fixed cost does not pad the baseline and lower the
+ * ratio.
  */
 describe('SimpleSearch scan time', () => {
   const fill = (unit: string, size: number) =>
@@ -236,7 +238,7 @@ describe('SimpleSearch scan time', () => {
   const shapes: Array<{
     label: string;
     query: string;
-    /** Searches per sample: enough that the 5k sample spends a few ms of CPU. */
+    /** Searches per scan: enough to amortize the span check's fixed cost at 5k. */
     runs: number;
     build: (size: number) => string;
     spans: (body: string) => number;
@@ -249,14 +251,14 @@ describe('SimpleSearch scan time', () => {
       {
         label: `a token repeated across the text, ${form}`,
         query: 'qx',
-        runs: 16,
+        runs: 1,
         build: (size) => fill(`qx${sep}`, size) + tail,
         spans: (body) => body.split('qx').length - 1,
       },
       {
         label: `repeated openers that fail one character short, ${form}`,
         query: 'aaaaaaab',
-        runs: 400,
+        runs: 32,
         build: (size) => `${fill(`aaaaaaa${sep}`, size)}aaaaaaab${tail}`,
         spans: () => 1,
       },
@@ -264,7 +266,7 @@ describe('SimpleSearch scan time', () => {
         // Sizes are multiples of both unit lengths, so no cut unit leaves a stray 'a' or 'aa' span.
         label: `tokens that are prefixes of each other, ${form}`,
         query: 'a aa aab',
-        runs: 16,
+        runs: 1,
         build: (size) => fill(`aab${sep}`, size) + tail,
         spans: (body) => body.split('aab').length - 1,
       },
