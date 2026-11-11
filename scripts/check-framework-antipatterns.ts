@@ -16,7 +16,7 @@
  *      schema advertising. Consumer-side `.passthrough()` on output schemas
  *      is a documented escape hatch and stays legal (rule is scoped to
  *      `src/mcp-server/tools/`). The one sanctioned substitution is
- *      `deferInputValidation()` (#377): it projects the same JSON Schema and
+ *      `deferValidation()` (#377, #846): it projects the same JSON Schema and
  *      moves only *where* a rejection is reported. Anything that widens what
  *      is advertised is still a violation.
  *   2. Mutating `RegisteredTool.inputSchema` after register breaks

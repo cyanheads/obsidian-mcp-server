@@ -4,7 +4,7 @@ description: >
   Cleanup pass that edits the working tree — over a session's uncommitted changes, or a named path or whole codebase. Reads `git diff` (or the named target) and simplifies, consolidates, and aligns code with the existing codebase — modernize syntax, cut unnecessary complexity and slop, consolidate duplicated logic, catch efficiency issues. Not a bug hunt: defects are reported, not fixed. Use after a substantive working session, or when asked to clean up, simplify, reduce slop, consolidate, modernize, tighten up, de-slop, or scan a codebase. For `@cyanheads/mcp-ts-core` projects, includes specific transformations for tool/resource/prompt definitions, the ctx pattern, error factories, and framework idioms.
 metadata:
   author: cyanheads
-  version: "1.7"
+  version: "1.8"
   audience: external
   type: workflow
 ---
@@ -23,7 +23,8 @@ Cleanup pass over a session's changes or a named target. Reviews the code in sco
 
 Two scopes; the caller's wording picks one, and the diff is the default.
 
-- **Diff** (nothing named): run `git status` to see the shape of the working tree, then `git diff HEAD` for all uncommitted changes (staged and unstaged). Untracked files never appear in the diff — list them with `git ls-files --others --exclude-standard` (`git status` collapses a new directory to one line) and read them directly. If the diff is empty and there are no untracked files, review the last commit (`git diff HEAD~1 HEAD`); if that is also empty, say the tree is clean and stop. Don't go hunting through the codebase for files to improve.
+- **Diff** (nothing named): run `git status` to see the shape of the working tree, then `git diff HEAD` for all uncommitted changes (staged and unstaged). Untracked files never appear in the diff — list them with `git ls-files --others --exclude-standard` (`git status` collapses a new directory to one line) and read them directly. If the diff is empty and there are no untracked files, review the last commit (`git show HEAD`, which also works on a repo's first commit); if there is none, say the tree is clean and stop. Don't go hunting through the codebase for files to improve.
+  - **The tree may hold more than one writer's work.** When the caller names the files this session touched, scope to those. Otherwise, changes you don't recognize that were modified in the last few minutes (check mtimes) are another writer's work in progress: leave them out and list them in the summary.
 - **Target** (a named path, module, or "the whole codebase"): the named files are the scope, whatever their git state. Work one module or directory at a time and re-run the gate after each, so a large scan never becomes one unverifiable diff. Take the target as named — don't rank or narrow it by commit history.
 
 ### Phase 2: Understand the surrounding codebase
@@ -32,7 +33,7 @@ Don't review changes in isolation. Before any modifications:
 
 1. **Read the full files** containing changes — not just the diff hunks. Understand imports, surrounding logic, module structure.
 2. **Identify the project language(s)** and select the relevant transformation rules. Discard inapplicable rules.
-3. **Survey adjacent code** — shared utilities, sibling modules, common patterns. You need to know what already exists before deciding something is missing.
+3. **Read the project's conventions, then survey adjacent code.** The project's `CLAUDE.md` / `AGENTS.md` states code conventions (comment style, error handling, naming) that outrank whatever the nearest file happens to do. Then look at shared utilities, sibling modules, and common patterns — you need to know what already exists before deciding something is missing.
 4. **Run the project's gate once before editing** to establish a baseline. Use the gate the project's `CLAUDE.md` / `AGENTS.md` names; absent one, take it from `package.json` scripts — `devcheck` if present, else `check`, else the separate `typecheck` / `lint` scripts — or a `Makefile` `check` target. Python projects gate on `uv run ruff check`, `uv run ruff format --check`, and the configured type checker. Add the test suite when the gate doesn't run it — read the script rather than assume (a `devcheck` often stops at lint and typecheck); without tests, nothing shows behavior survived the pass. In a Bun project that tests with Vitest, run `bun run test` — bare `bun test` bypasses the script and runs Bun's own runner. If the gate is already red, say so in the summary and don't attribute the failure to your changes.
 
 ### Phase 3: Review
@@ -45,14 +46,16 @@ Evaluate the changes across these dimensions. Not every dimension applies to eve
 - **Consolidation** — Flag copy-paste-with-variation: near-duplicate code blocks that should be unified. Only unify if the shared abstraction is genuinely simpler than the duplicated code.
 - **Consistency** — Check that new code follows the same patterns as the rest of the codebase: naming conventions, error handling style, import patterns, type annotation style. Normalize toward the better variant when the project is inconsistent.
 - **Stringly-typed code** — Flag raw strings where constants, string-union types, or branded types already exist in the codebase.
+- **Unneeded dependencies** — A package that duplicates a platform built-in: `uuid` → `crypto.randomUUID()`, `node-fetch` / `axios` for plain requests → `fetch`, `lodash` helpers → `Object.groupBy`, `structuredClone`, `.at()`. If this session added the dependency, replace its calls and remove it through the package manager so the lockfile follows; if it predates the session, recommend the removal in the summary.
 
 #### Code quality
 
-- **Redundant state** — State that duplicates existing state, cached values that could be derived.
+- **Redundant state** — State that duplicates existing state, cached values that could be derived, and a cache added to hide work the code could stop repeating — remove the repetition instead. A cache in front of a cost the code doesn't control (a rate-limited upstream, a network round trip) is not redundant: leave it.
 - **Unnecessary complexity** — Deep nesting that could be guard clauses, premature abstractions, over-engineered solutions to simple problems.
 - **Speculative generality** — Options, parameters, config flags, generic type parameters, and branches that no caller exercises. Flexibility for a hypothetical caller is cost paid now: remove it, and let the first real use add it back. On a published package's public surface it is API — note it instead (see Dead code).
 - **Pass-through layers** — Apply the deletion test to a wrapper, helper, or module: if deleting it and inlining its body makes the complexity vanish, it was a pass-through — inline it. If the same logic would reappear across several callers, it earns its keep. An interface, port, or injected dependency with a single implementation and no test double is a hypothetical seam, not a real one — collapse it until something actually varies across it.
 - **Test-only reach** — A function extracted or exported only so a test can get at it is a shape problem, not a cleanup: name it in the summary with the module it belongs to. Don't restructure it here — the tests would have to move with it.
+- **Weakened tests** — In tests the session changed: `.only`, `.skip`, `xit`, `@pytest.mark.skip`; assertions deleted or loosened (`toBeDefined()`, `expect.anything()`, a partial `toMatchObject` replacing an exact match); snapshots rewritten wholesale; tests removed along with the code they covered. Report each as a defect with `file:line` and don't fix it here — whether the old assertion was right is the author's call.
 - **Dead code** — Unreachable branches, unused variables, commented-out code, and debug leftovers from the session (`console.log`, `print`, `debugger`) that aren't the program's real output or the project's logger. An export nothing imports is dead in an application or a package-internal module; on a published package's public surface it is API — leave it and note it in the summary.
 - **Defensive code for impossible states** — Guards for cases the type system or upstream validation already prevents. Drop them.
 - **Type escapes** — `any`, `as` casts that paper over a mismatch, non-null `!`, `@ts-ignore`, and Python's `# type: ignore` / `cast()`. Each is a claim the compiler couldn't check: replace with a narrowed type, a type guard, or a parse at the boundary. Keep the ones documenting a genuine type-system or third-party-types limitation — confirm the limitation is gone before removing one — and prefer `@ts-expect-error` with a one-line reason over `@ts-ignore`.
@@ -63,12 +66,12 @@ Evaluate the changes across these dimensions. Not every dimension applies to eve
 
 #### Efficiency
 
-- **Redundant work** — Repeated computations, duplicate file reads, duplicate network/API calls, N+1 query patterns.
+- **Redundant work** — Repeated computations, duplicate file reads, duplicate network/API calls, N+1 query patterns. Setup that comes out the same on every call — a schema, a formatter (`Intl.NumberFormat`), a lookup `Set` built from a constant list — belongs at module scope, not inside a handler or loop. Anything holding per-call state stays put: a client bound to one request's credentials, or a `/g` / `/y` regex, whose `lastIndex` carries from one `.test()` / `.exec()` call into the next.
 - **Missed concurrency** — Independent async operations run sequentially that could run in parallel with `Promise.all` / `Promise.allSettled`.
 - **Unbounded fan-out** — `Promise.all` / `asyncio.gather` over a caller-sized or otherwise unbounded array fires everything at once. Cap it with the project's existing concurrency helper or a batched loop. A fixed handful of independent calls needs no limit.
 - **No-op updates** — State/store updates inside loops or event handlers that fire unconditionally. Add change-detection so downstream consumers aren't notified when nothing changed.
 - **TOCTOU** — Pre-checking file/resource existence before operating on it. Operate directly and handle the error instead.
-- **Overly broad operations** — Reading entire files when only a portion is needed, loading all items when filtering for one.
+- **Overly broad operations** — Reading entire files when only a portion is needed, loading all items when filtering for one, selecting every column (`SELECT *`, a full ORM row) or requesting a full upstream payload when the code reads a few fields.
 
 #### mcp-ts-core-specific
 
@@ -99,7 +102,7 @@ When done, report:
 
 - **Gate** — the result before and after the pass, so a failure that predates the cleanup isn't pinned on it.
 - **Fixed** — what changed, grouped by category.
-- **Skipped** — findings deliberately left, each with its reason.
+- **Skipped** — findings deliberately left, each with its reason, plus any other writer's changes excluded from scope.
 - **Defects and recommendations** — correctness bugs and out-of-scope changes, each with `file:line`.
 
 When nothing earned a change, say the code was already clean.
@@ -118,6 +121,9 @@ The tables below cover TypeScript and Python. For other languages, apply analogo
 | `arr.filter(x => x !== null) as T[]` | `arr.filter(x => x != null)` | TS 5.5+ infers the type predicate — no cast; on older TS use an explicit `(x): x is T` predicate |
 | `import { foo } from './index.js'` (a module importing through its own barrel) | `import { foo } from './foo.js'` | Inside a module, import siblings directly — routing through the module's own barrel invites import cycles. Across modules, the public barrel is the right entry point; leave those imports alone |
 | `import { readFile } from 'fs/promises'` | `import { readFile } from 'node:fs/promises'` | `node:` protocol — unambiguous, lint-enforced in Biome |
+| `Object.prototype.hasOwnProperty.call(obj, key)` | `Object.hasOwn(obj, key)` | ES2022 — also correct on null-prototype objects |
+| `path.dirname(fileURLToPath(import.meta.url))` | `import.meta.dirname` | Node 20.11+ and Bun — also `import.meta.filename` |
+| `s.replace(/foo/g, 'bar')` with a literal pattern | `s.replaceAll('foo', 'bar')` | ES2021 — no regex escaping for a literal match |
 | `async function f() { const a = await x(); const b = await y(); }` | `const [a, b] = await Promise.all([x(), y()])` | Parallel when independent |
 | `value \|\| fallback` | `value ?? fallback` | `\|\|` also swallows `0`, `''`, and `false` — use `??` unless every falsy value really should take the fallback |
 | `obj.x !== undefined ? obj.x : fallback` | `obj.x ?? fallback` | Nullish coalescing — equivalent only when `null` should take the fallback too |

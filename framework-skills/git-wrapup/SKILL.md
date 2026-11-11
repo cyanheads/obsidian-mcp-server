@@ -4,7 +4,7 @@ description: >
   Land working-tree changes as logical commits — the work grouped by concern, topped by a release commit (version bump, changelog, regenerated artifacts). The work commits land first, then the version bump, verification, and the release commit on top. Stops at "committed locally on main" — or, when the project releases through a release PR, at "release branch pushed, PR open". No tag, no push to main, no publish: the release-and-publish skill merges, tags, and ships from here.
 metadata:
   author: cyanheads
-  version: "1.32"
+  version: "1.33"
   audience: external
   type: workflow
 ---
@@ -204,6 +204,8 @@ security: false    # true ONLY for a security fix in this server's own source �
 
 **Tone:** Terse, fact-dense. Bullet = **symbol** + what changed + at most one consumer-facing caveat; one sentence by default, two max — a bullet past ~40 words or three sentences is wrong. The linked issue carries the why and the commit diff the how; the changelog names what changed and what a consumer does about it. Cut: history/justification narration, design-rationale defense, "X unchanged" clauses (short parenthetical only where a misread is likely), edge-case inventories. **Verified ≠ included** — the diff-is-source-of-truth rule bounds the truth of what you write, never the amount. Model length on `changelog/template.md`'s authoring guide, never on the previous entry (entries modeled on entries compound). `agent-notes` carries adoption steps only, never a second rendering of the body; a consequence shared by many bullets is stated once, not per bullet. Full conventions: the authoring guide in `changelog/template.md`.
 
+**Credit outside reporters.** For every issue or PR the release addresses, read who opened it: `gh api repos/<OWNER>/<REPO>/issues/<N> --jq '[.user.login, .user.type, .author_association] | @tsv'` (the endpoint serves PRs too). An `author_association` of `NONE`, `CONTRIBUTOR`, `FIRST_TIMER`, or `FIRST_TIME_CONTRIBUTOR` on a `User` (not a `Bot`) is an outside reporter: that bullet ends with a thanks, in the form `changelog/template.md` gives under "Outside reporters". `OWNER`, `MEMBER`, and `COLLABORATOR` get none. The PR body's `## Changes` and the tag carry the same credit (`release-and-publish` step 4).
+
 **Re-read the entry file after writing it, then sweep for harness markup:** `grep -rlF -e '</invoke>' -e '</content>' changelog/` must print nothing. The sweep covers the whole directory: a hit in an older entry gets deleted and ships in this release's commit, never left as out of scope, because every entry ships in every tarball. A stray closing tag at EOF is the authoring tool's own syntax bleeding into the file; `changelog/` is in `package.json` `files`, so it ships inside the npm tarball, and `changelog:check` cannot catch it — the rollup drops the trailing line, so a clean `CHANGELOG.md` proves nothing about the entry.
 
 ### 6. Regenerate derived artifacts
@@ -329,7 +331,7 @@ If the working tree holds anything beyond those exclusions, or the release commi
 - [ ] Version bumped in every declaring file (`package.json`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, root `plugin.json`, README badge, `CLAUDE.md`/`AGENTS.md` if they pin a version) — `devcheck` flags a mismatch in `server.json` (both levels), `manifest.json`, the plugin manifests, and the README badge; step 4's straggler grep covers the docs and Dockerfile labels
 - [ ] GH issues addressed by this work commented with what landed (if working from GH issues)
 - [ ] Docs updated for any new or changed features
-- [ ] Changelog authored at `changelog/<major.minor>.x/<version>.md`
+- [ ] Changelog authored at `changelog/<major.minor>.x/<version>.md`; every issue or PR from an outside reporter thanked on its bullet
 - [ ] `CHANGELOG.md` rollup regenerated (`bun run changelog:build`)
 - [ ] `docs/tree.md` regenerated after changelog creation (`bun run tree`)
 - [ ] `bun run devcheck` passes

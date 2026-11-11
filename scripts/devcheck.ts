@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 
 /**
  * @fileoverview Comprehensive development script for quality and security checks.
@@ -35,8 +36,13 @@ import { fileURLToPath } from 'node:url';
  * // Enable optional checks (e.g., tests are off by default):
  * // bun run scripts/devcheck.ts --test
  *
- * // Run only a single check (case-insensitive partial match):
- * // bun run scripts/devcheck.ts --only lint
+ * // Run only the checks a name matches (case-insensitive partial match;
+ * // `typescript` runs both TypeScript checks, and an optional check runs too):
+ * // bun run scripts/devcheck.ts --only biome
+ *
+ * Arguments are validated before any check runs: an unknown flag, a
+ * positional, or an `--only` value that is missing, empty, or matches no
+ * check exits 1.
  */
 /** Track active child processes for clean shutdown on SIGINT/SIGTERM. */
 const activeProcs = new Set<ChildProcess>();
@@ -94,7 +100,10 @@ interface AppContext {
   flags: Set<string>;
   isHuskyHook: boolean;
   noFix: boolean;
-  /** When set, only run checks whose name matches (case-insensitive). */
+  /**
+   * When set, run only the checks whose name contains it (case-insensitive),
+   * optional checks included. Validated to match at least one check.
+   */
   onlyCheck: string | null;
   rootDir: string;
   /** List of staged files, populated only if isHuskyHook is true. */
@@ -1242,93 +1251,108 @@ const UI = {
 // Core Logic
 // =============================================================================
 
-/** Global flags handled separately from per-check skip flags. */
-const GLOBAL_FLAGS = new Set(['--no-fix', '--husky-hook', '--fast', '--help', '--only']);
-
-/** All recognized flags (global + per-check skip flags). */
-const KNOWN_FLAGS = new Set([...GLOBAL_FLAGS, ...ALL_CHECKS.map((check) => check.flag)]);
-
-function printHelp() {
-  UI.log(`${c.bold('Usage:')} bun run devcheck [options]\n`);
-  UI.log(`${c.bold('Options:')}`);
-  UI.log(`  ${c.yellow('--no-fix')}        Run in read-only mode (no auto-fixing)`);
-  UI.log(`  ${c.yellow('--fast')}          Skip slow network-bound checks (audit, outdated)`);
-  UI.log(
-    `  ${c.yellow('--husky-hook')}    Run in pre-commit hook mode (analyze staged files only)`,
+function printHelp(log: (line: string) => void = UI.log) {
+  log(`${c.bold('Usage:')} bun run devcheck [options]\n`);
+  log(`${c.bold('Options:')}`);
+  log(`  ${c.yellow('--no-fix')}        Run in read-only mode (no auto-fixing)`);
+  log(`  ${c.yellow('--fast')}          Skip slow network-bound checks (audit, outdated)`);
+  log(`  ${c.yellow('--husky-hook')}    Run in pre-commit hook mode (analyze staged files only)`);
+  log(
+    `  ${c.yellow('--only <name>')}   Run only the checks the name matches (case-insensitive partial match), optional checks included`,
   );
-  UI.log(
-    `  ${c.yellow('--only <name>')}   Run only the named check (case-insensitive partial match)`,
-  );
-  UI.log(`  ${c.yellow('--help')}          Show this help message\n`);
+  log(`  ${c.yellow('--help')}          Show this help message\n`);
   const optOutChecks = ALL_CHECKS.filter((ch) => !ch.requiresFlag);
   const optInChecks = ALL_CHECKS.filter((ch) => ch.requiresFlag);
 
-  UI.log(`${c.bold('Skip individual checks:')}`);
+  log(`${c.bold('Skip individual checks:')}`);
   for (const check of optOutChecks) {
     const slow = check.slowCheck ? c.dim(' (slow)') : '';
-    UI.log(`  ${c.yellow(check.flag.padEnd(18))} Skip ${check.name}${slow}`);
+    log(`  ${c.yellow(check.flag.padEnd(18))} Skip ${check.name}${slow}`);
   }
 
   if (optInChecks.length > 0) {
-    UI.log(`\n${c.bold('Enable optional checks (off by default):')}`);
+    log(`\n${c.bold('Enable optional checks (off by default):')}`);
     for (const check of optInChecks) {
-      UI.log(`  ${c.yellow(check.flag.padEnd(18))} Run ${check.name}`);
+      log(`  ${c.yellow(check.flag.padEnd(18))} Run ${check.name}`);
     }
   }
-  UI.log('');
+  log('');
 }
 
+/** Whether `--only <name>` selects `check`: a case-insensitive substring of its name. */
+function matchesOnly(check: Check, only: string): boolean {
+  return check.name.toLowerCase().includes(only.toLowerCase());
+}
+
+/** Prints a usage error to stderr, followed by `detail` (usage by default), and exits 1. */
+function exitWithUsageError(
+  message: string,
+  detail: () => void = () => printHelp(console.error),
+): never {
+  console.error(c.red(`Error: ${message}\n`));
+  detail();
+  process.exit(1);
+}
+
+/** A check's flag as a `parseArgs` option name: `--no-lint` → `no-lint`. */
+const optionName = (check: Check): string => check.flag.slice('--'.length);
+
 /**
- * Parses CLI arguments and determines the initial run context.
- * Returns null if the program should exit (e.g., --help).
+ * The run context from the command line, validated before any check runs.
+ * `--help` prints usage and exits 0; an unknown flag, a positional, or an
+ * `--only` value that is missing, empty, or matches no check exits 1.
  */
-function parseArgs(args: string[]): Omit<AppContext, 'rootDir' | 'stagedFiles'> | null {
-  const flags = new Set<string>();
-  let noFix = false;
-  let isHuskyHook = false;
-  let fastMode = false;
-  let onlyCheck: string | null = null;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] as string;
-    if (arg === '--help') {
-      printHelp();
-      return null;
-    } else if (arg === '--no-fix') {
-      noFix = true;
-    } else if (arg === '--husky-hook') {
-      isHuskyHook = true;
-    } else if (arg === '--fast') {
-      fastMode = true;
-    } else if (arg === '--only') {
-      const next = args[i + 1];
-      if (!next || next.startsWith('--')) {
-        UI.log(c.red('Error: --only requires a check name argument.'));
-        UI.log(c.dim(`  Example: ${c.bold('bun run devcheck --only lint')}\n`));
-        UI.log(c.dim('Available checks:'));
-        for (const check of ALL_CHECKS) {
-          UI.log(c.dim(`  - ${check.name}`));
-        }
-        return null;
-      }
-      onlyCheck = next;
-      i++; // consume the next arg
-    } else if (arg.startsWith('--')) {
-      if (!KNOWN_FLAGS.has(arg)) {
-        UI.log(c.yellow(`Warning: Unknown flag '${arg}' — ignoring.`));
-        UI.log(c.dim(`  Run with ${c.bold('--help')} to see available options.\n`));
-      } else {
-        flags.add(arg);
-      }
-    }
+function readCliOptions(args: string[]): Omit<AppContext, 'rootDir' | 'stagedFiles'> {
+  let values: Record<string, string | boolean | undefined>;
+  try {
+    ({ values } = parseArgs({
+      args,
+      options: {
+        'no-fix': { type: 'boolean' },
+        fast: { type: 'boolean' },
+        'husky-hook': { type: 'boolean' },
+        help: { type: 'boolean' },
+        only: { type: 'string' },
+        ...Object.fromEntries(
+          ALL_CHECKS.map((check) => [optionName(check), { type: 'boolean' } as const]),
+        ),
+      },
+      strict: true,
+      allowPositionals: false,
+    }));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (!code?.startsWith('ERR_PARSE_ARGS_')) throw error;
+    exitWithUsageError((error as Error).message);
   }
 
-  // Also detect if running inside environment set by Husky
-  if (process.env.HUSKY === '1' || process.env.GIT_PARAMS) {
-    isHuskyHook = true;
+  if (values.help) {
+    printHelp();
+    process.exit(0);
   }
 
-  return { flags, noFix, isHuskyHook, fastMode, onlyCheck };
+  const only = typeof values.only === 'string' ? values.only : null;
+  if (only !== null && only.trim() === '') {
+    exitWithUsageError('--only needs a check name.');
+  }
+  if (only !== null && !ALL_CHECKS.some((check) => matchesOnly(check, only))) {
+    exitWithUsageError(`--only "${only}" matches no check.`, () => {
+      console.error('Available checks:');
+      for (const check of ALL_CHECKS) console.error(`  - ${check.name}`);
+    });
+  }
+
+  return {
+    flags: new Set(
+      ALL_CHECKS.filter((check) => values[optionName(check)] === true).map((check) => check.flag),
+    ),
+    noFix: values['no-fix'] === true,
+    // Also detect if running inside environment set by Husky
+    isHuskyHook:
+      values['husky-hook'] === true || process.env.HUSKY === '1' || !!process.env.GIT_PARAMS,
+    fastMode: values.fast === true,
+    onlyCheck: only,
+  };
 }
 
 async function runCheck(check: Check, ctx: AppContext): Promise<CommandResult> {
@@ -1345,18 +1369,15 @@ async function runCheck(check: Check, ctx: AppContext): Promise<CommandResult> {
   };
 
   // 1. Check for --only filter
-  if (ctx.onlyCheck) {
-    const match = check.name.toLowerCase().includes(ctx.onlyCheck.toLowerCase());
-    if (!match) {
-      log.push(UI.formatSkipped(check, `--only ${ctx.onlyCheck}`));
-      return { ...baseResult, skipped: true };
-    }
+  if (ctx.onlyCheck !== null && !matchesOnly(check, ctx.onlyCheck)) {
+    log.push(UI.formatSkipped(check, `--only ${ctx.onlyCheck}`));
+    return { ...baseResult, skipped: true };
   }
 
   // 2. Handle opt-in vs opt-out flags
   if (check.requiresFlag) {
-    // Opt-in: only runs when flag is explicitly provided
-    if (!ctx.flags.has(check.flag)) {
+    // Opt-in: runs when its flag is provided or `--only` selected it
+    if (!ctx.flags.has(check.flag) && ctx.onlyCheck === null) {
       log.push(UI.formatSkipped(check, `Pass ${check.flag} to enable`));
       return { ...baseResult, skipped: true };
     }
@@ -1507,12 +1528,9 @@ async function handleHuskyReStaging(ctx: AppContext): Promise<boolean> {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  if (!args) process.exit(0);
-
   // Initialize context
   const appContext: AppContext = {
-    ...args,
+    ...readCliOptions(process.argv.slice(2)),
     rootDir: ROOT_DIR,
     stagedFiles: [],
   };

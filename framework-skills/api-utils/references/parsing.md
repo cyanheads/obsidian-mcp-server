@@ -1,7 +1,7 @@
 # Parsing Utilities (`utils/parsing`)
 
 ```ts
-import { yamlParser, xmlParser, csvParser, jsonParser, pdfParser, dateParser, frontmatterParser } from '@cyanheads/mcp-ts-core/utils';
+import { yamlParser, xmlParser, csvParser, jsonParser, pdfParser, htmlExtractor, dateParser, frontmatterParser } from '@cyanheads/mcp-ts-core/utils';
 ```
 
 All parsers are **Tier 3** — lazy-load their peer dependency on first call. All methods are **async** unless noted.
@@ -9,7 +9,7 @@ All parsers are **Tier 3** — lazy-load their peer dependency on first call. Al
 **Common behavior:**
 
 - Singleton instances exported alongside classes
-- `<think>...</think>` blocks at the start of input are automatically stripped and logged at `debug` level (except `dateParser` and `pdfParser`)
+- `<think>...</think>` blocks at the start of input are automatically stripped and logged at `debug` level (except `dateParser`, `pdfParser`, and `htmlExtractor`)
 - Every `context?` parameter is optional (synthetic context created if omitted) and accepts the handler `Context` as well as a `RequestContext` bag
 - Input budgets are opt-in: a parser is unbounded unless the caller passes `maxBytes`, which then rejects an over-budget input with `ValidationError` (`reason: 'parser_input_too_large'`). `DEFAULT_TEXT_PARSER_MAX_BYTES` (1 MiB) and `DEFAULT_BINARY_PARSER_MAX_BYTES` (25 MiB) are exported as starting points, not applied defaults
 - Errors throw `McpError` — never return error values. The message is `<summary>: <library message>`, so it carries the underlying parser's diagnostic; `data` carries only `{ reason }` (`csvParser` adds Papa's `errors` list and a content sample), and the input sample and stack stay on `cause`. Input that is empty after `<think>` stripping and trimming rejects with `ValidationError` (`reason: 'parser_input_empty'`). The `context` you pass is for log correlation only — it never becomes error `data`, which reaches the client
@@ -127,7 +127,7 @@ const strict = await jsonParser.parse<Config>(jsonString, 0);
 | `extractText` | async | `(input, options?, context?) -> Promise<ExtractTextResult>` |
 | `saveDocument` | async | `(doc, context?) -> Promise<Uint8Array>` |
 
-`budget` is `ParserInputBudgetOptions` (`{ maxBytes?: number }`); on `mergePdfs` it bounds the inputs' combined size. `extractText`'s `input` is raw bytes (`Uint8Array | ArrayBuffer`, the `unpdf`-only path) or a loaded `PDFDocument`, which is serialized with `save()` first.
+`budget` is `ParserInputBudgetOptions` (`{ maxBytes?: number }`); on `mergePdfs` it bounds the inputs' combined size. `extractText`'s `input` is raw bytes (`Uint8Array | ArrayBuffer`, the `unpdf`-only path; a Node `Buffer` from `readFile` works) or a loaded `PDFDocument`, which is serialized with `save()` first. Bytes are read from a copy, so the same buffer can go to `loadDocument` or storage afterward.
 
 ### Option types
 
@@ -217,6 +217,50 @@ pdfParser.fillForm(doc, {
   fields: { name: 'Alice', approved: true, score: 95 },
   flatten: true,
 });
+```
+
+---
+
+## `htmlExtractor`
+
+**Peer deps:** `defuddle` + `linkedom` (`bun add defuddle linkedom`)
+
+| Method | Signature |
+|:-------|:----------|
+| `extract` | `(html, options?, context?) -> Promise<ExtractArticleResult>` |
+
+Extracts a page's main article content with Defuddle over a `linkedom` DOM, as Markdown (the default) or cleaned HTML, plus best-effort metadata. Only `content` is guaranteed; every other field is omitted when the page does not provide it.
+
+```ts
+interface ExtractArticleOptions {
+  format?: 'markdown' | 'html';  // default 'markdown'
+  url?: string;                  // the page's URL, for site-specific extractors and link resolution
+  contentSelector?: string;      // main-content element; auto-detection when it matches nothing
+  removeImages?: boolean;        // default false
+  language?: string;             // preferred BCP 47 language
+  useAsync?: boolean;            // default false; true lets Defuddle fetch from third-party APIs when the HTML holds no content
+  debug?: boolean;               // Defuddle debug logging, no div flattening
+  maxBytes?: number;             // UTF-8 input budget; unbounded when omitted
+}
+
+interface ExtractArticleResult {
+  content: string;
+  title?: string; author?: string; description?: string; published?: string;
+  site?: string; domain?: string; favicon?: string; image?: string; language?: string;
+  metaTags?: Record<string, string>;  // keyed by name, else property
+  schemaOrgData?: unknown;
+  wordCount?: number;
+  parseTime?: number;                 // ms Defuddle spent
+}
+```
+
+**Cost.** The extraction runs synchronously on the calling thread and blocks the event loop until it finishes. It takes no abort signal and cannot be interrupted once it starts, and `maxBytes` bounds the input's size, not the CPU time spent on it. A server that extracts untrusted HTML should run `htmlExtractor` off its serving thread, in a worker thread or a child process, so one request cannot stall every other request on the process.
+
+HTML that is empty after trimming rejects with `ValidationError` (`parser_input_empty`), a Defuddle failure with `ValidationError` (`html_extract_failed`), and a missing peer with `ConfigurationError`.
+
+```ts
+const article = await htmlExtractor.extract(html, { url: 'https://example.com/post' });
+// article.content is Markdown; title, author, and the other fields are set when the page has them
 ```
 
 ---

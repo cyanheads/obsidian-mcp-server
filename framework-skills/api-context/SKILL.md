@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.clientCapabilities`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.15"
+  version: "2.19"
   audience: external
   type: reference
 ---
@@ -245,6 +245,7 @@ if (page.cursor) { /* more pages available */ }
 - Keys are tenant-prefixed internally; handlers never need to namespace manually.
 - **Values round-trip as JSON** on every provider, `in-memory` included: reads return the JSON form, so a `Date` comes back as its ISO string, a `Map` as `{}`, and a returned object never shares identity with the one written. Validate reads with a schema that matches the stored form (`z.string()` for a date, not `z.date()`). A `bigint`, a cyclic reference, or a top-level `undefined`, function, or symbol throws `McpError(SerializationError)` before anything is written; in `setMany`, one such value rejects the whole batch.
 - **Key charset:** `^[a-zA-Z0-9_.\-/]+$`, 1024 chars max, no `..`. Slashes are the namespace separator — a colon (`item:123`) throws `McpError(ValidationError)` on every call. The rule covers `list` prefixes and every key in a batch operation. `createMockContext().state` enforces it identically, so an illegal key fails in the test rather than in a deployment.
+- **Backend key limits:** some providers fit fewer keys than the charset allows, and reject the rest with `McpError(ValidationError)` before any backend call — in a batch, before the first one. `cloudflare-kv` and `cloudflare-r2` store each value under `<tenantId>:<key>`, capped at 512 and 1,024 bytes, so a two-character tenant fits keys of 509 and 1,021 characters and a 128-character tenant 383 and 895; the error names the longest key the tenant can use. `filesystem` stores each `/`-separated segment as a file or directory name of at most 255 bytes, in which an uppercase letter or `.` takes three, so a last segment holds at most 250 lowercase or 83 uppercase characters.
 - **Workers persistence:** The `in-memory` provider loses data on cold starts. Use `cloudflare-kv`, `cloudflare-r2`, or `cloudflare-d1` for durable storage in Workers.
 
 ---
@@ -260,7 +261,7 @@ Optional HTTP session identifier. Surfaced when the request carries a durable se
 | stdio (any auth) | `undefined` |
 | HTTP, `MCP_SESSION_MODE=stateless` | `undefined` (default) — see [opt-in](#stateless-mode-opt-in) |
 | HTTP, `stateful` / `auto`, `MCP_AUTH_MODE=none` | session token; possession = access (no identity binding) |
-| HTTP, `stateful` / `auto`, `MCP_AUTH_MODE=jwt` / `oauth` | session token, identity-bound — hijack mismatches are rejected by `SessionStore.isValidForIdentity` *before* the handler runs |
+| HTTP, `stateful` / `auto`, `MCP_AUTH_MODE=jwt` / `oauth` | session token, identity-bound — a request whose tenant ID, client ID, and subject do not each equal the session's (an absent field and `""` count as the same value) is answered 404 by `SessionStore.isValidForIdentity` *before* the handler runs |
 
 In `stateful` / `auto` mode, the value mirrors the `Mcp-Session-Id` HTTP header (or a server-minted token for new sessions). Each subsequent request from the same client reuses it; reconnects after disconnect bind to the same session as long as it hasn't expired.
 
@@ -334,7 +335,7 @@ Always present, on every transport and both protocol eras. A handler that needs 
 
 One code path serves both eras. A 2026-07-28 client fulfils the embedded requests and retries the call; for a 2025-era session the SDK's legacy shim fulfils the same returns by issuing real `elicitation/create` / `sampling/createMessage` / `roots/list` round trips and re-entering the handler itself.
 
-**A 2025-era client that declared no matching capability is refused, with an envelope.** URL-mode elicitation needs `elicitation.url`, form-mode needs `elicitation.form` (a bare `elicitation: {}` satisfies it), sampling needs `sampling` — `sampling.tools` when the request carries `tools` / `toolChoice` — and `roots/list` needs `roots`. `ctx.requestInput` runs the check on the result it builds and throws the refusal instead of the signal, so it never reaches the wire and the handler fails where it stands — the execution measurement records it as a failed call, its `Error in tool:<name>` record logs at `notice` with no stack (a property of the client's connection, not a server fault), and each family's usual error path shapes it. A tool gets `isError` with `structuredContent.error.code = -32600` (`InvalidRequest`), `data.reason: 'client_capability_missing'`, and a `data.recovery.hint` naming the capability; a resource read gets the same code, reason, and hint through the JSON-RPC error envelope. A prompt's `generate` receives no `ctx`, so it has no `ctx.requestInput` to gate. The check runs on every round, so a handler that elicits first and samples second is gated again on the second. A return carrying only `requestState` asks the client for nothing and is never gated. On the 2026-07-28 leg the SDK owns this check and a violation surfaces as its `MissingRequiredClientCapabilityError` (`-32021`) instead.
+**A 2025-era client that declared no matching capability is refused, with an envelope.** URL-mode elicitation needs `elicitation.url`, form-mode needs `elicitation.form` (a bare `elicitation: {}` satisfies it), sampling needs `sampling` — `sampling.tools` when the request carries `tools` / `toolChoice` — and `roots/list` needs `roots`. `ctx.requestInput` runs the check on the result it builds and throws the refusal instead of the signal, so it never reaches the wire and the handler fails where it stands — the execution measurement records it as a failed call, its `Error in tool:<name>` or `Error in resource:<name>` record logs at `notice` with no stack (a property of the client's connection, not a server fault), and each family's usual error path shapes it. A tool gets `isError` with `structuredContent.error.code = -32600` (`InvalidRequest`), `data.reason: 'client_capability_missing'`, and a `data.recovery.hint` naming the capability; a resource read gets the same code, reason, and hint through the JSON-RPC error envelope. A prompt's `generate` receives no `ctx`, so it has no `ctx.requestInput` to gate. The check runs on every round, so a handler that elicits first and samples second is gated again on the second. A return carrying only `requestState` asks the client for nothing and is never gated. On the 2026-07-28 leg the SDK owns this check and a violation surfaces as its `MissingRequiredClientCapabilityError` (`-32021`) instead.
 
 **The refusal's hint ends at reconnecting** — ``Reconnect with a client that declares the `elicitation.form` capability.`` — and offers no other way to supply the answer, because a consent gate deliberately has no input field for it: the model would fill it in. A handler whose own arguments can stand in for the answer says so per call with the optional second argument, a sentence appended to the hint after a space:
 
@@ -647,7 +648,7 @@ for (const item of items) {
 
 ## `ctx.uri`
 
-Present only for resource handlers. The raw `URL` object for the matched resource URI.
+Present only for resource handlers. The `URL` the SDK parsed from the request URI and matched against the template, so a raw space or non-ASCII character in the request is already percent-encoded here (`myscheme://§ 1/data` reads as `myscheme://%C2%A7%201/data`). `createApp({ decodeResourceParams: true })` decodes `params` and never `ctx.uri`, which reads the same with the switch on or off.
 
 ```ts
 export const myResource = resource('myscheme://{itemId}/data', {
@@ -659,7 +660,7 @@ export const myResource = resource('myscheme://{itemId}/data', {
 });
 ```
 
-Prefer `params` (the extracted URI template variables) over parsing `ctx.uri` manually. `ctx.uri` is available when the raw URL string is needed.
+Prefer `params` (the extracted URI template variables) over parsing `ctx.uri` manually. `ctx.uri` is available when the raw URL string is needed. Each variable in `params` arrives percent-encoded unless the server sets `decodeResourceParams`. Turning that switch on and deleting the handler's own `decodeURIComponent` are one change, or the handler decodes twice. See `add-resource` § Percent-encoded template variables.
 
 ---
 
@@ -697,7 +698,7 @@ ctx.fail(
   reason: R,                         // union of declared reason strings
   message?: string,                  // defaults to the contract entry's `when` text
   data?: Record<string, unknown>,    // merged into err.data; cannot override `reason`
-  options?: { cause?: unknown },     // ES2022 cause chain
+  options?: ErrorFactoryOptions,     // { cause?, literals? }: ES2022 cause chain; literals render as code spans in content[]
 ): McpError
 ```
 
@@ -810,11 +811,14 @@ export const search = tool('search', {
 ctx.enrich(fields: Record<string, unknown>): void
 
 // Strict (HandlerContext<R, E> when the definition declares an enrichment block):
-ctx.enrich(fields: Partial<z.infer<ZodObject<E>>>): void
+// Takes each field's input side (z.input): a z.stringbool() field takes 'true'.
+ctx.enrich(fields: Partial<z.input<ZodObject<E>>>): void
 
 // Kind-tagged field-helpers (always present) — write a conventional key and tag
 // the content[] trailer rendering:
 ctx.enrich.notice(text: string): void      // writes `notice`         → blockquote
+                                            // last-wins: a later call replaces the text, so join
+                                            // a page's disclosures into one call
 ctx.enrich.total(count: number): void       // writes `totalCount`     → "N total"
 ctx.enrich.echo(query: string): void        // writes `effectiveQuery`  → "Query: …"
 ctx.enrich.delta({ field, before, after }): void  // writes `{before, after}` → "field: before → after"
@@ -830,9 +834,9 @@ ctx.enrich.truncated({ shown, cap, ceiling?, guidance? }): void
 | Aspect | Detail |
 |:-------|:-------|
 | Accumulation | Each call merges its fields onto the request; later calls override earlier keys. |
-| Both surfaces | Merged into `structuredContent` (validated against `output.extend(enrichment)`) and appended to `content[]` as a trailer — even when the tool defines no `format()`. |
+| Both surfaces | Merged into `structuredContent` (validated against the `enrichment` block and merged onto the parsed `output`) and appended to `content[]` as a trailer — even when the tool defines no `format()`. |
 | Domain payload untouched | `content[]` renders the handler's return via `format()` (or the JSON default); enrichment is a separate trailer, never double-rendered. The handler return must NOT carry enrichment fields. |
-| Required-field guard | A required enrichment field never populated fails the effective-output parse — the bug surfaces loudly rather than dropping silently. |
+| Required-field guard | A required enrichment field never populated fails the enrichment parse — the bug surfaces loudly rather than dropping silently. |
 | No block | Calling `ctx.enrich` on a tool that declared no `enrichment` is a silent no-op (values are stripped by the parse) — the price of service-layer callability. |
 | Service usage | Services accepting `ctx: Context` can call `ctx.enrich(...)`; the value reaches `structuredContent` exactly as if the handler had. |
 | `format-parity` | Enrichment lives outside `output`, so the `format-parity` lint never requires it in `format()`. |
@@ -847,7 +851,7 @@ For tools that cap a list (i.e. have a `limit`/`per_page`/`page_size`/`max_resul
 ```ts
 enrichment: {
   // Optional: truncated() writes these only when the cap is hit, and a required
-  // enrichment field left unset fails the effective-output parse on every complete result.
+  // enrichment field left unset fails the enrichment parse on every complete result.
   truncated: z.boolean().optional().describe('True when the list was capped.'),
   shown: z.number().optional().describe('Number of items returned.'),
   cap: z.number().optional().describe('The limit that was applied.'),

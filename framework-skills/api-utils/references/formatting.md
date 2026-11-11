@@ -23,7 +23,7 @@ markdownLink('[docs]', 'https://example.com/q?x=<1>'); // '[\\[docs\\]](<https:/
 markdownLink('run', 'javascript:alert(1)'); // 'run (javascript:alert(1))'
 ```
 
-Escape what goes *inside* authored Markdown, not the Markdown itself: `` `**Title:** ${escapeMarkdownInline(item.title)}` ``. The output is inline text, and reads back exactly in these slots: a value of one line in a paragraph, after a label, and in an ATX heading, list item, block quote, or GFM table cell; a value with line breaks in a paragraph, list item, or block quote, which it stays inside through hard breaks. Keep a multi-line value out of headings and table cells — a heading or table row ends at the line break. Two encoded values placed edge to edge can still form syntax neither holds (`<` then `b>`); separate them with authored text. Never defang (`https[:]//`, HTML entities) — that changes the data on one surface.
+Escape what goes *inside* authored Markdown, not the Markdown itself: `` `**Title:** ${escapeMarkdownInline(item.title)}` ``. The output is inline text, and reads back exactly in these slots: a value of one line in a paragraph, after a label, and in an ATX heading, list item, block quote, or GFM table cell; a value with line breaks in a paragraph, list item, or block quote, which it stays inside through hard breaks. Keep a multi-line value out of headings and table cells — a heading or table row ends at the line break. Two encoded values placed edge to edge can still form syntax neither holds (`<` then `b>`); separate them with authored text. Authored text can complete syntax too: a `;` after a value ending `&amp` forms an entity, so escape a joined list as one string, `escapeMarkdownInline(values.join('; '))`. Never defang (`https[:]//`, HTML entities) — that changes the data on one surface.
 
 ---
 
@@ -43,7 +43,7 @@ Escape what goes *inside* authored Markdown, not the Markdown itself: `` `**Titl
 | `keyValuePlain` | `(key, value) -> this` | `key: value` (no bold) |
 | `list` | `(items, ordered?) -> this` | `ordered` defaults to `false`; empty arrays silently ignored |
 | `codeBlock` | `(content, language?) -> this` | Fenced block; `language` defaults to `''`. The fence outgrows the longest backtick run in `content`, so a payload the tool did not author (upstream text, a file excerpt) cannot break out of the block; content is emitted byte-for-byte |
-| `inlineCode` | `(code) -> this` | Code span; no trailing newline. The backtick delimiter outgrows the longest backtick run in `code`, space-padded when a backtick touches either end or the value both begins and ends with a space, so a value the tool did not author reads back byte-identical as one span and cannot break out into live markdown. A value with no backtick that does not both begin and end with a space renders as `` `code` `` |
+| `inlineCode` | `(code) -> this` | Code span; no trailing newline. The backtick delimiter outgrows the longest backtick run in `code`, space-padded when a backtick touches either end or the value both begins and ends with a space, so a value the tool did not author reads back byte-identical as one span and cannot break out into live markdown. A value with no backtick that does not both begin and end with a space renders as `` `code` ``. An empty value appends nothing, which reads back as the empty value — CommonMark has no empty span; a whitespace-only value is a span like any other |
 | `paragraph` | `(text) -> this` | Text + `\n\n` |
 | `blockquote` | `(text) -> this` | Each line prefixed with `>` + space |
 | `hr` | `() -> this` | `---` |

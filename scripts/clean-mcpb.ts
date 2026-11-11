@@ -9,8 +9,10 @@
  *   2. Exact-name strip of four entry classes nested under `node_modules/`,
  *      which root-anchored `.mcpbignore` patterns cannot reach by design
  *      (issues #146/#207):
- *        a. Dependency-shipped agent docs — `framework-skills/`, `skills/`,
- *           `.claude/`, `.agents/` trees and stray `SKILL.md` files (issue #230).
+ *        a. Dependency-shipped agent docs at an installed package's root —
+ *           `framework-skills/`, `skills/`, `.claude/`, `.agents/` trees and
+ *           `AGENTS.md`/`CLAUDE.md` — plus `SKILL.md` files anywhere (issues
+ *           #230/#794/#820). A `skills/` below a package root is runtime code.
  *        b. Platform-specific native bindings, which would otherwise lock the
  *           bundle to the build host's platform and push it past the 25 MB cap
  *           registries enforce (issue #274).
@@ -18,9 +20,8 @@
  *           intermediate trees, and link inputs, which record the packing
  *           host's paths; compiled `*.node` addons stay (issue #783).
  *        d. Build-only package files — mcp-ts-core's `changelog/`, `config/`,
- *           `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, `biome.json`,
- *           and `vitest.config.base.mjs`, and better-sqlite3's `deps/` and
- *           `src/` C sources (issue #791).
+ *           `scripts/`, `templates/`, `biome.json`, and `vitest.config.base.mjs`,
+ *           and better-sqlite3's `deps/` and `src/` C sources (issue #791).
  *   3. Re-list and assert zero matching entries remain.
  *
  * Entry names are passed to `zip -d` with `-nw` (no-wildcard) so they match
@@ -38,10 +39,15 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * Agent-doc entries under `node_modules/` that must not ship in a bundle:
- * agent trees at an installed package's root (scoped and nested packages
- * included) and `SKILL.md` files. A `skills/` deeper inside a package is
- * runtime code — the MCP SDK's `dist/ext/skills/` is imported at startup.
+ * Agent-doc entries under `node_modules/` that must not ship in a bundle: a
+ * `framework-skills/`, `skills/`, `.claude/`, or `.agents/` directory, or an
+ * `AGENTS.md` or `CLAUDE.md` file, at the root of an installed package
+ * (`node_modules/<name>/` or `node_modules/@scope/<name>/`, at any nesting
+ * depth), and a `SKILL.md` anywhere under `node_modules/`. Matching is
+ * positional: a `skills/` directory below a package root is runtime code (the
+ * MCP SDK's `dist/ext/skills/`, which the framework imports at startup), and a
+ * segment starting with `@` always opens a two-segment scoped name, so
+ * `@scope/skills` is a package, not a skills directory.
  * KEEP IN SYNC with `AGENT_DOC_ENTRY` in `scripts/lint-packaging.ts`
  * (post-bundle content check) — edit both literals together. The assertion that
  * they match lives in the mcp-ts-core repository's own test suite; `tests/` is
@@ -49,7 +55,7 @@ import { fileURLToPath } from 'node:url';
  * these scripts were copied into.
  */
 export const AGENT_DOC_ENTRY =
-  /^node_modules\/(?:.*\/node_modules\/)?(?:@[^/]+\/)?[^/]+\/(?:(?:framework-skills|skills|\.claude|\.agents)\/|(?:.*\/)?SKILL\.md$)/;
+  /^node_modules\/(?:.+\/node_modules\/)?(?:@[^/]+\/[^/]+|[^@/][^/]*)\/(?:(?:framework-skills|skills|\.claude|\.agents)\/|(?:AGENTS|CLAUDE)\.md$)|^node_modules\/.*\/SKILL\.md$/;
 
 /**
  * Platform-specific native binding packages, which must not ship in a bundle.
@@ -99,16 +105,17 @@ export const NODE_GYP_OUTPUT =
  * not part of the published package, so nothing enforces the pair in a server
  * these scripts were copied into.
  *
- * mcp-ts-core publishes `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`,
- * and `AGENTS.md` for `init`, maintenance, and agents editing a server's
- * source, and the config bases a server's own tooling extends — `biome.json`,
- * `vitest.config.base.mjs`, and `config/tsconfig.base.json`, the only file in
- * `config/`. The running server reads none of them (its `framework-skills/`
- * is an agent-doc entry). better-sqlite3 publishes its `deps/` and `src/` C
- * sources for a source build; at runtime it loads a prebuilt or compiled addon.
+ * mcp-ts-core publishes `changelog/`, `scripts/`, and `templates/` for `init`
+ * and maintenance, and the config bases a server's own tooling extends —
+ * `biome.json`, `vitest.config.base.mjs`, and `config/tsconfig.base.json`, the
+ * only file in `config/`. The running server reads none of them (its
+ * `framework-skills/`, `CLAUDE.md`, and `AGENTS.md` are agent-doc entries, so
+ * no entry falls in both classes). better-sqlite3 publishes its `deps/` and
+ * `src/` C sources for a source build; at runtime it loads a prebuilt or
+ * compiled addon.
  */
 export const BUILD_ONLY_ENTRY =
-  /^node_modules\/(?:.+\/node_modules\/)?(?:@cyanheads\/mcp-ts-core\/(?:(?:changelog|config|scripts|templates)\/|(?:(?:CLAUDE|AGENTS)\.md|biome\.json|vitest\.config\.base\.mjs)$)|better-sqlite3\/(?:deps|src)\/)/;
+  /^node_modules\/(?:.+\/node_modules\/)?(?:@cyanheads\/mcp-ts-core\/(?:(?:changelog|config|scripts|templates)\/|(?:biome\.json|vitest\.config\.base\.mjs)$)|better-sqlite3\/(?:deps|src)\/)/;
 
 /** Filter a bundle entry listing down to the agent-doc entries to strip. */
 export function filterAgentDocEntries(entries: string[]): string[] {

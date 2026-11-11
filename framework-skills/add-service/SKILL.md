@@ -4,7 +4,7 @@ description: >
   Scaffold a new service integration. Use when the user asks to add a service, integrate an external API, or create a reusable domain module with its own initialization and state.
 metadata:
   author: cyanheads
-  version: "1.12"
+  version: "1.13"
   audience: external
   type: reference
 ---
@@ -130,13 +130,13 @@ async fetchItem(id: string, ctx: Context): Promise<Item> {
 ### Key principles
 
 1. **Calibrate backoff to the upstream.** 200–500ms for ephemeral failures, 1–2s for rate-limited APIs, 2–5s for service degradation. The default `baseDelayMs: 1000` suits most APIs.
-2. **Check HTTP status before parsing.** `fetchWithTimeout` already throws on non-OK responses with granular status mapping (401→`Unauthorized`, 403→`Forbidden`, 404→`NotFound`, 408/425→`Timeout`, 422→`ValidationError`, 429→`RateLimited`, 5xx→`ServiceUnavailable`/`InternalError`) — this prevents feeding HTML error pages into XML/JSON parsers.
+2. **Check HTTP status before parsing.** `fetchWithTimeout` already throws on non-OK responses with granular status mapping (400→`InvalidParams`, 401→`Unauthorized`, 403→`Forbidden`, 404→`NotFound`, 408/425/504→`Timeout`, 422→`ValidationError`, 429→`RateLimited`, other 5xx→`ServiceUnavailable`) — this prevents feeding HTML error pages into XML/JSON parsers.
 3. **Classify parse failures by content.** If the upstream returns HTTP 200 with an HTML error page, detect it and throw `ServiceUnavailable` (transient) instead of `SerializationError` (non-transient). **Exception — deterministic HTTP 200 errors fail fast, not transient.** Some upstreams return HTTP 200 with a structured error body for failures that will *never* succeed regardless of how many times you retry: a query too expensive for the server's budget, an oversized result set, or a malformed request the server rejects. Retrying these wastes upstream capacity and delays the client. Declare them in the contract with `retryable: false` (or pass `{ retryable: false }` in `data` at the throw site) — `withRetry`'s default predicate reads `error.data.retryable === false` and fails immediately, even for `Timeout`/`ServiceUnavailable` codes. `ctx.fail` auto-populates `data.retryable` from the contract entry, so declaring it once in `errors[]` is enough.
 4. **Exhausted retries say so.** `withRetry` automatically enriches the final error with attempt count — callers know retries were already attempted.
 
 ### When you need finer-grained HTTP error classification
 
-`fetchWithTimeout` already maps status codes to appropriate error codes (see key principle 2 above). Use `httpErrorFromResponse` instead when you need `Retry-After` header capture, request body passthrough in error data, or custom `service`/`data` fields on the thrown error:
+`fetchWithTimeout` already maps status codes to appropriate error codes (see key principle 2 above) and captures `Retry-After` (`error.data.retryAfter`) and the response body (`error.data.body`). Use `httpErrorFromResponse` instead when you hold the `Response` yourself — a raw `fetch`, or an HTTP client `fetchWithTimeout` does not wrap — or need what its options add: a `service` name in the message, extra `data` fields, a per-status `codeOverride`, or the full URL under `includeUrl`:
 
 ```typescript
 import { httpErrorFromResponse, withRetry } from '@cyanheads/mcp-ts-core/utils';
@@ -159,6 +159,8 @@ async fetchItem(id: string, ctx: Context): Promise<Item> {
 ```
 
 `httpErrorFromResponse` maps the full status table (401/403/408/422/429/5xx) to the appropriate `JsonRpcErrorCode`, captures the response body (truncated), and forwards `Retry-After` headers into `error.data.retryAfter`. The codes it produces line up with `withRetry`'s transient-code set, so retryable HTTP failures (429, 503, 504) are retried automatically and non-retryable ones (401, 404, 422) fail immediately.
+
+Both helpers keep the captured body on the server: `error.data.body` and `error.data.responseBody` read it and the failure log records it, but the client receives it only when the call opts in — `exposeBody: true` on `httpErrorFromResponse`, `exposeErrorBody: true` on `fetchWithTimeout`. Opt in for an upstream whose error text is safe and useful to the agent, such as a validation message naming the rejected parameter; otherwise tell the agent what to do next with a recovery hint.
 
 ### Response handler pattern
 

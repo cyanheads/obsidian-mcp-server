@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.23"
+  version: "1.25"
   audience: external
   type: reference
 ---
@@ -102,7 +102,7 @@ Why this family exists: different MCP clients forward different surfaces of a to
 
 Two consequences worth knowing when writing a `format()`:
 
-- **The string sentinel is alphanumeric so escaping does not break it.** `content[]` is markdown carrying upstream text you do not control, so escaping at the render boundary is correct — and it leaves an alphanumeric probe byte-identical. Escape a character only where it would change rendering, per CommonMark/GFM rules: intraword `_` (`snake_case`), a `<` that cannot open a tag (`p<0.05`), and a `[` that cannot form a link all stay raw. Agents read `content[]` as text and copy spans out of it, so a blanket escape set turns into backslash noise in their output. Markdown escaping, HTML escaping, and URL encoding all pass. You never need to carve an exception into your escape set to keep `lint:mcp` green.
+- **The string sentinel is alphanumeric so escaping does not break it.** `content[]` is markdown carrying upstream text you do not control, so escaping at the render boundary is correct — and it leaves an alphanumeric probe byte-identical. Escape a character only where it would change rendering, per CommonMark/GFM rules: intraword `_` (`snake_case`) and a `<` that cannot open a tag (`p<0.05`) stay raw. Agents read `content[]` as text and copy spans out of it, so a blanket escape set turns into backslash noise in their output. Markdown escaping, HTML escaping, and URL encoding all pass. You never need to carve an exception into your escape set to keep `lint:mcp` green.
 - **Schema-dictated values must render as their own token.** A required `kind: z.enum(['full', 'outline'])` that `format()` never renders is not satisfied by the letters `full` appearing inside a longer word elsewhere in the output — `case_name_full`, `inactive`, `listing`. Render the field, or render its key name as a label.
 
 ### format-parity
@@ -991,7 +991,7 @@ Fires when an enrichment field's value isn't a Zod schema.
 
 **Severity:** error
 
-Fires when an enrichment key matches an `output` key. The effective output schema is `output.extend(enrichment)`, so a collision silently overrides the `output` field.
+Fires when an enrichment key matches an `output` key. `structuredContent` merges enrichment over `output`, so a collision silently overrides the `output` field.
 
 **Fix:** rename one side so enrichment keys are disjoint from output keys.
 

@@ -32,16 +32,20 @@ import { fileURLToPath } from 'node:url';
 // Import validateDefinitions — resolve from package or local source
 // ---------------------------------------------------------------------------
 
-let validateDefinitions: typeof import('../src/linter/validate.js').validateDefinitions;
+let validateDefinitions: typeof import('@cyanheads/mcp-ts-core/linter').validateDefinitions;
 
 try {
   // Consumer path: installed as a dependency
   const pkg = await import('@cyanheads/mcp-ts-core/linter');
   validateDefinitions = pkg.validateDefinitions;
 } catch {
-  // Framework path: running from the framework repo itself
-  const local = await import('../src/linter/validate.js');
-  validateDefinitions = local.validateDefinitions;
+  // Framework path: the framework repo itself before a build. The source path
+  // exists only there, so it is built at run time — a literal specifier would put
+  // it into the typecheck of every server this script is copied into.
+  const source = new URL('../src/linter/validate.js', import.meta.url).href;
+  validateDefinitions = (
+    (await import(source)) as { validateDefinitions: typeof validateDefinitions }
+  ).validateDefinitions;
 }
 
 // ---------------------------------------------------------------------------

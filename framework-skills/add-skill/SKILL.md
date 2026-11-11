@@ -4,7 +4,7 @@ description: >
   Author a skill the server publishes to the agents that use it — a root `skills/<name>/SKILL.md` per the Agent Skills specification, validated by `lint:packaging`, discovered by plugin hosts, shipped in the MCPB bundle, and optionally served over MCP. Use when the user asks to add, write, or publish a skill, agent guide, or usage guide for the server's tools, or when the design calls for one.
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
   audience: external
   type: reference
 ---
@@ -47,9 +47,11 @@ Sections in this order, so skills read alike across servers. Omit a section with
 | Workflows | Only when the surface branches, has modes, or registers the dataframe tools (paragraph below) |
 | References | `references/*.md` links, only for long syntax or vocabulary material |
 
-A server that registers the DataCanvas tools ships this paragraph under Workflows, prefix substituted:
+A server that registers the DataCanvas tools ships a canvas paragraph under Workflows: where a staged result's handle appears in the response, the describe-then-query order, how to stage more beside it, and when the tables expire. The handle varies by server — a `canvas_id` the caller passes back, or a `df_<id>` table name in a response field — so write the paragraph from the server's own output schema and tool descriptions. For a server whose responses carry a `canvas_id`, prefix substituted:
 
 > Results too large to return inline are staged as a DataCanvas table, and the response carries a `canvas_id`. Call `<prefix>_dataframe_describe` with it for the staged table and column names before writing SQL, then `<prefix>_dataframe_query` with a read-only query. Pass the same `canvas_id` back to stage further results beside the first; the tables expire with the canvas.
+
+A server that names the table instead says which field carries the `df_<id>` name, and, where every caller shares one canvas with listing off, that the caller keeps each name it is given.
 
 ## Layout and frontmatter
 
@@ -95,7 +97,7 @@ Runs when root `skills/` exists (inside `devcheck`) and skips cleanly when it do
 | Channel | What carries the tree |
 |:--------|:----------------------|
 | Plugin install (Claude Code, Codex) | The repository tree — root `skills/` is scanned by default |
-| MCPB bundle | Bundle root `skills/`, which the Claude Directory surfaces as Skills; `.mcpbignore` must not exclude it, and `clean-mcpb` strips `skills/` only under `node_modules/` |
+| MCPB bundle | Bundle root `skills/`, which the Claude Directory surfaces as Skills; `.mcpbignore` must not exclude it, and `clean-mcpb` strips `skills/` only at a package root under `node_modules/` |
 | npm (`npx`) | `package.json` `files` lists `"skills/"` (scaffold default) |
 | Docker | The template Dockerfile creates `skills/` in the build stage and copies it into the production stage |
 
@@ -109,7 +111,7 @@ Plugin delivery reaches only agents that install the server as a plugin. To reac
 await createApp({ tools: allToolDefinitions, skills: 'skills' });
 ```
 
-A relative path resolves against the application root, so a stdio server launched from a client's project serves its own tree. The folder is read once at startup: a missing or unreadable folder fails startup with a `ConfigurationError` naming the resolved path; a skill the SDK rejects is skipped with a `Skill problem in <path>` warning and the rest are served. Opting in advertises `io.modelcontextprotocol/skills` under `capabilities.extensions`, adds `skills/list`, `skills/get`, and `resources/directory/read`, lists each `SKILL.md` in `resources/list`, and registers the `skill://{+path}` template, on both protocol eras; `tools/list` and `instructions` are unchanged. The `Core services constructed` log record's `skills` field lists the names served. Skill resources are served by the SDK: transport auth applies, per-definition `auth` scopes do not.
+A relative path resolves against the application root, so a stdio server serves its own tree from any working directory, the root of the project that installed it included. The folder is read once at startup: a missing or unreadable folder fails startup with a `ConfigurationError` naming the resolved path; a skill the SDK rejects is skipped with a `Skill problem in <path>` warning and the rest are served. Opting in advertises `io.modelcontextprotocol/skills` under `capabilities.extensions`, adds `skills/list`, `skills/get`, and `resources/directory/read`, lists each `SKILL.md` in `resources/list`, and registers the `skill://{+path}` template, on both protocol eras; `tools/list` and `instructions` are unchanged. The `Core services constructed` log record's `skills` field lists the names served. Skill resources are served by the SDK: transport auth applies, per-definition `auth` scopes do not.
 
 A Worker has no filesystem, so `createWorkerHandler` takes the files as a record built from Wrangler `Text` module imports — the record form and the Wrangler rule are in `api-workers`.
 

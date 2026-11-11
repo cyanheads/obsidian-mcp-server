@@ -4,7 +4,7 @@ description: >
   Pick and run a multi-phase workflow that chains foundational task skills (`git-wrapup`, `release-and-publish`, `maintenance`, `field-test`, `setup`, etc.) end-to-end. Routes user intent to a workflow file under `workflows/` — greenfield builds, maintenance + release, field-test + fix, or known-work + release. Single source for the universal rules (no commits without authorization, no destructive git, no marketing language), the orchestrator posture (own the goal, ground sub-agents in primary sources, verify against the goal), and the sub-agent strategy (orient block, parallel fanout, isolation, normalization) that apply across every workflow. Sub-agents are an optional capability — workflows run linearly when fanout isn't available.
 metadata:
   author: cyanheads
-  version: "1.14"
+  version: "1.15"
   audience: external
   type: workflow
 ---
@@ -201,7 +201,7 @@ Sub-agent self-reports describe intent, not always reality. After every phase th
 - **GitHub** — `gh repo view --json visibility`, `gh release view v<VERSION>`, `gh issue list`, `gh issue view <N> --comments` to confirm the fix comment landed
 - **npm / registries** — `npm view <pkg>@<version>`, registry-specific checks
 - **Build state** — re-run `bun run devcheck` if the previous phase was supposed to land green
-- **Quality** — tag annotation is a headline digest covering every change (flat bullets — notable ones named, minor ones in one grouped bullet; no changelog section headers, deps ≤1 line, no gates line), subject omits the version number, no marketing adjectives, issue backlinks where applicable, changelog link as final line (plus ` · release PR #<N>` in release PR mode)
+- **Quality** — tag annotation is a headline digest covering every change (flat bullets — notable ones named, minor ones in one grouped bullet; no changelog section headers, deps ≤1 line, no gates line), subject omits the version number, no marketing adjectives, issue backlinks where applicable with outside reporters thanked, changelog link as final line (plus ` · release PR #<N>` in release PR mode)
 
 If verification disagrees with the sub-agent's report, that's the signal to re-spawn with the actual state and the unmet goal in the prompt — not to trust the report. The goal hasn't changed; only the path needs to.
 

@@ -116,14 +116,21 @@ security: false
   resolves to whatever real item already owns 42, and timeline previews pull
   in that unrelated item's metadata.
 
+  Outside reporters: when the issue or PR came from outside the project
+  (`git-wrapup` step 5 says how to tell), thank its author in the same
+  parenthetical, profile linked by full URL for the same reason:
+
+      ([#38](https://github.com/cyanheads/mcp-ts-core/issues/38), thanks [@octocat](https://github.com/octocat)!)
+
   TAG ANNOTATIONS — the annotated tag body renders as the GitHub Release body
   via `gh release create --notes-from-tag`. It is a condensed digest of this
   entry, never a copy, and its format is owned by the `release-and-publish`
   skill (step 4, "Create the annotated tag"): a short subject line without the
   version, flat headline bullets — no Keep-a-Changelog section headers, no
-  gates line — at most one deps line, issue backlinks, and the changelog link
-  last. In release-PR mode the `git-wrapup` skill authors those bullets as the
-  PR body's `## Changes` and the tag copies them.
+  gates line — at most one deps line, issue backlinks with any outside-reporter
+  thanks, and the changelog link last. In release-PR mode the `git-wrapup`
+  skill authors those bullets as the PR body's `## Changes` and the tag copies
+  them.
 -->
 
 ## Added

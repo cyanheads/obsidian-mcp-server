@@ -4,7 +4,7 @@ description: >
   Ship a release end-to-end across every registry the project targets (npm, MCP Registry, GitHub Releases for `.mcpb` bundles, GHCR). Runs the final verification gate, fast-forwards `main` when the release rode a release PR, creates the annotated tag on the commit `main` now points at, pushes commits and tags, then publishes to each applicable destination. Assumes git wrapup (version bumps, changelog, commit stack — and in release PR mode, the pushed branch and open PR) is already complete — this skill is the post-wrapup merge + tag + publish workflow. Retries transient network failures on publish steps; halts with a partial-state report when retries are exhausted or the failure is terminal.
 metadata:
   author: cyanheads
-  version: "2.25"
+  version: "2.26"
   audience: external
   type: workflow
 ---
@@ -49,6 +49,7 @@ These mean the step already succeeded on a prior run — treat as success and pr
 - MCP Registry (`mcp-publisher publish`): `cannot publish duplicate version`
 - Tag (`git tag -a`): `already exists` with the tag pointing at HEAD — a prior run of this skill already created it; a tag pointing elsewhere is a conflict, not a success (see step 4)
 - GitHub Release (`gh release create`): `release already exists` — fall back to `gh release upload --clobber` (see step 8)
+- GHCR (step 9): Docker has no duplicate-version error, so check before building — `docker manifest inspect ghcr.io/<OWNER>/<REPO>:<VERSION>` exiting 0 means a prior run pushed this version; skip the build. A rebuild re-pushes `:<VERSION>` and `:latest` under a new digest for a version already published.
 
 ### Halt fallback
 
@@ -151,6 +152,7 @@ Format — a **headline digest**, never a section-by-section changelog mirror:
 - No marketing adjectives
 - Length is earned — a subject + two bullets + changelog link is a fine tag for a small patch
 - **Issue backlinks:** when changes address GitHub issues, include `(#N)` references in the relevant bullets — same as the changelog entry. The backlinks render as clickable links in the GitHub Release body.
+- **Outside-reporter credit:** a bullet whose issue or PR came from outside the project carries the thanks the changelog entry gives it, as `(#N, thanks @user!)` — a bare `@user`, which the GitHub Release links. A credited change always gets its own bullet, never a place in the grouped minor line.
 - **Changelog link (final line):** end the tag body with a Markdown link to this version's changelog file, so the GitHub Release offers a one-click jump to the full entry — `[CHANGELOG v<version>](https://github.com/<OWNER>/<REPO>/blob/main/changelog/<major.minor>.x/<version>.md)`. Derive `<OWNER>/<REPO>` from the origin remote; the path mirrors the changelog file (e.g. `changelog/0.10.x/0.10.12.md`). Keep the blank line above it so it renders as its own paragraph. In release PR mode the same line continues with ` · release PR #<N>` — the release then links both the depth (changelog) and the audit trail (PR).
 
 Verify before moving on:
@@ -267,7 +269,7 @@ Halt on any non-zero exit not handled by the script's built-in fallback.
 
 ### 9. Publish Docker image
 
-Only if `Dockerfile` exists at the repo root (otherwise skip).
+Only if `Dockerfile` exists at the repo root (otherwise skip). On re-invocation, skip it when the version tag is already published (Failure Protocol § Never retry on idempotent-success signals).
 
 Derive:
 
@@ -319,7 +321,7 @@ If any check fails, halt and report which destination is unreachable. A successf
 - [ ] `bun run test:all` (or `test`) passes
 - [ ] `bun run test:package` passes, when the project defines it
 - [ ] Release PR mode: `git merge --ff-only` onto `main` locally — never the GitHub merge button; HEAD equals the PR's `headRefOid` afterwards
-- [ ] Annotated tag `v<version>` created on HEAD (`main`'s tip in release PR mode) with `--cleanup=whitespace`, a subject written fresh at ~60 characters without the version, headline-digest body, changelog link as final line, signature parses; `bun run release:github -- --check` passes before the push
+- [ ] Annotated tag `v<version>` created on HEAD (`main`'s tip in release PR mode) with `--cleanup=whitespace`, a subject written fresh at ~60 characters without the version, headline-digest body with outside reporters thanked, changelog link as final line, signature parses; `bun run release:github -- --check` passes before the push
 - [ ] `main` pushed, then the tag pushed
 - [ ] Release PR mode: PR reports `MERGED`; remote and local `release/<version>` deleted
 - [ ] `bun publish --access public` succeeds

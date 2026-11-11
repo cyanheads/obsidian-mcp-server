@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.28"
+  version: "1.32"
   audience: external
   type: reference
 ---
@@ -30,7 +30,7 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 3. `sessionMode.default` passed to `createApp()` — a default, so it sits *below* the env var it seeds, unlike the identity options above
 4. `package.json` fields
 
-**Where `package.json` is read from:** the application root — the nearest `package.json` at or above the process entry module (`process.argv[1]`), which is the served package on every launch path (`npx`, `.mcpb`, a client config naming `dist/index.js`), none of which run from the package root. The launching client's working directory is never the anchor: a stdio client starts the server from wherever it happens to be, so reading identity from there makes a server report a foreign project's name and version. When the entry module is a tool installed under a `node_modules` tree and the process runs from the directory owning that tree — a test runner is the usual case — the nearest manifest at or above the working directory wins instead. That also covers a workspace monorepo, where the runner is hoisted to the repo root while the process runs from a package directory: an owner that is a strict *ancestor* of the working directory qualifies only when it declares a workspace (a `workspaces` field in its manifest, or a `pnpm-workspace.yaml` beside it), which is what keeps a cache prefix or a plain project root — equally ancestors of a working directory inside them — from overriding an installed package's own identity. The owner is the outermost `node_modules` boundary, so a transitively-installed runner and a pnpm isolated layout resolve the same way. With no manifest reachable, the framework's own identity is the fallback.
+**Where `package.json` is read from:** the application root — the nearest `package.json` at or above the process entry module (`process.argv[1]`), which is the served package on every launch path (`npx`, `.mcpb`, a client config naming `dist/index.js`), none of which run from the package root. The launching client's working directory is never the anchor: a stdio client starts the server from wherever it happens to be, so reading identity from there makes a server report a foreign project's name and version. When the entry module is a tool installed under a `node_modules` tree and the process runs from the directory owning that tree — a test runner is the usual case — the nearest manifest at or above the working directory wins instead. That also covers a workspace monorepo, where the runner is hoisted to the repo root while the process runs from a package directory: an owner that is a strict *ancestor* of the working directory qualifies only when it declares a workspace (a `workspaces` field in its manifest, or a `pnpm-workspace.yaml` beside it), which is what keeps a cache prefix or a plain project root — equally ancestors of a working directory inside them — from overriding an installed package's own identity. The owner is the outermost `node_modules` boundary, so a transitively-installed runner and a pnpm isolated layout resolve the same way. An entry package declaring `@cyanheads/mcp-ts-core` in `dependencies`, `optionalDependencies`, or `peerDependencies` is never such a tool: it runs the framework, so it is the application, and an installed server launched from the installing project's root or one of its workspace packages (`node_modules/.bin/<server>`, a local `npx <server>`) keeps its own identity, `skills` folder, and log directory. A package listing the framework only under `devDependencies` still counts as a tool. With no manifest reachable, the framework's own name and version are the fallback; the description is never taken from the framework, so a server with none of its own advertises none.
 
 ---
 
@@ -40,7 +40,7 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variable
 |:--------|:-----------------|:--------|:------|
 | `MCP_SERVER_NAME` | `mcpServerName` | `package.json` `name` | Overrides package name |
 | `MCP_SERVER_VERSION` | `mcpServerVersion` | `package.json` `version` | Overrides package version |
-| `MCP_SERVER_DESCRIPTION` | `mcpServerDescription` | `package.json` `description` | Optional; `createApp({ description })` wins when set |
+| `MCP_SERVER_DESCRIPTION` | `mcpServerDescription` | `package.json` `description` | Optional; `createApp({ description })` wins when set. The resolved value reaches `initialize` `serverInfo` and every manifest surface (server card, `GET` on the endpoint, landing page) alike; with no source, none of them carries a description |
 | `PACKAGE_NAME` | `pkg.name` | `package.json` `name` | Rarely needed |
 | `PACKAGE_VERSION` | `pkg.version` | `package.json` `version` | Rarely needed |
 
@@ -85,7 +85,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 - **`default`** applies only when `MCP_SESSION_MODE` carries no meaningful value. An empty string and a whole-value unsubstituted `${…}` placeholder both read as unset on the config path, so both fall through to the option rather than to the schema default (`auto`). An explicit `MCP_SESSION_MODE` always wins.
 - **`require: 'stateful'`** fails startup with a `ConfigurationError` naming the conflicting env value when the resolved HTTP mode is `stateless`, before any service is constructed. Declare it when a handler gates a destructive action behind `ctx.requestInput` / `inputRequired.elicit` — see the `MCP_SESSION_MODE` row for why that combination is unusable for 2025-era clients. There is no `require: 'stateless'`; nothing needs statelessness to work.
 - The advertised `transport.sessionMode` follows automatically — `resolveSessionMode` is the single resolution the manifest, the session store, and the `ctx.sessionId` gate all read — and still never publishes `auto`.
-- Cloudflare Workers are outside this contract: `MCP_SESSION_MODE` is not in `CORE_ENV_BINDINGS`, so a `[vars]` entry reaches `process.env` only through `extraEnvBindings`.
+- Cloudflare Workers are outside this contract: `MCP_SESSION_MODE` is not in `CORE_ENV_BINDINGS`, so on a Worker whose `process.env` is not populated from its bindings, a `[vars]` entry reaches `process.env` only through `extraEnvBindings`.
 
 ---
 
@@ -107,7 +107,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `MCP_TRANSPORT_TYPE` | `mcpTransportType` | `stdio` | `stdio` \| `http` |
 | `MCP_HTTP_PORT` | `mcpHttpPort` | `3010` | Port for HTTP transport; integer, 0–65535 |
 | `MCP_HTTP_HOST` | `mcpHttpHost` | `127.0.0.1` | Bind address |
-| `MCP_HTTP_ENDPOINT_PATH` | `mcpHttpEndpointPath` | `/mcp` | HTTP endpoint path |
+| `MCP_HTTP_ENDPOINT_PATH` | `mcpHttpEndpointPath` | `/mcp` | HTTP endpoint path — the one the route serves and every advertised URL carries (server card, protected-resource metadata, landing page, `robots.txt`). Normalized at startup: trimmed, a missing leading `/` added, dot segments removed, and the escapes the router decodes anyway decoded (`/a%7Eb` → `/a~b`); a trailing slash and an escaped `%` (`%25`, which the router never decodes) are kept. A URL (`//host/mcp`, `https://…` — the origin belongs in `MCP_PUBLIC_URL`), a query or fragment, whitespace, a control character, a backslash, a malformed `%` escape, or route syntax (`*`, `{`, `}`, a segment starting with `:`) fails startup with a `ConfigurationError` naming the variable |
 | `MCP_HTTP_MAX_BODY_BYTES` | `mcpHttpMaxBodyBytes` | `1048576` (1 MiB) | Integer. Max **inbound** JSON-RPC request body; oversized requests get `413` before per-request allocation. Does **not** cap upstream data staged into a canvas or response sizes. `0` disables (defer to runtime/proxy). The only body limit in force — the SDK's own 4 MiB read cap never engages, so a value above 4 MiB holds as set. |
 | `MCP_HTTP_MAX_PORT_RETRIES` | `mcpHttpMaxPortRetries` | `15` | Integer ≥ 0. Rungs of the port ladder walked when a bind collides; each rung tries `port + 1`. See [Port binding](#port-binding) |
 | `MCP_HTTP_PORT_RETRY_DELAY_MS` | `mcpHttpPortRetryDelayMs` | `50` | Delay between port retries; integer ms, 0–2147483647 |
@@ -118,7 +118,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `MCP_HTTP_RESUMABILITY_TTL_MS` | `mcpHttpResumabilityTtlMs` | `300000` | 5 min; how long a retained event stays replayable |
 | `MCP_ALLOWED_ORIGINS` | `mcpAllowedOrigins` | — | Comma-separated list of browser origins the MCP endpoint accepts; others get `403`. Omitted, CORS is wildcard but only loopback origins pass; `*` accepts any origin (disables DNS-rebinding protection). An accepted origin's preflight also allows `Mcp-Method`, `Mcp-Name`, `Last-Event-ID`, and each tool's `Mcp-Param-<Name>` — see `api-auth` |
 | `MCP_SERVER_RESOURCE_IDENTIFIER` | `mcpServerResourceIdentifier` | — | RFC 8707 resource indicator URL |
-| `MCP_PUBLIC_URL` | `mcpPublicUrl` | — | Public-facing origin for reverse proxies (Cloudflare Tunnel, nginx, ALB) so emitted URLs carry the correct scheme |
+| `MCP_PUBLIC_URL` | `mcpPublicUrl` | — | Public-facing base URL for reverse proxies (Cloudflare Tunnel, nginx, ALB) so emitted URLs carry the correct scheme: an `http` or `https` scheme, a host, an optional port, and an optional path prefix (`https://example.com/mcp-proxy`); a trailing slash is dropped. The server card, the protected-resource metadata, the 401 challenge, and the landing page all render its serialized form (host punycoded, path percent-encoded). A query or fragment (empty included), user info, or another scheme fails startup with a `ConfigurationError` naming the variable; the message never repeats the value |
 | `MCP_HEARTBEAT_INTERVAL_MS` | `mcpHeartbeatIntervalMs` | `0` (disabled) | Heartbeat ping interval; integer ms, 0–2147483647; 0 disables |
 | `MCP_HEARTBEAT_MISS_THRESHOLD` | `mcpHeartbeatMissThreshold` | `3` | Integer ≥ 1. Missed heartbeats before session is considered stale |
 | `MCP_GC_PRESSURE_INTERVAL_MS` | `mcpGcPressureIntervalMs` | `0` (disabled) | Bun-only opt-in forced GC loop for HTTP deployments with heap growth; integer ms, 0–2147483647; 0 disables |
@@ -146,9 +146,9 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | `OAUTH_JWKS_URI` | `oauthJwksUri` | — | Override JWKS endpoint (otherwise derived from issuer) |
 | `OAUTH_JWKS_COOLDOWN_MS` | `oauthJwksCooldownMs` | `300000` | 5 min; min time between JWKS refetches; integer ms, 0–2147483647; 0 disables the cooldown |
 | `OAUTH_JWKS_TIMEOUT_MS` | `oauthJwksTimeoutMs` | `5000` | JWKS fetch timeout; integer ms, 1–2147483647 |
-| `DEV_MCP_AUTH_BYPASS` | `devMcpAuthBypass` | `false` | Skip auth in development; blocked in `production` |
-| `MCP_JWT_EXPECTED_ISSUER` | `mcpJwtExpectedIssuer` | — | Optional issuer validation for JWT mode |
-| `MCP_JWT_EXPECTED_AUDIENCE` | `mcpJwtExpectedAudience` | — | Optional audience validation for JWT mode |
+| `DEV_MCP_AUTH_BYPASS` | `devMcpAuthBypass` | `false` | Skip auth in development; blocked in `production`. On Cloudflare Workers, honored only when the environment is explicitly `development` or `testing`, declared by `ENVIRONMENT` or by a `NODE_ENV` that reaches `process.env`; with the flag on and neither set, startup fails with a `ConfigurationError` naming `DEV_MCP_AUTH_BYPASS` and `ENVIRONMENT`. For local development, set `ENVIRONMENT=development` beside the flag |
+| `MCP_JWT_EXPECTED_ISSUER` | `mcpJwtExpectedIssuer` | — | Optional issuer validation for JWT mode; with a shared HS256 key it does not stop another service's token on its own — pair it with `MCP_JWT_EXPECTED_AUDIENCE` |
+| `MCP_JWT_EXPECTED_AUDIENCE` | `mcpJwtExpectedAudience` | — | Optional audience validation for JWT mode. Unset, any token signed with `MCP_AUTH_SECRET_KEY` is accepted whatever its `aud`, and a strategy that loads a key logs a `WARNING` at startup naming this variable |
 | `DEV_MCP_CLIENT_ID` | `devMcpClientId` | — | Dev-only: override client ID |
 | `DEV_MCP_SCOPES` | `devMcpScopes` | — | Dev-only: comma-separated scope overrides |
 
@@ -159,7 +159,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | Env Var | `AppConfig` field | Default | Notes |
 |:--------|:-----------------|:--------|:------|
 | `STORAGE_PROVIDER_TYPE` | `storage.providerType` | `in-memory` | `in-memory` \| `filesystem` \| `supabase` \| `cloudflare-r2` \| `cloudflare-kv` \| `cloudflare-d1`; aliases: `mem`, `fs` |
-| `STORAGE_FILESYSTEM_PATH` | `storage.filesystemPath` | `./.storage` | Used only when `providerType` is `filesystem` |
+| `STORAGE_FILESYSTEM_PATH` | `storage.filesystemPath` | `./.storage` | Used only when `providerType` is `filesystem`. Data lives under `<path>/_v2/`: a directory per tenant, a `.json` file per key, every name percent-encoded, so each tenant ID has a directory of its own and each key a file of its own. A tenant ID whose encoding passes the 255-byte name limit is named `%%` and its SHA-256 instead. A path in the earlier layout (tenant directories at its top level) is copied into `_v2/` once, when the first provider over it is constructed, and left in place unread; a warning names it. An uppercase letter or `.` takes three bytes of the filesystem's 255-byte name limit, so a key's last `/`-separated segment holds at most 250 lowercase or 83 uppercase characters, and a longer one throws `ValidationError` before any filesystem call (a batch, before its first) |
 
 ---
 

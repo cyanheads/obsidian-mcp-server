@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.23"
+  version: "1.25"
   audience: external
   type: reference
 ---
@@ -27,7 +27,7 @@ OTel is **off by default**. `OTEL_ENABLED=true` alone does nothing — you also 
 
 | Env var | Default | Purpose |
 |:--------|:--------|:--------|
-| `OTEL_ENABLED` | `false` | Master switch. Must be `true` to start the SDK. |
+| `OTEL_ENABLED` | `false` | Master switch. Must be `true` to start the SDK. Leave it off in a process that registers its own OpenTelemetry SDK: the framework's cannot register over that one, and shutting the framework's down releases the API's global registrations, the host's included. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/HTTP base URL (e.g. `http://localhost:4318`). Traces go to `<base>/v1/traces`, metrics to `<base>/v1/metrics`; a path prefix is kept. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | OTLP/HTTP traces endpoint (e.g. `http://localhost:4318/v1/traces`). Overrides the base for traces; used as-is. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | OTLP/HTTP metrics endpoint (e.g. `http://localhost:4318/v1/metrics`). Overrides the base for metrics; used as-is. |
@@ -123,7 +123,7 @@ Trace context propagates across boundaries via W3C `traceparent` headers. See `a
 
 ## Metrics
 
-All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` where standard semconv applies). Lazy-initialized on first emission; tool, resource, prompt, `http.client.request.duration`, heartbeat, session, auth, rate-limit, and error metrics are eagerly created at startup so series exist from the first export cycle. LLM, speech, graph, and storage instruments are lazy-initialized on first use.
+All custom metrics are namespaced `mcp.*` (or `process.*` / `http.client.*` where standard semconv applies). Counters and histograms are created on first use, and the SDK exports a series only once a value has been recorded on it: a path a server never takes (a rate-limit rejection, a heartbeat failure, an LLM call) has no series, not a zero one. The observable gauges (`process.*`, `mcp.sessions.active`) report from the first export cycle.
 
 ### Tools, resources, prompts
 
@@ -213,18 +213,18 @@ A dashboard reading `error_category` alone therefore no longer needs to special-
 
 A definition may put `severity` on an `errors[]` entry — `debug`, `info`, `notice`, or `warning` — for an outcome it models rather than suffers. Two things move, and nothing else:
 
-- The `Error in tool:<name>` log record is emitted at that level instead of `error`, with the same message and structured fields.
+- The `Error in tool:<name>` or `Error in resource:<name>` log record is emitted at that level instead of `error`, with the same message and structured fields.
 - `mcp.errors.classified` gains `mcp.error.severity` on that record. It is set only when a severity resolved below `error`.
 
 The framework's own refusals resolve one without a declaration: an argument rejection (`invalid_arguments`), a `ctx.requestInput` the client connection cannot serve (`client_capability_missing`), and a missing-scope refusal from the inline `auth` check or `checkScopes` log at `notice`, so even a server that declares no severity sees `mcp.error.severity: "notice"` on those `mcp.errors.classified` increments — a bounded split a dashboard can use to separate caller rejections from faults. A missing auth context (`-32006`), a handler's own `forbidden()`, and an upstream 403 stay at `error`. An argument rejection and an inline missing-scope refusal open no execution span and reach no call counter either way; each still counts once on `mcp.tool.rejections`. None of the three refusal records carries a stack, whatever level an `errors[]` entry declares.
 
-The call still failed: the execution span keeps `SpanStatusCode.ERROR` and its recorded exception, `mcp.tool.calls` / `mcp.tool.duration` / `mcp.tool.errors` record the same values, and the completion log still reads `isSuccess: false`. Splitting those series on an authoring decision would redefine what an error rate means. Tools only — resources write no failure record of their own. A cancelled request keeps its own `info`, stack-free path whatever the contract declares. See `api-errors`.
+The call still failed: the execution span keeps `SpanStatusCode.ERROR` and its recorded exception, `mcp.tool.calls` / `mcp.tool.duration` / `mcp.tool.errors` record the same values, and the completion log still reads `isSuccess: false`. Splitting those series on an authoring decision would redefine what an error rate means. A failed resource read resolves its `Error in resource:<name>` record the same way, its span and `mcp.resource.*` series untouched; its `params` rejection and the not-found shape (`-32602` whose `data` is exactly `{ uri }`) log at `notice` with no stack too. A cancelled request keeps its own `info`, stack-free path whatever the contract declares. See `api-errors`.
 
 ### Errors, rate limits, HTTP client
 
 | Metric | Type | Unit | Attributes |
 |:-------|:-----|:-----|:-----------|
-| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `mcp.error.category` (`upstream`/`server`/`client`, as in [Error category](#error-category)), `operation`, and `mcp.error.severity` when a tool failure's level resolved below `error` — a declared severity, or `notice` for an `invalid_arguments` / `client_capability_missing` refusal or a missing-scope refusal |
+| `mcp.errors.classified` | counter | `{errors}` | `mcp.error.classified_code` (JSON-RPC code), `mcp.error.category` (`upstream`/`server`/`client`, as in [Error category](#error-category)), `operation` (`tool:<name>`, `resource:<name>`, …; every failed resource read counts once), and `mcp.error.severity` when a tool or resource failure's level resolved below `error` — a declared severity, or `notice` for an `invalid_arguments` / `client_capability_missing` refusal, a missing-scope refusal, or a resource `params` rejection or not-found shape |
 | `mcp.ratelimit.rejections` | counter | `{rejections}` | — (the rate-limit key is caller-supplied and typically per-client, so it would materialize an unbounded series in the meter; per-key attribution lives on the span instead) |
 | `http.client.request.duration` | histogram | `s` | `http.request.method`, `server.address`, `http.response.status_code` (when > 0; absent on network errors before a response is received) |
 
@@ -257,11 +257,11 @@ For domain logging inside handlers, use `ctx.log` (`debug`/`info`/`notice`/`warn
 | Resource | `Resource read finished.` | `durationMs`, `isSuccess`, `errorCode`, `outputBytes`, `uri` (the same capped URI as `mcp.resource.uri`), `mimeType` |
 | Prompt | `Prompt generation finished.` | `durationMs`, `isSuccess`, `errorCode`, `inputBytes` (0 for a prompt declaring no arguments), `outputBytes`, `messageCount` |
 
-Every record of a resource read — scope checks, the handler's `ctx.log` lines, the completion record — carries the read's URI as `resourceUri`, capped like `mcp.resource.uri`, plus `resourceUriLength` when the cap cut it. The handler's `ctx.uri` and the response keep the full URI.
+Every record of a resource read — scope checks, the handler's `ctx.log` lines, the completion record, the failure record — carries the read's URI as `resourceUri`, capped like `mcp.resource.uri`, plus `resourceUriLength` when the cap cut it. The handler's `ctx.uri` and the response keep the full URI.
 
 Every record of a tool call, resource read, or `prompts/get` carries the client's JSON-RPC id as `jsonRpcId`, string or number as sent; a string over 1,024 characters keeps at most its first 1,024, plus `jsonRpcIdLength` with the uncut length. `httpErrorHandler`'s records carry the request body's id the same way. It is a log field only — no span or metric attribute carries it — and never the call's `requestId`; the response `id` returns it unchanged. A 2025-era `ctx.requestInput` round trip, which the SDK serves by re-entering the handler, logs each entry under a new `requestId`; the shared `jsonRpcId` ties them together.
 
-A failed tool call or prompt adds exactly one `Error in tool:<name>` / `Error in prompt:<name>` record. Each call — prompts included — logs under its own generated `requestId`, and the client receives that value as `data.requestId` on the call's error envelope, so a reported failure resolves to its records.
+A failed tool call, resource read, or prompt adds exactly one `Error in tool:<name>` / `Error in resource:<name>` / `Error in prompt:<name>` record. Each call — resource reads and prompts included — logs under its own generated `requestId`, and the client receives that value as `data.requestId` on the call's error envelope (except a resource `-32602` whose `data` is exactly `{ uri }`), so a reported failure resolves to its records.
 
 An argument rejection's `Error in tool:<name>` record is bounded whatever the caller sends: every string it takes from the rejection — the message (so `msg` and `errorData.originalMessage`), `recovery.hint`, each issue's `message`, each `input` key — keeps at most its first 1,024 characters, as does every key, with every array kept to its first 10 entries, every object to its first 10 keys, and nesting to two levels of lists and objects below each issue. Each cut records the uncut length or count beside it: `originalMessageLength` for the message, `<field>Length` beside a cut string, `<field>KeyLength` beside a cut key, `<field>Count` beside a cut array or object, and `<field>Lengths` — the uncut length of each entry kept, an object's key count — beside an array one of whose entries was cut. A rejection within the caps carries no such field. The `-32602` result the caller receives is bounded before the record is written: its `data.issues` and `data.input` are the same projection, `data.issues` keeping at most 30 issues in all through every union's branches, and its message and hint render at most the first 10 issue lines of up to 1,025 characters each, so the record cuts only the message and the hint further.
 
@@ -305,6 +305,8 @@ export async function doWork() {
   }, { 'myservice.region': 'us-west' });
 }
 ```
+
+`createCounter`, `createUpDownCounter`, and `createHistogram` resolve their instrument from the running SDK each time they record, so module scope and `setup()` — both of which run before `createApp()` starts telemetry — are safe places to create them. `getMeter()` and `createObservableGauge()` bind when called: one called before the SDK starts stays a no-op, so call them after `createApp()` returns or lazily on first use.
 
 Span context propagates automatically — `withSpan` calls inside a `tool_execution:*` span appear as children. `runInContext(ctx, fn)` re-establishes the span `ctx` names as the active one across async boundaries (`setTimeout`, `queueMicrotask`), so spans opened inside `fn` parent to the request's span.
 

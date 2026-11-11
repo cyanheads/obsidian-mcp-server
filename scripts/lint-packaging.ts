@@ -31,11 +31,12 @@
  *   8. Post-bundle content: a built `.mcpb` under `dist/` must contain zero
  *      entries of the classes `scripts/clean-mcpb.ts` strips at bundle time,
  *      all nested under `node_modules/` where root-anchored `.mcpbignore`
- *      patterns cannot reach: dependency-shipped agent docs (`framework-skills/`,
- *      `skills/`, `.claude/`, `.agents/`, `SKILL.md`; issue #230), platform-specific
- *      native bindings (issue #274), node-gyp build output beside a `binding.gyp`
- *      (issue #783), and build-only package files — mcp-ts-core's `changelog/`,
- *      `config/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`,
+ *      patterns cannot reach: dependency-shipped agent docs at an installed
+ *      package's root (`framework-skills/`, `skills/`, `.claude/`, `.agents/`,
+ *      `AGENTS.md`, `CLAUDE.md`) and `SKILL.md` anywhere (issues #230/#794/#820),
+ *      platform-specific native bindings (issue #274), node-gyp build output
+ *      beside a `binding.gyp` (issue #783), and build-only package files —
+ *      mcp-ts-core's `changelog/`, `config/`, `scripts/`, `templates/`,
  *      `biome.json`, `vitest.config.base.mjs`, better-sqlite3's `deps/` and
  *      `src/` (issue #791). Each class reports its count and a sample.
  *   9. Identity: `name`/`title` literals in `createApp()` /
@@ -219,23 +220,28 @@ export const KNOWN_DEV_FILES = [
  * Critical runtime paths that must NOT be stripped by any `.mcpbignore` pattern.
  * Sampled from a current install, so an unanchored `dist/` or `build/` (or a
  * pattern over all of `node_modules/`) names the runtime code it would strip.
- * `@opentelemetry/semantic-conventions` loads from `build/src/` whenever the
- * server's optional OTel peers are installed.
+ * `@opentelemetry/semantic-conventions` loads whenever the server's optional
+ * OTel peers are installed, from `build/src/` through 1.43 and from `dist/`
+ * from 1.44, so both layouts are sampled.
  */
 export const CRITICAL_RUNTIME_PATHS = [
   'node_modules/@opentelemetry/api/dist/',
   'node_modules/@opentelemetry/semantic-conventions/build/src/',
+  'node_modules/@opentelemetry/semantic-conventions/dist/',
   'node_modules/@modelcontextprotocol/server/dist/',
   'node_modules/@cyanheads/mcp-ts-core/dist/',
   'dist/index.js',
 ];
 
 /**
- * Agent-doc entries under `node_modules/` that must not ship in a bundle.
- * `framework-skills/` is this framework's tree; `skills/` covers any other
- * dependency that vendors agent skills, at the package's root only — a
- * `skills/` deeper inside a package (the MCP SDK's `dist/ext/skills/`) is
- * runtime code.
+ * Agent-doc entries under `node_modules/` that must not ship in a bundle: a
+ * `framework-skills/` (this framework's tree), `skills/` (any other dependency
+ * that vendors agent skills), `.claude/`, or `.agents/` directory, or an
+ * `AGENTS.md` or `CLAUDE.md` file, at the root of an installed package
+ * (`node_modules/<name>/` or `node_modules/@scope/<name>/`, at any nesting
+ * depth), and a `SKILL.md` anywhere under `node_modules/`. A `skills/`
+ * directory below a package root is runtime code, and `@scope/skills` is a
+ * package, not a skills directory.
  * KEEP IN SYNC with `AGENT_DOC_ENTRY` in `scripts/clean-mcpb.ts` (the strip
  * step this check verifies) — edit both literals together. The assertion that
  * they match lives in the mcp-ts-core repository's own test suite; `tests/` is
@@ -243,7 +249,7 @@ export const CRITICAL_RUNTIME_PATHS = [
  * these scripts were copied into.
  */
 export const AGENT_DOC_ENTRY =
-  /^node_modules\/(?:.*\/node_modules\/)?(?:@[^/]+\/)?[^/]+\/(?:(?:framework-skills|skills|\.claude|\.agents)\/|(?:.*\/)?SKILL\.md$)/;
+  /^node_modules\/(?:.+\/node_modules\/)?(?:@[^/]+\/[^/]+|[^@/][^/]*)\/(?:(?:framework-skills|skills|\.claude|\.agents)\/|(?:AGENTS|CLAUDE)\.md$)|^node_modules\/.*\/SKILL\.md$/;
 
 /**
  * Platform-specific native binding packages that must not ship in a bundle.
@@ -272,9 +278,10 @@ export const NODE_GYP_OUTPUT =
 
 /**
  * Build-only package files that must not ship in a bundle: mcp-ts-core's
- * `changelog/`, `config/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`,
- * `biome.json`, and `vitest.config.base.mjs`, and better-sqlite3's `deps/` and
- * `src/` C sources.
+ * `changelog/`, `config/`, `scripts/`, `templates/`, `biome.json`, and
+ * `vitest.config.base.mjs`, and better-sqlite3's `deps/` and `src/` C sources.
+ * mcp-ts-core's `CLAUDE.md` and `AGENTS.md` are agent-doc entries, so no entry
+ * falls in both classes.
  * KEEP IN SYNC with `BUILD_ONLY_ENTRY` in `scripts/clean-mcpb.ts` (the strip
  * step this check verifies) — edit both literals together. The assertion that
  * they match lives in the mcp-ts-core repository's own test suite; `tests/` is
@@ -282,7 +289,7 @@ export const NODE_GYP_OUTPUT =
  * these scripts were copied into.
  */
 export const BUILD_ONLY_ENTRY =
-  /^node_modules\/(?:.+\/node_modules\/)?(?:@cyanheads\/mcp-ts-core\/(?:(?:changelog|config|scripts|templates)\/|(?:(?:CLAUDE|AGENTS)\.md|biome\.json|vitest\.config\.base\.mjs)$)|better-sqlite3\/(?:deps|src)\/)/;
+  /^node_modules\/(?:.+\/node_modules\/)?(?:@cyanheads\/mcp-ts-core\/(?:(?:changelog|config|scripts|templates)\/|(?:biome\.json|vitest\.config\.base\.mjs)$)|better-sqlite3\/(?:deps|src)\/)/;
 
 /**
  * The node-gyp output in a bundle listing: entries under `<dir>/build/`
@@ -451,8 +458,8 @@ export function checkBundleEntries(entries: string[], bundleLabel: string): stri
   if (agentDocs.length > 0) {
     errors.push(
       `${bundleLabel} contains ${agentDocs.length} node_modules agent-doc entries ` +
-        `(dependency-shipped framework-skills/, skills/, .claude/, .agents/, SKILL.md) — re-run the \`bundle\` ` +
-        `script (scripts/clean-mcpb.ts strips them):${sampleOf(agentDocs)}`,
+        `(framework-skills/, skills/, .claude/, .agents/, AGENTS.md, CLAUDE.md at a package root; SKILL.md) — ` +
+        `re-run the \`bundle\` script (scripts/clean-mcpb.ts strips them):${sampleOf(agentDocs)}`,
     );
   }
 
@@ -478,7 +485,7 @@ export function checkBundleEntries(entries: string[], bundleLabel: string): stri
   if (buildOnly.length > 0) {
     errors.push(
       `${bundleLabel} contains ${buildOnly.length} build-only package entries (mcp-ts-core's ` +
-        `changelog/, config/, scripts/, templates/, agent docs, and config bases; better-sqlite3's deps/ and src/) — ` +
+        `changelog/, config/, scripts/, templates/, and config bases; better-sqlite3's deps/ and src/) — ` +
         `re-run the \`bundle\` script (scripts/clean-mcpb.ts strips them):${sampleOf(buildOnly)}`,
     );
   }
@@ -1758,7 +1765,10 @@ export async function checkSkillsKeptInBundle(
 /**
  * `validateSkillTree` from the installed framework. In the framework's own
  * repository the package self-reference resolves to `dist/`, so a build that
- * predates the export, or none at all, falls back to the source.
+ * predates the export, or none at all, falls back to the source. That path
+ * exists only there, so it is built at run time: a literal specifier would put
+ * a module no server has into the typecheck of every server this script is
+ * copied into.
  */
 async function loadSkillTreeValidator(): Promise<SkillTreeValidator> {
   try {
@@ -1769,7 +1779,8 @@ async function loadSkillTreeValidator(): Promise<SkillTreeValidator> {
   } catch {
     // Not built: the framework's own repository.
   }
-  return (await import('../src/mcp-server/skills.js')).validateSkillTree;
+  const source = new URL('../src/mcp-server/skills.js', import.meta.url).href;
+  return ((await import(source)) as { validateSkillTree: SkillTreeValidator }).validateSkillTree;
 }
 
 /** Read `packaging.pluginManifests` from devcheck.config.json; default on. */

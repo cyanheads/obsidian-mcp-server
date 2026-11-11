@@ -27,6 +27,10 @@
  * with no section headers, no signature block leaked into the body, and the
  * `[CHANGELOG v<version>](…)` link as the final line.
  *
+ * Arguments are parsed strictly before anything is read or run: an unknown
+ * option, a positional, or a value on a flag prints the error and usage to
+ * stderr and exits 1, so a mistyped flag never falls through to a release.
+ *
  * @module scripts/release-github
  *
  * @example
@@ -40,6 +44,10 @@
  * @example
  * // Dry-run — print the command that would be executed without running it:
  * // bun run release:github -- --dry-run
+ *
+ * @example
+ * // Usage (exit 0):
+ * // bun run release:github -- --help
  */
 
 import { spawnSync } from 'node:child_process';
@@ -47,9 +55,24 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 
-const DRY_RUN = process.argv.includes('--dry-run');
-const CHECK_ONLY = process.argv.includes('--check');
+/** What one CLI run was asked to do. */
+interface CliOptions {
+  /** `--check`: validate the tag annotation, then stop before any `gh` call. */
+  checkOnly: boolean;
+  /** `--dry-run`: print the `gh` commands instead of running them. */
+  dryRun: boolean;
+}
+
+const USAGE = `Usage: bun run release:github [-- <option>...]
+
+Creates (or repairs) the GitHub Release on the current package version's annotated tag.
+
+Options:
+  --check       Validate the tag annotation only; no gh calls
+  --dry-run     Print the gh commands instead of running them
+  -h, --help    Show this help`;
 
 /** A tag subject longer than this reads as a digest, not a release title. */
 const MAX_SUBJECT_LENGTH = 72;
@@ -130,8 +153,9 @@ export function checkTagMessage(tag: TagMessage, version: string): string[] {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * Run a command synchronously and return its trimmed stdout.
- * Exits the process on non-zero exit when `required` is true.
+ * Run a command synchronously and return its trimmed stdout. When it cannot be
+ * started or exits non-zero, a `required` call exits the process; any other
+ * returns `__ERROR__:` followed by the spawn error or stderr.
  */
 function run(
   cmd: string,
@@ -149,7 +173,7 @@ function run(
   if (result.error) {
     console.error(`Failed to spawn '${cmd}': ${result.error.message}`);
     if (required) process.exit(1);
-    return '';
+    return `__ERROR__:${result.error.message}`;
   }
 
   if ((result.status ?? 1) !== 0) {
@@ -166,8 +190,9 @@ function run(
 }
 
 /**
- * Run a `gh` CLI command.
- * On "release already exists" the return value starts with `__ERROR__:`.
+ * Run a `gh` CLI command. With `required: false`, a failure — `gh` missing,
+ * or a non-zero exit such as "release already exists" — returns `__ERROR__:`
+ * followed by the spawn error or stderr; a required call exits instead.
  */
 function gh(args: string[], options: { required?: boolean } = {}): string {
   return run('gh', args, { required: options.required ?? true, capture: true });
@@ -175,7 +200,38 @@ function gh(args: string[], options: { required?: boolean } = {}): string {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-function main(): void {
+/**
+ * The CLI's options from its arguments. `--help` prints usage to stdout and
+ * exits 0; an unknown option, a positional, or a value on a flag prints the
+ * error and usage to stderr and exits 1. Either way nothing else has run.
+ */
+function readCliOptions(args: string[]): CliOptions {
+  let values: { check?: boolean; 'dry-run'?: boolean; help?: boolean };
+  try {
+    ({ values } = parseArgs({
+      args,
+      options: {
+        check: { type: 'boolean' },
+        'dry-run': { type: 'boolean' },
+        help: { type: 'boolean', short: 'h' },
+      },
+      strict: true,
+      allowPositionals: false,
+    }));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (!code?.startsWith('ERR_PARSE_ARGS_')) throw error;
+    console.error(`${(error as Error).message}\n\n${USAGE}`);
+    process.exit(1);
+  }
+  if (values.help) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+  return { checkOnly: values.check === true, dryRun: values['dry-run'] === true };
+}
+
+function main({ checkOnly, dryRun }: CliOptions): void {
   // 1. Read version from package.json
   const pkgPath = resolve('package.json');
   if (!existsSync(pkgPath)) {
@@ -217,7 +273,7 @@ function main(): void {
     for (const error of errors) console.error(`  ✗ ${error}`);
     process.exit(1);
   }
-  if (CHECK_ONLY) {
+  if (checkOnly) {
     console.log(`Tag ${tag} OK.`);
     return;
   }
@@ -239,7 +295,7 @@ function main(): void {
     createArgs.push('dist/*.mcpb');
   }
 
-  if (DRY_RUN) {
+  if (dryRun) {
     console.log(`[dry-run] gh ${createArgs.join(' ')}`);
     if (hasMcpb) {
       console.log(
@@ -295,5 +351,5 @@ function main(): void {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main();
+  main(readCliOptions(process.argv.slice(2)));
 }

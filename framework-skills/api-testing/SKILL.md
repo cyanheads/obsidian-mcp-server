@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.16"
+  version: "1.17"
   audience: external
   type: reference
 ---
@@ -133,7 +133,7 @@ toolContractSuite(searchTool, {
 });
 ```
 
-Use `runToolContract(definition, input, { context })` from `/testing` when a custom test runner or an imperative assertion is a better fit. It intentionally skips transport auth and telemetry; those belong in transport/integration tests.
+Use `runToolContract(definition, input, { context })` from `/testing` when a custom test runner or an imperative assertion is a better fit. It intentionally skips transport auth and telemetry; those belong in transport/integration tests. Every failure comes back as the error result a client would receive, except a handler's `UrlElicitationRequiredError` (`-32042`): production hands that back to the SDK as a protocol error, so `runToolContract` rejects with the `ProtocolError` it hands back — its code, message, and `data` minus `data.requestId`, not the thrown instance — and a test asserts `{ code: -32042, data: { elicitations } }` rather than `instanceof UrlElicitationRequiredError`.
 
 A declared reason thrown without a hint — a bare `ctx.fail('reason')` or a service throw carrying `{ reason }` — comes back with the entry's `recovery` as `data.recovery.hint` and a `Recovery:` line in `content[]`, as in production. The one production field it leaves out is `data.requestId` (and the `request <id>` term closing `content[]`), since there is no real request; a test asserting the factory's envelope instead expects both. Calling `definition.handler(...)` directly returns the `McpError` exactly as the throw site built it — no fill, no request id.
 

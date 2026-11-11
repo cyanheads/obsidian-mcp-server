@@ -4,7 +4,7 @@ description: >
   Review pass on an open release PR (`release/<version>` → `main`) — the step between `git-wrapup` and `release-and-publish` when a project releases in gated release PR mode. Reads the PR's commit range through the `code-simplifier` lens plus a correctness review, verifies whatever an automated reviewer left on the PR, lands fixes as ordinary commits on top of the release branch and pushes it, keeps the PR body in sync with what ships, and leaves one summary comment. The only agent role that both edits and commits — and it never rewrites pushed history, tags, merges, touches `main`, or publishes.
 metadata:
   author: cyanheads
-  version: "1.8"
+  version: "1.9"
   audience: external
   type: workflow
 ---
@@ -53,7 +53,7 @@ Two lenses over the range. Skip a dimension that does not apply; do not run any 
 - **Over-engineering.** Abstractions with one caller, options nothing sets, guards for states the framework already prevents, flexibility for a hypothetical. Cut what does not earn its place.
 - **Tests that cannot fail.** A test authored after the fix that never went red, an assertion on a mocked value, a `toBeDefined()` where a shape was meant. Tighten or replace.
 - **Changelog vs diff.** Every claim in the changelog entry and its `summary:` line exists in the diff — a path, an identifier, a field list, a mechanism. A claim the diff does not support is fixed in the changelog, never argued for. Changes in the diff the changelog omits get a bullet.
-- **PR body vs changelog.** The body's theme line is the entry's `summary:`; its `## Changes` bullets are the entry at headline granularity under the tag rules (`release-and-publish` step 4) — nothing in the entry silently missing, nothing in the body the entry lacks. Those bullets and the changelog link become the tag body verbatim at release, so they are reviewed to that standard: flat bullets, one grouped minor bullet, deps one line, backlinks, no closing keywords, no marketing adjectives, changelog link last. The tag's subject is not lifted from this body — it is written fresh at release time.
+- **PR body vs changelog.** The body's theme line is the entry's `summary:`; its `## Changes` bullets are the entry at headline granularity under the tag rules (`release-and-publish` step 4) — nothing in the entry silently missing, nothing in the body the entry lacks. Those bullets and the changelog link become the tag body verbatim at release, so they are reviewed to that standard: flat bullets, one grouped minor bullet, deps one line, backlinks, outside reporters thanked on their own bullets, no closing keywords, no marketing adjectives, changelog link last. The tag's subject is not lifted from this body — it is written fresh at release time.
 - **Version-bearing files.** The version string is consistent across `package.json`, `server.json`, `manifest.json`, the plugin manifests, the README badge, and any doc that pins it (`grep -rn "<previous-version>" . --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=changelog` — the version `main`'s `package.json` still carries — catches stragglers; resolve hits case by case).
 - **Stack shape.** Every commit carries a one- or two-line body, no closing keywords anywhere, the release commit sits above every work commit — only review commits follow it — and carries only release artifacts.
 
