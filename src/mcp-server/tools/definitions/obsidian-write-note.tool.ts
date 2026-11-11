@@ -18,7 +18,7 @@ import {
 
 export const obsidianWriteNote = tool('obsidian_write_note', {
   description:
-    'Create or overwrite a note. With `section`, replaces just that heading/block/frontmatter section in place — use `obsidian_get_note` with `format: "document-map"` to discover available targets. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too. Whole-file writes fail with `file_exists` against an existing note unless `overwrite: true`, and with `case_variant_exists` when the path differs from an existing note only in letter case on a case-insensitive filesystem (`existingPath` names the note when the folder listing shows exactly one case match) — for in-place edits, prefer `obsidian_patch_note` (sections), `obsidian_append_to_note` (append), or `obsidian_replace_in_note` (find-and-replace). For heading sections, `content` is the new body; the heading line is preserved automatically.',
+    'Create or overwrite a note. With `section`, replaces just that heading/block/frontmatter section in place — use `obsidian_get_note` with `format: "document-map"` to discover available targets. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too. A heading section is rejected with `repeated_link_definition` when a link reference definition that repeats an earlier label sits above where it ends (for the last section, above its heading), which makes the plugin misplace the headings below it. Whole-file writes fail with `file_exists` against an existing note unless `overwrite: true`, and with `case_variant_exists` when the path differs from an existing note only in letter case on a case-insensitive filesystem (`existingPath` names the note when the folder listing shows exactly one case match) — for in-place edits, prefer `obsidian_patch_note` (sections), `obsidian_append_to_note` (append), or `obsidian_replace_in_note` (find-and-replace). For heading sections, `content` is the new body; the heading line is preserved automatically.',
   annotations: { idempotentHint: true, destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -151,6 +151,14 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
         'Append the heading at the parent section or at the end of the note with obsidian_append_to_note, or write it one level below the target section or deeper.',
     },
     {
+      reason: 'repeated_link_definition',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.Conflict,
+      when: 'A link reference definition that repeats a label defined earlier in the note sits above where the target heading’s section ends (for the last section, above its heading); the Local REST API’s markdown parser drops it and misplaces every heading below it, so the replacement would land outside the section.',
+      recovery:
+        'Use obsidian_replace_in_note to place the new body directly, or to remove or rename the repeated definition at `line`, then retry the section write.',
+    },
+    {
       reason: 'patch_rejected',
       thrownBy: 'service',
       code: JsonRpcErrorCode.ValidationError,
@@ -220,8 +228,8 @@ export const obsidianWriteNote = tool('obsidian_write_note', {
        */
       const { exact, variants } = await findCaseVariants(ctx, svc, path);
       if (!exact && variants.length > 0) {
-        const { message, data } = caseVariantError(path, variants);
-        throw ctx.fail('case_variant_exists', message, data);
+        const { message, data, literals } = caseVariantError(path, variants);
+        throw ctx.fail('case_variant_exists', message, data, { literals });
       }
       throw ctx.fail('file_exists', `Note '${path}' already exists.`, {
         path,

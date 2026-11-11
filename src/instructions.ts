@@ -2,14 +2,15 @@
  * @fileoverview The server-level `instructions` string sent on every
  * `initialize`: baseline orientation, then deployment-specific lines for
  * read-only mode, the effective path scope, the command-palette toggle, and
- * Omnisearch availability.
+ * the `omnisearch` mode when it is offered.
  * @module instructions
  */
 
+import type { OmnisearchAvailability } from '@/mcp-server/tools/definitions/obsidian-search-notes.tool.js';
 import type { PathPolicy } from '@/services/obsidian/path-policy.js';
 
 const BASELINE =
-  'Use the `obsidian_*` tools to access the Obsidian vault via the Local REST API plugin: search, read, write, and patch notes, including targeted edits to headings, blocks, and YAML frontmatter. Notes are addressed by vault-relative path including the file extension (e.g. `Folder/Note.md`); tags support hierarchical `parent/child` notation, and counts roll up to parents.';
+  'Use the `obsidian_*` tools to access the Obsidian vault via the Local REST API plugin: search, read, write, and patch notes, including targeted edits to headings, blocks, and YAML frontmatter. Notes are addressed by vault-relative path including the file extension (e.g. `Folder/Note.md`); tags support hierarchical `parent/child` notation, and counts roll up to parents. The obsidian-guide skill (`skill://obsidian-guide/SKILL.md`) carries the gates for edits that span calls: pinning `active` and `periodic` targets, round-tripping heading sections, paging a search before editing its hits, matching tags, and repeating a write after a timeout or a dropped connection.';
 
 const SCOPE_RECOVERY =
   'Paths outside scope reject with `path_forbidden` — error data carries the active scope so you can self-correct.';
@@ -31,15 +32,15 @@ function renderScope(scope: readonly string[] | undefined, withheld: boolean): s
 /**
  * Build the instructions. The scope lines state what `path_forbidden`
  * enforces (`PathPolicy.effectiveScope`), not the configured lists the
- * startup banner reports.
+ * startup banner reports. Omnisearch appears only when the mode is `offered`.
  */
 export function buildInstructions(opts: {
   enableCommands: boolean;
-  omnisearchReachable: boolean;
+  omnisearch: OmnisearchAvailability;
   policy: PathPolicy;
   readOnly: boolean;
 }): string {
-  const { enableCommands, omnisearchReachable, policy, readOnly } = opts;
+  const { enableCommands, omnisearch, policy, readOnly } = opts;
   const { readable, writable } = policy.effectiveScope();
   const withheld = policy.withholdsPaths;
   const recovery = withheld ? `${SCOPE_RECOVERY} ${WITHHELD_RECOVERY}` : SCOPE_RECOVERY;
@@ -63,13 +64,9 @@ export function buildInstructions(opts: {
       'Command-palette tools (`obsidian_list_commands`, `obsidian_execute_command`) are enabled and can fire any Obsidian command. Commands are opaque and may be destructive — prefer dedicated tools when one fits.',
     );
   }
-  if (omnisearchReachable) {
-    const omnisearch =
-      '`obsidian_search_notes` includes an `omnisearch` mode: BM25-ranked, typo-tolerant, with PDF/OCR coverage (via the Text Extractor plugin). Omnisearch keeps only its top 50 matches: narrow with `path:` / `ext:` filters or more plain terms, which apply before that cap. Quoted phrases and `-exclusion` filter only those 50, so a result using them is marked `truncated`.';
+  if (omnisearch === 'offered') {
     sections.push(
-      policy.restrictsReads
-        ? `${omnisearch} Under the read scope the cap ranks the whole vault before the scope filters it, so \`truncated\` is always true; a \`path:\` term naming a readable folder ranks within that folder.`
-        : omnisearch,
+      '`obsidian_search_notes` includes an `omnisearch` mode: BM25-ranked, typo-tolerant, with PDF/OCR coverage (via the Text Extractor plugin). Omnisearch keeps only its top 50 matches: narrow with `path:` / `ext:` filters or more plain terms, which apply before that cap. Quoted phrases and `-exclusion` filter only those 50, so a result using them is marked `truncated`.',
     );
   }
   return sections.join('\n\n');

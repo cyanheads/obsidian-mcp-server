@@ -1,11 +1,11 @@
 /**
  * @fileoverview obsidian_search_notes — text/jsonlogic/omnisearch search with
- * MCP-spec cursor pagination. The `omnisearch` mode is added conditionally by
- * the entry point only when the Omnisearch plugin's HTTP server is reachable
- * at startup. Text-mode hits carry match locations (the service merges a
- * multi-token query's per-token spans) and additionally clip per file via
- * `maxMatchesPerHit` so a single match-heavy note can't blow the response
- * budget — clipped hits carry `truncated: true` and `totalMatches`.
+ * MCP-spec cursor pagination. The `omnisearch` mode is offered only with reads
+ * unscoped and the Omnisearch plugin's HTTP server answering at startup
+ * (`omnisearchAvailability`). Text-mode hits carry match locations (the
+ * service merges a multi-token query's per-token spans) and additionally clip
+ * per file via `maxMatchesPerHit` so a single match-heavy note can't blow the
+ * response budget — clipped hits carry `truncated: true` and `totalMatches`.
  * @module mcp-server/tools/definitions/obsidian-search-notes.tool
  */
 
@@ -19,7 +19,7 @@ import {
   markdown,
   paginateArray,
 } from '@cyanheads/mcp-ts-core/utils';
-import { getObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { getObsidianService, type ObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { inlineCode } from './_shared/markdown.js';
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -32,16 +32,37 @@ const OMNISEARCH_UPSTREAM_CAP = 50;
 const OMNISEARCH_TRUNCATIONS = {
   cap_reached: `Omnisearch returned its ${OMNISEARCH_UPSTREAM_CAP}-hit cap, so more matches may exist. Narrow with \`path:\`, \`ext:\`, or more plain terms, which Omnisearch applies before the cap.`,
   filtered_after_cap: `Omnisearch keeps its top ${OMNISEARCH_UPSTREAM_CAP} matches before it applies quoted terms and \`-exclusion\` terms, so matches past the cap were never checked. Narrow with \`path:\`, \`ext:\`, or more plain terms, which apply before the cap, or rerun without the quoted and excluded terms to see whether the cap was reached.`,
-  read_scope: `Omnisearch keeps its top ${OMNISEARCH_UPSTREAM_CAP} matches across the whole vault before the read scope filters them, so readable matches may be missing. Add a \`path:\` term naming a readable folder, which Omnisearch applies before the cap.`,
 } as const;
 
 type OmnisearchTruncation = keyof typeof OMNISEARCH_TRUNCATIONS;
+
+/**
+ * Whether `obsidian_search_notes` offers `omnisearch` mode: `offered` when
+ * reads are unscoped and the plugin answered the startup probe,
+ * `unreachable` when it did not answer, and `withheld` under
+ * OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS, where the plugin is never
+ * called. Omnisearch ranks and selects its results over the whole vault, so
+ * every one of them depends on notes outside a read scope.
+ */
+export type OmnisearchAvailability = 'offered' | 'unreachable' | 'withheld';
+
+/**
+ * Decide {@link OmnisearchAvailability} once, at startup. Under a read scope
+ * it is `withheld` with no request, the probe included; otherwise the probe
+ * decides.
+ */
+export async function omnisearchAvailability(
+  svc: ObsidianService,
+): Promise<OmnisearchAvailability> {
+  if (svc.policy.restrictsReads) return 'withheld';
+  return (await svc.probeOmnisearch()) ? 'offered' : 'unreachable';
+}
 
 const CursorSchema = z
   .string()
   .optional()
   .describe(
-    'Opaque cursor from a prior response. Omit for the first page. Page size is server-determined; do not assume a fixed value. Under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS, later `jsonlogic` pages come from the hit list the first page computed.',
+    'Opaque cursor from a prior response. Omit for the first page. Page size is server-determined; do not assume a fixed value. Under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS, later `text` and `jsonlogic` pages come from the hit list the first page computed.',
   );
 
 const TextHitSchema = z
@@ -109,7 +130,7 @@ const OmnisearchHitSchema = z
     score: z
       .number()
       .describe(
-        'BM25 relevance score. Higher is more relevant. Omnisearch computes it over the whole vault, so under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS notes outside the scope still move it.',
+        "Omnisearch's BM25 relevance score; higher is more relevant. `0` marks a note Omnisearch added because it embeds an earlier hit, which need not contain the query words.",
       ),
     foundWords: z
       .array(z.string())
@@ -125,27 +146,30 @@ const OmnisearchHitSchema = z
           })
           .describe('A single match span in the note body.'),
       )
-      .describe('Match positions within the note body. May be empty for basename-only matches.'),
+      .describe(
+        'Match positions within the note body. Omnisearch locates them only for the first 10 hits it returns, so every later hit has none, and an earlier hit has none when the query words occur only in its basename.',
+      ),
     excerpt: z
       .string()
       .describe(
-        'Surrounding-context excerpt with `<mark>` around matches; HTML entities are decoded and `<br>` becomes `\\n`.',
+        "Text from the note around its first match in `matches`; a hit with empty `matches` gets the note's opening instead. HTML entities are decoded and `<br>` becomes `\\n`.",
       ),
   })
   .describe('An Omnisearch BM25-ranked hit.');
 
 /**
  * Build the `obsidian_search_notes` tool. The `omnisearch` mode is included
- * in the input/output schemas only when `omnisearchReachable` is true so the
- * LLM never sees it as an option on a deployment where it can't run. Re-probe
- * requires a server restart.
+ * in the input/output schemas and the description only when `omnisearch` is
+ * `offered`, so the LLM never sees it as an option on a deployment where it
+ * can't run or is withheld. Re-probe requires a server restart.
  */
-export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReachable: boolean }) {
-  const modeEnum = omnisearchReachable
+export function buildSearchNotesTool({ omnisearch }: { omnisearch: OmnisearchAvailability }) {
+  const omnisearchOffered = omnisearch === 'offered';
+  const modeEnum = omnisearchOffered
     ? (['text', 'jsonlogic', 'omnisearch'] as const)
     : (['text', 'jsonlogic'] as const);
 
-  const description = omnisearchReachable
+  const description = omnisearchOffered
     ? 'Search the vault by text tokens, JSONLogic predicate, or BM25-ranked Omnisearch query. Pick the mode that matches the query shape — `omnisearch` is best for ranked relevance, typo tolerance, and PDF/OCR coverage (via the Text Extractor plugin). Results paginate via opaque cursors: omit `cursor` for the first page, then pass `nextCursor` from the prior response. Text-mode hits additionally clip per file at `maxMatchesPerHit` match locations.'
     : 'Search the vault by text tokens or JSONLogic predicate. Pick the mode that matches the query shape. Results paginate via opaque cursors: omit `cursor` for the first page, then pass `nextCursor` from the prior response. Text-mode hits additionally clip per file at `maxMatchesPerHit` match locations.';
 
@@ -159,7 +183,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
     mode: z
       .enum(modeEnum)
       .describe(
-        omnisearchReachable
+        omnisearchOffered
           ? `Which search algorithm to run. ${textModeDescription} ${jsonlogicModeDescription} \`omnisearch\` runs a BM25-ranked query via the Omnisearch plugin — supports quoted phrases, \`-exclusion\`, \`path:\` / \`ext:\` filters, typo tolerance, and PDF/OCR (with Text Extractor). Omnisearch keeps its top ${OMNISEARCH_UPSTREAM_CAP} matches, applying \`path:\` and \`ext:\` before that cap and quoted phrases and \`-exclusion\` after the cap (see \`truncated\`).`
           : `Which search algorithm to run. ${textModeDescription} ${jsonlogicModeDescription}`,
       ),
@@ -167,13 +191,13 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       .string()
       .optional()
       .describe(
-        'The query string. Required for `text` and `omnisearch` modes; ignored in `jsonlogic` mode (use `logic` instead — this field must be a string, so passing a JSONLogic tree here is rejected). In `text` mode it is split on spaces and every token must appear; quotes stay part of the tokens, so a quoted phrase matches nothing unless the note contains the quote characters.',
+        'The query string. Required in every mode but `jsonlogic`, which ignores it (use `logic` instead — this field must be a string, so passing a JSONLogic tree here is rejected). In `text` mode it is split on spaces and every token must appear; quotes stay part of the tokens, so a quoted phrase matches nothing unless the note contains the quote characters.',
       ),
     logic: z
       .record(z.string(), z.unknown())
       .optional()
       .describe(
-        'JSONLogic tree. Required for `jsonlogic` mode; ignored in `text` and `omnisearch` modes (use `query` instead — this field must be an object, so passing a string here is rejected). `glob` and `regexp` take `[PATTERN, VALUE]` — pattern first: `{"glob": ["Projects/*.md", {"var": "path"}]}`. Backlinks ("what links here") have no dedicated tool; find them this way: `{"regexp": ["\\\\[\\\\[Target Note(\\\\\\\\?\\\\||#|\\\\]\\\\])", {"var": "content"}]}` finds every readable note whose body wikilinks or embeds `Target Note`, in plain, aliased (`|`, or the table-safe `\\|`), or section form. `obsidian_get_note` with `includeLinks: true` covers the outgoing direction.',
+        'JSONLogic tree. Required for `jsonlogic` mode and ignored in every other (use `query` instead — this field must be an object, so passing a string here is rejected). `glob` and `regexp` take `[PATTERN, VALUE]` — pattern first: `{"glob": ["Projects/*.md", {"var": "path"}]}`. Backlinks ("what links here") have no dedicated tool; find them this way: `{"regexp": ["\\\\[\\\\[Target Note(\\\\\\\\?\\\\||#|\\\\]\\\\])", {"var": "content"}]}` finds every readable note whose body wikilinks or embeds `Target Note`, in plain, aliased (`|`, or the table-safe `\\|`), or section form. `obsidian_get_note` with `includeLinks: true` covers the outgoing direction.',
       ),
     contextLength: z
       .number()
@@ -250,18 +274,18 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       truncated: z
         .boolean()
         .describe(
-          `True whenever Omnisearch's ${OMNISEARCH_UPSTREAM_CAP}-hit cap may have cut matches that are not retrievable: when it returned ${OMNISEARCH_UPSTREAM_CAP} or more; when the query holds quoted terms or \`-exclusion\` terms, which Omnisearch applies after its cap; and always under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS, where the cap ranks the whole vault before the read scope filters it, so which readable notes make it depends on notes outside the scope. Narrow with \`path:\`, \`ext:\`, or more plain terms, which Omnisearch applies before its cap.`,
+          `True whenever Omnisearch's ${OMNISEARCH_UPSTREAM_CAP}-hit cap may have cut matches that are not retrievable: when it returned ${OMNISEARCH_UPSTREAM_CAP} or more, and when the query holds quoted terms or \`-exclusion\` terms, which Omnisearch applies after its cap. Narrow with \`path:\`, \`ext:\`, or more plain terms, which Omnisearch applies before its cap.`,
         ),
       truncatedReason: z
-        .enum(['cap_reached', 'filtered_after_cap', 'read_scope'])
+        .enum(['cap_reached', 'filtered_after_cap'])
         .optional()
         .describe(
-          'Why `truncated` is true, present only then: `cap_reached` (Omnisearch returned its cap), `filtered_after_cap` (quoted or `-exclusion` terms filtered after the cap), `read_scope` (the cap ran over the whole vault before the read scope filtered it).',
+          'Why `truncated` is true, present only then: `cap_reached` (Omnisearch returned its cap) or `filtered_after_cap` (quoted or `-exclusion` terms filtered after the cap).',
         ),
     })
     .describe('Omnisearch BM25 results.');
 
-  const branches = omnisearchReachable
+  const branches = omnisearchOffered
     ? ([textBranch, jsonlogicBranch, omnisearchBranch] as const)
     : ([textBranch, jsonlogicBranch] as const);
 
@@ -272,13 +296,26 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
   });
 
   /**
+   * Thrown by the service on the omnisearch path alone, so declared only where
+   * the mode is offered: `tools/list` renders every entry, and a withheld or
+   * unreachable mode leaves nothing that names Omnisearch.
+   */
+  const omnisearchErrors = [
+    {
+      reason: 'omnisearch_unreachable',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Omnisearch was reachable at startup but did not answer: it is unreachable (Obsidian quit, plugin disabled, or mobile session), answered with a non-2xx status, or took longer than OBSIDIAN_REQUEST_TIMEOUT_MS. One attempt, never retried.',
+      retryable: true,
+      recovery:
+        'Confirm Obsidian is running with the Omnisearch plugin enabled and retry, or narrow the query if it was slow. If Omnisearch stays down, restart Obsidian, then restart this MCP server so it re-probes the plugin URL.',
+    },
+  ] as const;
+
+  /**
    * Declared inline as a `const` tuple so `tool()`'s `const TErrors` generic
    * captures the literal reason strings — that's what gives the handler its
-   * typed `ctx.fail<'reason'>(...)`. The `omnisearch_unreachable` entry is
-   * declared unconditionally even when `omnisearchReachable` is false; the
-   * branch that throws it only runs in the omnisearch handler path (which
-   * only runs when reachable), so the entry is harmless when unused and
-   * keeps the contract shape stable across deployments.
+   * typed `ctx.fail<'reason'>(...)`.
    */
   const errors = [
     {
@@ -290,9 +327,10 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
     {
       reason: 'query_required',
       code: JsonRpcErrorCode.ValidationError,
-      when: '`query` is missing for `text` or `omnisearch` mode (required for both).',
-      recovery:
-        'Pass `query` — space-separated tokens, all required, for text mode, or BM25 query syntax (quoted phrases, `-exclusion`, `path:` / `ext:` filters) for omnisearch.',
+      when: '`query` is missing in a mode that requires it: every mode but `jsonlogic`.',
+      recovery: omnisearchOffered
+        ? 'Pass `query` — space-separated tokens, all required, for text mode, or BM25 query syntax (quoted phrases, `-exclusion`, `path:` / `ext:` filters) for omnisearch.'
+        : 'Pass `query` as space-separated tokens, all of which a note must contain.',
     },
     {
       reason: 'context_length_too_large',
@@ -349,15 +387,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       recovery:
         'Flatten the deeply nested value, usually a frontmatter field, in the note the message names, or ask the operator to leave that note out of OBSIDIAN_READ_PATHS or add it to OBSIDIAN_DENY_PATHS; no scoped jsonlogic search runs while it is readable.',
     },
-    {
-      reason: 'omnisearch_unreachable',
-      thrownBy: 'service',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Omnisearch was reachable at startup but is now unreachable (Obsidian quit, plugin disabled, or mobile session).',
-      retryable: true,
-      recovery:
-        'Restart Obsidian with the Omnisearch plugin enabled, then restart this MCP server so it re-probes the plugin URL.',
-    },
+    ...(omnisearchOffered ? omnisearchErrors : []),
   ] as const;
 
   return tool('obsidian_search_notes', {
@@ -371,7 +401,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       effectiveQuery: z
         .string()
         .optional()
-        .describe('The query string as submitted (text and omnisearch modes only).'),
+        .describe('The query string as submitted (every mode but `jsonlogic`).'),
       notice: z.string().optional().describe('Recovery guidance when the search returned no hits.'),
     },
     auth: ['tool:obsidian_search_notes:read'],
@@ -395,12 +425,19 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
           });
         }
         ctx.enrich.echo(input.query);
-        const raw = await svc.searchText(ctx, input.query, input.contextLength);
         const prefix = input.pathPrefix;
-        const prefixed = prefix ? raw.filter((h) => h.filename.startsWith(prefix)) : raw;
-        const allowed = policy.filterReadable(prefixed);
-        const clipped = allowed.map((h) => clipMatches(h, input.maxMatchesPerHit));
-        const page = paginate(clipped, input.cursor, ctx);
+        const searched = await svc.pageText(
+          ctx,
+          {
+            query: input.query,
+            contextLength: input.contextLength,
+            maxMatchesPerHit: input.maxMatchesPerHit,
+            pathPrefix: prefix,
+          },
+          ...cursorPage(input.cursor, ctx),
+        );
+        const allowed = policy.filterReadable(searched.hits);
+        const page = paginate(allowed, input.cursor, ctx, searched.walk);
         if (page.hits.length === 0) {
           ctx.enrich.notice(
             `No matches for ${inlineCode(input.query)}${prefix ? ` under prefix ${inlineCode(prefix)}` : ''}. Try broader terms, a different mode, or check that the path/filter is correct.`,
@@ -417,19 +454,10 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
             { mode: input.mode },
           );
         }
-        /**
-         * A scoped search's cursor names the walk its first page stored, so
-         * the later pages read that stored hit list instead of evaluating the
-         * tree again.
-         */
-        const walk = input.cursor
-          ? decodeCursor(input.cursor, requestContext(ctx)).walk
-          : undefined;
         const searched = await svc.pageJsonLogic(
           ctx,
           input.logic,
-          typeof walk === 'string' ? walk : undefined,
-          DEFAULT_PAGE_SIZE,
+          ...cursorPage(input.cursor, ctx),
         );
         const allowed = policy.filterReadable(searched.hits);
         const page = paginate(allowed, input.cursor, ctx, searched.walk);
@@ -441,7 +469,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
         return { result: { mode: 'jsonlogic' as const, ...page } };
       }
 
-      // omnisearch — only reachable when omnisearchReachable is true at build time.
+      // omnisearch — in the schema only when the mode was offered at build time.
       if (!input.query) {
         throw ctx.fail('query_required', '`query` is required for omnisearch mode.', {
           mode: input.mode,
@@ -449,7 +477,7 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
       }
       ctx.enrich.echo(input.query);
       const raw = await svc.searchOmnisearch(ctx, input.query);
-      const truncatedReason = omnisearchTruncation(input.query, raw.length, policy.restrictsReads);
+      const truncatedReason = omnisearchTruncation(input.query, raw.length);
       const allowed = policy.filterReadable(raw);
       const page = paginate(allowed, input.cursor, ctx);
       if (page.hits.length === 0) {
@@ -522,15 +550,15 @@ export function buildSearchNotesTool({ omnisearchReachable }: { omnisearchReacha
 /**
  * Static specimen for the MCP definition linter (which duck-types tool
  * exports out of each `.tool.ts` file) and for existing tests that import
- * the tool directly. Defaults to `omnisearchReachable: false` — the safe
- * baseline that doesn't assume the optional plugin is installed. The entry
- * point (`src/index.ts`) builds the live tool via `buildSearchNotesTool`
- * with the actual probe result; this export is not the registered tool.
+ * the tool directly. Built without the `omnisearch` mode — the safe baseline
+ * that doesn't assume the optional plugin is installed. The entry point
+ * (`src/index.ts`) builds the live tool via `buildSearchNotesTool` with the
+ * startup `omnisearchAvailability`; this export is not the registered tool.
  * The omnisearch-enabled variant is exercised by tests rather than the
  * linter (two exports under the same tool name would collide on
  * `name-unique`).
  */
-export const obsidianSearchNotes = buildSearchNotesTool({ omnisearchReachable: false });
+export const obsidianSearchNotes = buildSearchNotesTool({ omnisearch: 'unreachable' });
 
 /**
  * Apply MCP-spec cursor pagination to a fully assembled, post-filter result
@@ -556,6 +584,21 @@ function paginate<T>(
 }
 
 /**
+ * The walk a cursor names, if any, and the index just past the page it asks
+ * for, as `paginate` will slice it. A scoped search's cursor names the walk its
+ * first page stored, so the later pages read that stored hit list instead of
+ * searching again.
+ */
+function cursorPage(
+  cursor: string | undefined,
+  ctx: Context,
+): [walk: string | undefined, pageEnd: number] {
+  if (!cursor) return [undefined, DEFAULT_PAGE_SIZE];
+  const { offset, limit, walk } = decodeCursor(cursor, requestContext(ctx));
+  return [typeof walk === 'string' ? walk : undefined, offset + Math.min(limit, MAX_PAGE_SIZE)];
+}
+
+/**
  * The `Context` → `RequestContext` cast the cursor helpers need — their
  * signatures require the index-signature shape that handler-facing `Context`
  * doesn't carry.
@@ -566,18 +609,13 @@ function requestContext(ctx: Context): RequestContext {
 
 /**
  * Why Omnisearch's 50-hit cap may have cut matches from a result, or
- * `undefined` when the result is complete. Under a read scope the cap ranks
- * the whole vault before the scope filters it, so only out-of-scope notes
- * could tell whether it cut a readable match: the result is never called
- * complete there. Otherwise a full cap, or a query Omnisearch filters after
- * the cap (`filteredAfterCap`), leaves it unknown.
+ * `undefined` when the result is complete: a full cap, or a query Omnisearch
+ * filters after the cap (`filteredAfterCap`), leaves it unknown.
  */
 function omnisearchTruncation(
   query: string,
   upstreamHits: number,
-  readScoped: boolean,
 ): OmnisearchTruncation | undefined {
-  if (readScoped) return 'read_scope';
   if (upstreamHits >= OMNISEARCH_UPSTREAM_CAP) return 'cap_reached';
   if (filteredAfterCap(query)) return 'filtered_after_cap';
   return;
@@ -600,19 +638,6 @@ function filteredAfterCap(query: string): boolean {
         term.startsWith("'") ||
         (term.length > 1 && term.startsWith('-') && !/^-(?:path|ext):/i.test(term)),
     );
-}
-
-function clipMatches<T extends { matches: unknown[] }>(
-  hit: T,
-  cap: number,
-): T & { truncated?: boolean; totalMatches?: number } {
-  if (hit.matches.length <= cap) return hit;
-  return {
-    ...hit,
-    matches: hit.matches.slice(0, cap),
-    truncated: true,
-    totalMatches: hit.matches.length,
-  };
 }
 
 /**

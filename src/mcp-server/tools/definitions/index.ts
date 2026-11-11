@@ -5,8 +5,10 @@
  * separately so the entry point wraps it with `disabledTool()` when either
  * `OBSIDIAN_ENABLE_COMMANDS=false` or `OBSIDIAN_READ_ONLY=true` — keeping this
  * module free of eager config reads. `obsidian_search_notes` is exposed as a
- * factory (`buildSearchNotesTool`) because its mode enum is conditional on
- * Omnisearch reachability, which is only known after the startup probe runs.
+ * factory (`buildSearchNotesTool`) because its mode enum follows
+ * `omnisearchAvailability`, which the entry point decides at startup: the
+ * `omnisearch` mode is withheld under a read scope and otherwise offered only
+ * when the startup probe reaches the plugin.
  * `obsidian_delete_note` is exposed as a factory (`buildDeleteNoteTool`)
  * because its description and confirmation round follow
  * `OBSIDIAN_DELETE_ELICITATION`, which the entry point reads.
@@ -27,13 +29,17 @@ import { obsidianReplaceInNote } from './obsidian-replace-in-note.tool.js';
 import { obsidianWriteNote } from './obsidian-write-note.tool.js';
 
 export { buildDeleteNoteTool } from './obsidian-delete-note.tool.js';
-export { buildSearchNotesTool } from './obsidian-search-notes.tool.js';
+export {
+  buildSearchNotesTool,
+  type OmnisearchAvailability,
+  omnisearchAvailability,
+} from './obsidian-search-notes.tool.js';
 
 /**
  * Tools that don't depend on runtime probes — always registered, even with
  * `OBSIDIAN_READ_ONLY=true`. `obsidian_search_notes` is constructed separately
  * in the entry point via `buildSearchNotesTool` so its mode enum can reflect
- * Omnisearch reachability.
+ * Omnisearch availability.
  *
  * `obsidian_open_in_ui` stays here rather than in the write bucket so that
  * opening a note that already exists keeps working on a read-only vault, which

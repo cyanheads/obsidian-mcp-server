@@ -10,17 +10,22 @@
 import { describe, expect, it } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import { buildInstructions } from '@/instructions.js';
+import {
+  type OmnisearchAvailability,
+  omnisearchAvailability,
+} from '@/mcp-server/tools/definitions/obsidian-search-notes.tool.js';
+import { ObsidianService } from '@/services/obsidian/obsidian-service.js';
 import { PathPolicy } from '@/services/obsidian/path-policy.js';
-import { makeTestConfig } from './helpers.js';
+import { makeTestConfig, mockResponse } from './helpers.js';
 
 function instructionsFor(
   overrides: Partial<ServerConfig> = {},
-  omnisearchReachable = false,
+  omnisearch: OmnisearchAvailability = 'unreachable',
 ): string {
   const config = makeTestConfig(overrides);
   return buildInstructions({
     enableCommands: config.enableCommands,
-    omnisearchReachable,
+    omnisearch,
     policy: new PathPolicy(config),
     readOnly: config.readOnly,
   });
@@ -28,7 +33,7 @@ function instructionsFor(
 
 /** The tool family, the example path, and the tag notation are backticked for markdown clients. */
 const BASELINE =
-  'Use the `obsidian_*` tools to access the Obsidian vault via the Local REST API plugin: search, read, write, and patch notes, including targeted edits to headings, blocks, and YAML frontmatter. Notes are addressed by vault-relative path including the file extension (e.g. `Folder/Note.md`); tags support hierarchical `parent/child` notation, and counts roll up to parents.';
+  'Use the `obsidian_*` tools to access the Obsidian vault via the Local REST API plugin: search, read, write, and patch notes, including targeted edits to headings, blocks, and YAML frontmatter. Notes are addressed by vault-relative path including the file extension (e.g. `Folder/Note.md`); tags support hierarchical `parent/child` notation, and counts roll up to parents. The obsidian-guide skill (`skill://obsidian-guide/SKILL.md`) carries the gates for edits that span calls: pinning `active` and `periodic` targets, round-tripping heading sections, paging a search before editing its hits, matching tags, and repeating a write after a timeout or a dropped connection.';
 const RECOVERY =
   'Paths outside scope reject with `path_forbidden` — error data carries the active scope so you can self-correct.';
 const WITHHELD = 'Withheld paths reject with subreason `denied_path` and carry no scope.';
@@ -39,8 +44,6 @@ const COMMANDS =
 /** Only filters Omnisearch applies before its 50-hit cap are offered as a way to narrow (#172). */
 const OMNISEARCH =
   '`obsidian_search_notes` includes an `omnisearch` mode: BM25-ranked, typo-tolerant, with PDF/OCR coverage (via the Text Extractor plugin). Omnisearch keeps only its top 50 matches: narrow with `path:` / `ext:` filters or more plain terms, which apply before that cap. Quoted phrases and `-exclusion` filter only those 50, so a result using them is marked `truncated`.';
-/** Under a read scope the cap runs over the whole vault before the scope filters (#163). */
-const OMNISEARCH_SCOPED = `${OMNISEARCH} Under the read scope the cap ranks the whole vault before the scope filters it, so \`truncated\` is always true; a \`path:\` term naming a readable folder ranks within that folder.`;
 
 const join = (...sections: string[]) => sections.join('\n\n');
 
@@ -133,7 +136,9 @@ describe('server instructions — the effective path scope', () => {
   });
 
   it('keeps the command-palette and Omnisearch lines after the scope line', () => {
-    expect(instructionsFor({ writePaths: ['work', 'inbox'], enableCommands: true }, true)).toBe(
+    expect(
+      instructionsFor({ writePaths: ['work', 'inbox'], enableCommands: true }, 'offered'),
+    ).toBe(
       join(
         BASELINE,
         `Vault path policy is enforced. Readable: full vault. Writable: 'work', 'inbox'. ${RECOVERY}`,
@@ -147,6 +152,12 @@ describe('server instructions — the effective path scope', () => {
     );
   });
 
+  /**
+   * Omnisearch ranks and selects over the whole vault, so a read scope
+   * withholds the mode, and the instructions never mention it (#173).
+   * The availability comes from the same startup decision the entry point
+   * makes, against an Omnisearch that would answer.
+   */
   it.each([
     ['read paths', { readPaths: ['work'] }, `Readable: 'work'. Writable: 'work'. ${RECOVERY}`],
     [
@@ -154,19 +165,31 @@ describe('server instructions — the effective path scope', () => {
       { denyPaths: ['private'] },
       `Readable: full vault, except paths the operator withholds. Writable: full vault, except paths the operator withholds. ${RECOVERY} ${WITHHELD}`,
     ],
+    [
+      'read paths with a deny list',
+      { readPaths: ['work'], denyPaths: ['work/private'] },
+      `Readable: 'work', except paths the operator withholds. Writable: 'work', except paths the operator withholds. ${RECOVERY} ${WITHHELD}`,
+    ],
   ] as Array<[string, Partial<ServerConfig>, string]>)(
-    'tells a scoped server that Omnisearch is always truncated: %s',
-    (_label, config, scope) => {
-      const text = instructionsFor(config, true);
-      expect(text).toBe(
-        join(BASELINE, `Vault path policy is enforced. ${scope}`, OMNISEARCH_SCOPED),
+    'says nothing of Omnisearch on a scoped server: %s',
+    async (_label, config, scope) => {
+      const svc = new ObsidianService(makeTestConfig(config), async () =>
+        mockResponse('[]', { status: 200, headers: { 'content-type': 'application/json' } }),
       );
+      const text = instructionsFor(config, await omnisearchAvailability(svc));
+      expect(text).toBe(join(BASELINE, `Vault path policy is enforced. ${scope}`));
+      expect(text).not.toMatch(/omnisearch/i);
       expect(text).not.toContain('private');
     },
   );
 
-  it('keeps the unscoped Omnisearch line for write paths alone, which leave reads vault-wide', () => {
-    expect(instructionsFor({ writePaths: ['inbox'] }, true)).toContain(`\n\n${OMNISEARCH}`);
-    expect(instructionsFor({ writePaths: ['inbox'] }, true)).not.toContain('Under the read scope');
+  it('keeps the Omnisearch line for write paths alone, which leave reads vault-wide', () => {
+    expect(instructionsFor({ writePaths: ['inbox'] }, 'offered')).toBe(
+      join(
+        BASELINE,
+        `Vault path policy is enforced. Readable: full vault. Writable: 'inbox'. ${RECOVERY}`,
+        OMNISEARCH,
+      ),
+    );
   });
 });

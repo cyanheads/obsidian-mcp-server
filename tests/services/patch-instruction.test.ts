@@ -384,6 +384,30 @@ describe('sectionLevel', () => {
     expect(sectionLevel(note, 'A::C::New', false)).toBeUndefined();
     expect(sectionLevel(note, 'Nowhere', false)).toBeUndefined();
   });
+
+  it('counts from the first occurrence of a repeated ancestor', () => {
+    const repeated = '# A\n## B\n# A\n### B\n';
+    expect(sectionLevel(repeated, 'A::B::New', true)).toBe(3);
+    expect(sectionLevel(repeated, 'A::New', true)).toBe(2);
+  });
+
+  it('cuts a created path at its delimiters as they split it, a heading ending in `:` included', () => {
+    // `N:::x::New` splits as `N`, `:x`, `New`: its ancestors are `N` and `N:::x`, never `N:`.
+    expect(sectionLevel('# N:\n## x\n', 'N:::x::New', true)).toBe(3);
+    expect(sectionLevel('# N:\n', 'N:::New', true)).toBe(2);
+    expect(sectionLevel('# N\n', 'N:::New', true)).toBe(2);
+  });
+
+  /** The path a write creates is the caller's, and its segments are unbounded in number. */
+  it.each([
+    ['under an existing ancestor', 'A'],
+    ['with no existing ancestor', 'Q'],
+  ])('levels a created heading of many segments %s in linear time', async (_label, root) => {
+    await expectLinearCost(
+      (size) => `${root}${'::x'.repeat(size / 3)}`,
+      (path) => sectionLevel(note, path, true),
+    );
+  });
 });
 
 describe('flattenDocumentMap', () => {

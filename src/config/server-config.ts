@@ -109,8 +109,8 @@ const ServerConfigSchema = z.object({
     /**
      * Normalized here rather than at each `${baseUrl}${path}` join: the schema
      * is the one place that runs before anything reads the value, so a single
-     * transform covers `#request`, the HEAD size probe, the capability probe,
-     * and `deriveOmnisearchUrl` alike (issue #121).
+     * transform covers `#request` (the HEAD size probe included), the
+     * capability probe, and `deriveOmnisearchUrl` alike (issue #121).
      */
     .transform((url) => url.replace(/\/+$/, '')),
   verifySsl: envBoolean
@@ -122,8 +122,12 @@ const ServerConfigSchema = z.object({
     .number()
     .int()
     .positive()
+    // The longest delay a timer takes; past it both runtimes fire after 1 ms.
+    .max(2_147_483_647)
     .default(30_000)
-    .describe('Per-request timeout in milliseconds.'),
+    .describe(
+      'Milliseconds (at most 2147483647) one attempt at a Local REST API request — headers and body — may take before it fails with `obsidian_timeout`; an Omnisearch query past it fails with `omnisearch_unreachable`. GET, PUT, and DELETE retry a timed-out attempt, and every Local REST API request one tool or resource call makes shares a budget of 45 s, or of this value when it is longer.',
+    ),
   enableCommands: envBoolean
     .default(false)
     .describe(
@@ -153,7 +157,7 @@ const ServerConfigSchema = z.object({
     .url()
     .optional()
     .describe(
-      'Override URL for the Omnisearch plugin HTTP server. When unset, derives from OBSIDIAN_BASE_URL host with port 51361 (falling back to http://localhost:51361). Used to enable the optional `omnisearch` mode on `obsidian_search_notes`; if the URL is unreachable at startup, the mode is omitted from the tool schema.',
+      'Override URL for the Omnisearch plugin HTTP server. When unset, derives from OBSIDIAN_BASE_URL host with port 51361 (falling back to http://localhost:51361). Used to enable the optional `omnisearch` mode on `obsidian_search_notes`; if the URL is unreachable at startup, the mode is omitted from the tool schema. Under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS the mode is withheld and the URL is never called: Omnisearch ranks and selects its results over the whole vault, so they depend on notes outside the scope.',
     ),
 });
 

@@ -19,7 +19,7 @@ import {
 
 export const obsidianPatchNote = tool('obsidian_patch_note', {
   description:
-    'Edit a heading, block reference, or frontmatter field in place — append to, prepend to, or replace the target\'s body. On Local REST API v5.0 and later, content appended or prepended to a heading is separated from the section’s existing content by a blank line, except a list item appended to a section that ends in a list and has no sub-headings, or prepended to one that opens with a list, which continues that list. Use `obsidian_get_note` with `format: "document-map"` to discover available targets first. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too.',
+    'Edit a heading, block reference, or frontmatter field in place — append to, prepend to, or replace the target\'s body. On Local REST API v5.0 and later, content appended or prepended to a heading is separated from the section’s existing content by a blank line, except a list item appended to a section that ends in a list and has no sub-headings, or prepended to one that opens with a list, which continues that list. Use `obsidian_get_note` with `format: "document-map"` to discover available targets first. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too. A heading write is rejected with `repeated_link_definition` when a link reference definition that repeats an earlier label sits above where its section ends (for the last section, above its heading), which makes the plugin misplace the headings below it.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -132,6 +132,14 @@ export const obsidianPatchNote = tool('obsidian_patch_note', {
       when: 'On Local REST API v5.0 and later, the content of a heading write carries a heading at or above the target section’s own level, which would have to sit outside the section.',
       recovery:
         'Append the heading at the parent section or at the end of the note with obsidian_append_to_note, or write it one level below the target section or deeper.',
+    },
+    {
+      reason: 'repeated_link_definition',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.Conflict,
+      when: 'A link reference definition that repeats a label defined earlier in the note sits above where the target heading’s section ends (for the last section, above its heading); the Local REST API’s markdown parser drops it and misplaces every heading below it, so the write would land outside the section.',
+      recovery:
+        'Use obsidian_replace_in_note to place the content directly, or to remove or rename the repeated definition at `line`, then retry the section write.',
     },
     {
       reason: 'patch_rejected',

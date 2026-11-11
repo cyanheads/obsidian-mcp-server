@@ -26,7 +26,7 @@ const DEFAULT_TAG_LIMIT = 200;
 const MAX_TAG_LIMIT = 10_000;
 
 export const obsidianListTags = tool('obsidian_list_tags', {
-  description: `List the vault's tags with usage counts, ordered by count descending and capped at \`limit\` (default ${DEFAULT_TAG_LIMIT}) — the response says so when it withheld any. Includes hierarchical parents: \`work/tasks\` contributes to both \`work\` and \`work/tasks\`. Narrow with \`nameRegex\` for a known prefix or \`minCount\` to drop the single-use tail. To find notes by tag, use \`obsidian_search_notes\` in jsonlogic mode (e.g. \`{"in": ["work", {"var": "tags"}]}\`).`,
+  description: `List the vault's tags with usage counts, ordered by count descending and capped at \`limit\` (default ${DEFAULT_TAG_LIMIT}) — the response says so when it withheld any. Includes hierarchical parents: \`work/tasks\` contributes to both \`work\` and \`work/tasks\`. Narrow with \`nameRegex\` for a known prefix or \`minCount\` to drop the single-use tail. To find notes by tag, use \`obsidian_search_notes\` in jsonlogic mode, where a note's \`tags\` hold only its own tags as written: \`{"in": ["work", {"var": "tags"}]}\` matches \`work\` exactly, and \`{"some": [{"var": "tags"}, {"regexp": ["^work(/|$)", {"var": ""}]}]}\` adds its nested tags.`,
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     nameRegex: z

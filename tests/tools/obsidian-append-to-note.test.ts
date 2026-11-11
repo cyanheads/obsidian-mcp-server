@@ -405,6 +405,41 @@ describe('obsidian_append_to_note (section)', () => {
     });
   });
 
+  it('refuses a section append below a repeated link definition, on both surfaces, before any PATCH', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(60));
+    servePluginVersion(pool, '5.2.0');
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, documentMapV2({ Daily: {}, Next: {} }));
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, noteJson('Note.md', '- [ref_1]: /a\n\n[REF_1]: /b\n\n# Daily\n- a\n# Next\n'));
+    // No PATCH intercept — a write here would surface "No mock intercept".
+
+    const res = await runToolContract(obsidianAppendToNote, {
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Daily' },
+      content: '- b',
+    });
+
+    expect(res.isError).toBe(true);
+    const { error } = res.structuredContent as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(error.code).toBe(JsonRpcErrorCode.Conflict);
+    expect(error.data).toMatchObject({
+      reason: 'repeated_link_definition',
+      path: 'Note.md',
+      label: 'REF_1',
+      line: 3,
+      recovery: { hint: expect.stringContaining('obsidian_replace_in_note') },
+    });
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('defines the link label `[REF_1]` a second time');
+    expect(text).toContain('reason repeated_link_definition');
+  });
+
   it('rejects a heading that would leave the section as heading_outside_section on both surfaces (plugin v5.x)', async () => {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(200));

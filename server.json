@@ -37,7 +37,7 @@
         },
         {
           "name": "OBSIDIAN_REQUEST_TIMEOUT_MS",
-          "description": "Per-request timeout in milliseconds.",
+          "description": "Milliseconds one request attempt (headers and body) may take before it fails with obsidian_timeout. GET, PUT, and DELETE retry a timed-out attempt; all the requests of one tool call share a 45 s budget, or this value when it is longer.",
           "format": "string",
           "isRequired": false,
           "default": "30000"
@@ -83,7 +83,7 @@
         },
         {
           "name": "OBSIDIAN_OMNISEARCH_URL",
-          "description": "Override URL for the Omnisearch plugin HTTP server. Unset derives from OBSIDIAN_BASE_URL host with port 51361. Required only if the Omnisearch plugin is not on the default port.",
+          "description": "Override URL for the Omnisearch plugin HTTP server. Unset derives from OBSIDIAN_BASE_URL host with port 51361. Required only if the Omnisearch plugin is not on the default port. Under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS the URL is never called and the omnisearch search mode is withheld.",
           "format": "string",
           "isRequired": false
         },
@@ -134,7 +134,7 @@
         },
         {
           "name": "OBSIDIAN_REQUEST_TIMEOUT_MS",
-          "description": "Per-request timeout in milliseconds.",
+          "description": "Milliseconds one request attempt (headers and body) may take before it fails with obsidian_timeout. GET, PUT, and DELETE retry a timed-out attempt; all the requests of one tool call share a 45 s budget, or this value when it is longer.",
           "format": "string",
           "isRequired": false,
           "default": "30000"
@@ -180,7 +180,7 @@
         },
         {
           "name": "OBSIDIAN_OMNISEARCH_URL",
-          "description": "Override URL for the Omnisearch plugin HTTP server. Unset derives from OBSIDIAN_BASE_URL host with port 51361. Required only if the Omnisearch plugin is not on the default port.",
+          "description": "Override URL for the Omnisearch plugin HTTP server. Unset derives from OBSIDIAN_BASE_URL host with port 51361. Required only if the Omnisearch plugin is not on the default port. Under OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS the URL is never called and the omnisearch search mode is withheld.",
           "format": "string",
           "isRequired": false
         },

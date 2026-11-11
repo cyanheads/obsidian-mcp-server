@@ -67,7 +67,7 @@ async function readExactNote(ctx: Context, svc: ObsidianService, path: string): 
     throw notFound(
       didYouMean(err.message, suggestions),
       { ...(err.data ?? {}), suggestions },
-      { cause: err },
+      { cause: err, literals: suggestions },
     );
   }
   return await svc.getNoteContent(ctx, target);

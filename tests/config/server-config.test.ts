@@ -83,6 +83,16 @@ describe('getServerConfig', () => {
     expect(getServerConfig().requestTimeoutMs).toBe(12345);
   });
 
+  it('accepts OBSIDIAN_REQUEST_TIMEOUT_MS up to the longest timer delay, and rejects one past it', () => {
+    vi.stubEnv('OBSIDIAN_API_KEY', 'k');
+    vi.stubEnv('OBSIDIAN_REQUEST_TIMEOUT_MS', '2147483647');
+    expect(getServerConfig().requestTimeoutMs).toBe(2_147_483_647);
+    resetServerConfig();
+    // A timer past 2^31 - 1 ms fires after 1 ms on both runtimes, timing out every request.
+    vi.stubEnv('OBSIDIAN_REQUEST_TIMEOUT_MS', '2147483648');
+    expect(() => getServerConfig()).toThrow(/OBSIDIAN_REQUEST_TIMEOUT_MS/);
+  });
+
   it('honors a custom OBSIDIAN_BASE_URL', () => {
     vi.stubEnv('OBSIDIAN_API_KEY', 'k');
     vi.stubEnv('OBSIDIAN_BASE_URL', 'https://127.0.0.1:27124');

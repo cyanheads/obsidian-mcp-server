@@ -6,6 +6,8 @@
  * @module tests/services/obsidian-service-path-policy.test
  */
 
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import { Worker } from 'node:worker_threads';
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, type McpError } from '@cyanheads/mcp-ts-core/errors';
@@ -54,6 +56,22 @@ afterEach(() => {
   setObsidianService(undefined);
   vi.restoreAllMocks();
 });
+
+/** Heap plus external bytes still reachable after full collections, on Bun or Node. */
+async function retainedBytes(): Promise<number> {
+  const { Bun } = globalThis as { Bun?: { gc: (force: boolean) => void } };
+  for (let i = 0; i < 2; i++) {
+    // A turn of the event loop first, so nothing a settled request scheduled still holds its body.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (Bun) Bun.gc(true);
+    else {
+      v8.setFlagsFromString('--expose-gc');
+      (vm.runInNewContext('gc') as () => void)();
+    }
+  }
+  const { external, heapUsed } = process.memoryUsage();
+  return external + heapUsed;
+}
 
 function buildService(
   config: Partial<ServerConfig>,
@@ -613,7 +631,12 @@ describe('searchJsonLogic — OBSIDIAN_READ_PATHS evaluates over readable notes 
       vi.useRealTimers();
     });
 
-    /** A vault whose body reads never answer until their signal aborts. */
+    /**
+     * A vault whose body reads never answer until their signal aborts. The
+     * request timeout sits past the 45 s deadline, so the deadline ends the
+     * reads; under a shorter one each read times out first and is retried
+     * (`obsidian-service-timeout.test.ts`).
+     */
     function stalledBodies(count: number) {
       const vault = jsonLogicVault(
         Array.from({ length: count }, (_, i) => ({ path: `Work/n${i}.md`, content: 'x' })),
@@ -631,7 +654,10 @@ describe('searchJsonLogic — OBSIDIAN_READ_PATHS evaluates over readable notes 
       };
       return {
         vault,
-        svc: new ObsidianService(makeTestConfig({ readPaths: ['work'] }), fetchImpl),
+        svc: new ObsidianService(
+          makeTestConfig({ readPaths: ['work'], requestTimeoutMs: 60_000 }),
+          fetchImpl,
+        ),
       };
     }
 
@@ -760,6 +786,25 @@ describe('searchJsonLogic — OBSIDIAN_READ_PATHS evaluates over readable notes 
     expect(again.hits).toHaveLength(51);
     expect(again.walk).not.toBe(first.walk);
     expect(vault.bodies).toHaveLength(3);
+  });
+
+  it('evicts the walk read least recently, not the one stored first', async () => {
+    const vault = jsonLogicVault(workNotes(51));
+    const svc = new ObsidianService(makeTestConfig({ readPaths: ['work'] }), vault.fetchImpl);
+    // Each tree carries an 11 MiB default it never returns: any two fit the store, all three do not.
+    const tree = (fill: string) => ({ var: ['path', fill.repeat(11 * 1024 * 1024)] });
+    const a = await svc.pageJsonLogic(ctx, tree('a'), undefined, 50);
+    const b = await svc.pageJsonLogic(ctx, tree('b'), undefined, 50);
+    // Reading A's walk leaves B's the one read least recently.
+    expect((await svc.pageJsonLogic(ctx, tree('a'), a.walk, 50)).walk).toBe(a.walk);
+    await svc.pageJsonLogic(ctx, tree('c'), undefined, 50);
+    expect(vault.bodies).toHaveLength(3);
+    expect((await svc.pageJsonLogic(ctx, tree('a'), a.walk, 50)).walk).toBe(a.walk);
+    expect(vault.bodies).toHaveLength(3);
+    const again = await svc.pageJsonLogic(ctx, tree('b'), b.walk, 50);
+    expect(again.hits).toHaveLength(51);
+    expect(again.walk).not.toBe(b.walk);
+    expect(vault.bodies).toHaveLength(4);
   });
 
   it('fails a tree past the depth bound with logic_too_costly before serializing it', async () => {
@@ -1231,7 +1276,12 @@ describe('searchText — under a read scope, matched in-server over the readable
       vi.useRealTimers();
     });
 
-    /** A readable vault whose body reads never answer until their signal aborts. */
+    /**
+     * A readable vault whose body reads never answer until their signal
+     * aborts. The request timeout sits past the 45 s deadline, so the deadline
+     * ends the reads; under a shorter one each read times out first and is
+     * retried (`obsidian-service-timeout.test.ts`).
+     */
     function stalledBodies(count: number) {
       const vault = jsonLogicVault(
         Array.from({ length: count }, (_, i) => ({ path: `Work/n${i}.md`, content: 'x' })),
@@ -1249,7 +1299,10 @@ describe('searchText — under a read scope, matched in-server over the readable
       };
       return {
         vault,
-        svc: new ObsidianService(makeTestConfig({ readPaths: ['work'] }), fetchImpl),
+        svc: new ObsidianService(
+          makeTestConfig({ readPaths: ['work'], requestTimeoutMs: 60_000 }),
+          fetchImpl,
+        ),
       };
     }
 
@@ -1287,6 +1340,169 @@ describe('searchText — under a read scope, matched in-server over the readable
       expect(await run).toBe(controller.signal.reason);
       expect(vi.getTimerCount()).toBe(0);
     });
+  });
+});
+
+/**
+ * A scoped text walk is searched once: `pageText` stores the capped hits of a
+ * first page that runs past one page under a walk id, in the store JSONLogic
+ * walks share, keyed by `query`, `contextLength`, and `maxMatchesPerHit`.
+ * Issue #177.
+ */
+describe('pageText — a scoped text walk searched once', () => {
+  /** `count` readable notes, `Work/n000.md` on, each holding `body`, plus one out-of-scope note. */
+  const workNotes = (count: number, body = 'x one x two x three') => [
+    ...Array.from({ length: count }, (_, i) => ({
+      path: `Work/n${String(i).padStart(3, '0')}.md`,
+      content: body,
+    })),
+    { path: 'Private/p.md', content: body },
+  ];
+  const search = { query: 'x', contextLength: 100, maxMatchesPerHit: 2 };
+  const scoped = (notes: VaultNote[]) => {
+    const vault = jsonLogicVault(notes);
+    return {
+      vault,
+      svc: new ObsidianService(makeTestConfig({ readPaths: ['work'] }), vault.fetchImpl),
+    };
+  };
+
+  it('gives each first page its own walk, and reads a known walk with no request', async () => {
+    const { vault, svc } = scoped(workNotes(51));
+    const one = await svc.pageText(ctx, search, undefined, 50);
+    const two = await svc.pageText(ctx, search, undefined, 50);
+    expect(one.hits).toHaveLength(51);
+    expect(one.hits[0]).toEqual({
+      filename: 'Work/n000.md',
+      matches: [
+        {
+          context: 'x one x two x three',
+          match: { start: 0, end: 1, contextStart: 0, contextEnd: 1 },
+        },
+        {
+          context: 'x one x two x three',
+          match: { start: 6, end: 7, contextStart: 6, contextEnd: 7 },
+        },
+      ],
+      totalMatches: 3,
+      truncated: true,
+    });
+    expect(one.walk).toEqual(expect.any(String));
+    expect(two.walk).toEqual(expect.any(String));
+    expect(two.walk).not.toBe(one.walk);
+    const searched = vault.requests.length;
+    expect(searched).toBe(2 * 52);
+    expect(await svc.pageText(ctx, search, one.walk, 50)).toEqual({
+      hits: one.hits,
+      walk: one.walk,
+    });
+    expect(vault.requests).toHaveLength(searched);
+    // An id this service never issued searches fresh, under a new walk.
+    const unknown = await svc.pageText(ctx, search, 'not-a-walk', 50);
+    expect(unknown.hits).toEqual(one.hits);
+    expect([one.walk, two.walk, 'not-a-walk']).not.toContain(unknown.walk);
+    expect(vault.requests).toHaveLength(searched + 52);
+  });
+
+  it('reads a walk only for the inputs and the mode that stored it', async () => {
+    const { vault, svc } = scoped(workNotes(51));
+    const a = await svc.pageText(ctx, search, undefined, 50);
+    const once = vault.requests.length;
+    for (const change of [{ query: 'X' }, { contextLength: 5 }, { maxMatchesPerHit: 3 }]) {
+      const b = await svc.pageText(ctx, { ...search, ...change }, a.walk, 50);
+      expect(b.walk).toEqual(expect.any(String));
+      expect(b.walk).not.toBe(a.walk);
+      // B's own walk serves B alone, with no request.
+      const requests = vault.requests.length;
+      expect(await svc.pageText(ctx, { ...search, ...change }, b.walk, 50)).toEqual(b);
+      expect(vault.requests).toHaveLength(requests);
+    }
+    expect(vault.requests).toHaveLength(4 * once);
+    // A's walk is untouched by the others.
+    expect(await svc.pageText(ctx, search, a.walk, 50)).toEqual(a);
+    expect(vault.requests).toHaveLength(4 * once);
+    // A JSONLogic walk's id searches fresh in text mode, and a text walk's evaluates fresh in jsonlogic.
+    const logic = await svc.pageJsonLogic(ctx, { var: 'path' }, undefined, 50);
+    expect(logic.walk).toEqual(expect.any(String));
+    const text = await svc.pageText(ctx, search, logic.walk, 50);
+    expect(text.hits).toEqual(a.hits);
+    expect(text.walk).not.toBe(logic.walk);
+    expect(vault.bodies).toHaveLength(6);
+    const back = await svc.pageJsonLogic(ctx, { var: 'path' }, a.walk, 50);
+    expect(back.hits).toEqual(logic.hits);
+    expect(vault.bodies).toHaveLength(7);
+  });
+
+  it('stores no walk for a search with no hits or a single page of them, nor an unscoped one', async () => {
+    const { svc } = scoped(workNotes(51));
+    expect(await svc.pageText(ctx, { ...search, query: 'absent' }, undefined, 50)).toEqual({
+      hits: [],
+    });
+    const onePage = await svc.pageText(ctx, { ...search, pathPrefix: 'Work/n00' }, undefined, 50);
+    expect(onePage.hits).toHaveLength(10);
+    expect(onePage).not.toHaveProperty('walk');
+    const twoPages = await svc.pageText(ctx, search, undefined, 50);
+    expect(twoPages.hits).toHaveLength(51);
+    expect(twoPages.walk).toEqual(expect.any(String));
+
+    const simple: string[] = [];
+    const unscoped = new ObsidianService(makeTestConfig({ writePaths: ['work'] }), async (url) => {
+      simple.push(new URL(url).pathname);
+      const hits = Array.from({ length: 51 }, (_, i) => ({
+        filename: `Work/n${i}.md`,
+        score: 0,
+        matches: [{ context: 'x', match: { start: 0, end: 1 } }],
+      }));
+      return mockResponse(JSON.stringify(hits), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const all = await unscoped.pageText(ctx, search, undefined, 50);
+    expect(all.hits).toHaveLength(51);
+    expect(all).not.toHaveProperty('walk');
+    expect(simple).toEqual(['/search/simple/']);
+  });
+
+  it('stores each window as a string of its own, keeping no note body it was cut from', async () => {
+    // 51 bodies of 2,000,001 characters, each matched once with a 201-character window.
+    const { svc } = scoped(workNotes(51, `x${'b'.repeat(2_000_000)}`));
+    const before = await retainedBytes();
+    const { walk } = await svc.pageText(ctx, search, undefined, 50);
+    expect(walk).toEqual(expect.any(String));
+    // A walk whose windows held their bodies would keep about 100 MB reachable.
+    expect((await retainedBytes()) - before).toBeLessThan(25_000_000);
+  });
+
+  it('keeps no walk whose hits outgrow the store, sized by their serialized matches', async () => {
+    // 51 windows of 700,001 characters: about 35.7 million, past the 32 MiB store.
+    const half = 'a'.repeat(350_000);
+    const { svc } = scoped(workNotes(51, `${half}x${half}`));
+    const whole = await svc.pageText(ctx, { ...search, contextLength: 350_000 }, undefined, 50);
+    expect(whole.hits).toHaveLength(51);
+    expect(whole.hits[0]?.matches[0]?.context).toHaveLength(700_001);
+    expect(whole).not.toHaveProperty('walk');
+    const narrow = await svc.pageText(ctx, { ...search, contextLength: 5 }, undefined, 50);
+    expect(narrow.walk).toEqual(expect.any(String));
+  });
+
+  it('shares one store with JSONLogic walks, evicting the least recently read', async () => {
+    const half = 'a'.repeat(170_000);
+    const { vault, svc } = scoped(workNotes(51, `${half}x${half}`));
+    // 51 windows of 340,001 characters: about 17.3 million, so it and a 17 MiB tree pass the store together.
+    const text = await svc.pageText(ctx, { ...search, contextLength: 170_000 }, undefined, 50);
+    expect(text.walk).toEqual(expect.any(String));
+    const tree = { var: ['path', 'y'.repeat(17 * 1024 * 1024)] };
+    const logic = await svc.pageJsonLogic(ctx, tree, undefined, 50);
+    expect(logic.walk).toEqual(expect.any(String));
+    const requests = vault.requests.length;
+    expect((await svc.pageJsonLogic(ctx, tree, logic.walk, 50)).walk).toBe(logic.walk);
+    expect(vault.requests).toHaveLength(requests);
+    // Storing the tree's walk evicted the text walk, whose next page searches again.
+    const again = await svc.pageText(ctx, { ...search, contextLength: 170_000 }, text.walk, 50);
+    expect(again.hits).toEqual(text.hits);
+    expect(again.walk).not.toBe(text.walk);
+    expect(vault.requests).toHaveLength(requests + 52);
   });
 });
 

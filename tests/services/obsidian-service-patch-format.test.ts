@@ -11,15 +11,18 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it } from 'vitest';
-import { ObsidianService } from '@/services/obsidian/obsidian-service.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { type ObsidianFetch, ObsidianService } from '@/services/obsidian/obsidian-service.js';
 import type { PatchInstruction } from '@/services/obsidian/types.js';
 import {
   type DispatchOpts,
   documentMapV2,
+  type HeadingTree,
   instructionOf,
+  type MockResponse,
   makeTestConfig,
   mockResponse,
+  nodeFetchRejection,
   noteJson,
   rejectionOf,
   repeatKey,
@@ -69,12 +72,19 @@ function serveMapV2(headings: Parameters<typeof documentMapV2>[0]): void {
   });
 }
 
-/** Answer a note read (the note+json the service fetches for heading levels). */
-function serveNote(content: string): void {
+/**
+ * Answer one note read (the note+json a heading write fetches once, for its
+ * link definitions, list continuation, and heading levels), and count it: a
+ * second read finds no intercept and fails the call.
+ */
+function serveNote(content: string): { reads: number } {
+  const served = { reads: 0 };
   pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
     expect(lower(opts.headers).accept).toBe('application/vnd.olrapi.note+json');
+    served.reads++;
     return { statusCode: 200, data: noteJson('N.md', content) };
   });
+  return served;
 }
 
 const heading = (target: string, extra: Partial<PatchInstruction> = {}): PatchInstruction => ({
@@ -89,6 +99,7 @@ describe('markdown-patch 2.0 on Local REST API 5.x', () => {
   it('sends a heading write as a JSON instruction with an array target', async () => {
     servePluginVersion(pool, '5.2.0');
     serveMapV2({ Top: { Child: {} } });
+    serveNote('# Top\n## Child\n');
     const patches = capturePatches();
 
     await expect(service.patchNote(ctx, NOTE, 'Hello', heading('Top::Child'))).resolves.toBe(
@@ -115,6 +126,7 @@ describe('markdown-patch 2.0 on Local REST API 5.x', () => {
   it('expands a bare leaf, then targets the resolved path as an array', async () => {
     servePluginVersion(pool, '5.2.0');
     serveMapV2({ Top: { Child: {} }, '': { Untitled: {} } });
+    serveNote('# Top\n## Child\n#\n## Untitled\n');
     const patches = capturePatches();
 
     await expect(service.patchNote(ctx, NOTE, 'x', heading('Untitled'))).resolves.toBe(
@@ -327,15 +339,16 @@ describe('markdown-patch 2.0 on Local REST API 5.x', () => {
       ['a `#` line inside a fence', '```\n## not a heading\n```\n'],
       ['a setext heading, which 2.0 does not re-level', 'Sub\n---\ntext\n'],
       ['a hashtag', '#tag and more\n'],
-    ])('sends %s as written, without reading the note', async (_l, content) => {
+    ])('sends %s as written, from the one note read the write makes', async (_l, content) => {
       servePluginVersion(pool, '5.2.0');
       serveMapV2({ Top: { Child: {} } });
-      // No note read intercepted: one would surface "No mock intercept".
+      const note = serveNote('# Top\n## Child\nbody\n');
       const patches = capturePatches();
 
       await service.patchNote(ctx, NOTE, content, heading('Top::Child'));
 
       expect(instructionOf(patches[0] as DispatchOpts).content).toBe(content);
+      expect(note.reads).toBe(1);
     });
 
     it('leaves block content alone — 2.0 splices it literally', async () => {
@@ -767,16 +780,17 @@ describe('a list item written beside the list its section ends or opens with, on
     ['a thematic break', '---'],
     ['a fenced list', '```\n- three\n```'],
   ])(
-    'appends content opening with %s as the plain write, without reading the note',
+    'appends content opening with %s as the plain write, from the one note read the write makes',
     async (_l, content) => {
       servePluginVersion(pool, '5.2.0');
       serveMapV2({ T: { A: {} } });
-      // No note read intercepted: one would surface "No mock intercept".
+      const note = serveNote(LIST);
       const patches = capturePatches();
 
       await service.patchNote(ctx, NOTE, content, heading('T::A'));
 
       expect(instructionOf(patches[0] as DispatchOpts)).toEqual(plain('append', content));
+      expect(note.reads).toBe(1);
     },
   );
 
@@ -789,6 +803,7 @@ describe('a list item written beside the list its section ends or opens with, on
   it('replaces the section body with the plain write', async () => {
     servePluginVersion(pool, '5.2.0');
     serveMapV2({ T: { A: {} } });
+    serveNote(LIST);
     const patches = capturePatches();
 
     await service.patchNote(ctx, NOTE, '- new', heading('T::A', { operation: 'replace' }));
@@ -1234,6 +1249,48 @@ describe('format negotiation', () => {
     expect(patches).toHaveLength(2);
   });
 
+  it("reads the version again for a write whose shared read another call's cancellation ended", async () => {
+    let reads = 0;
+    let readStarted: () => void = () => {};
+    const firstRead = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    const fetchImpl: ObsidianFetch = async (url, init) => {
+      if (new URL(url).pathname !== '/') return mockResponse('', { status: 200 });
+      reads++;
+      if (reads > 1) {
+        return mockResponse(
+          JSON.stringify({ status: 'OK', service: 's', versions: { self: '5.2.0' } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      readStarted();
+      return await new Promise<never>((_, reject) => {
+        const { signal } = init;
+        if (signal?.aborted) reject(signal.reason);
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    };
+    const svc = new ObsidianService(makeTestConfig(), fetchImpl);
+    const block = {
+      operation: 'append',
+      targetType: 'block',
+      target: 'p1',
+      contentType: 'markdown',
+    } as const;
+    const cancelled = new AbortController();
+
+    const first = svc.patchNote(createMockContext({ signal: cancelled.signal }), NOTE, 'a', block);
+    await firstRead;
+    const second = svc.patchNote(createMockContext(), NOTE, 'b', block);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    cancelled.abort(new Error('the first caller cancelled'));
+
+    await expect(first).rejects.toThrow('the first caller cancelled');
+    await expect(second).resolves.toBe('p1');
+    expect(reads).toBe(2);
+  });
+
   it('surfaces a failing GET / as its classified error and sends no PATCH', async () => {
     const { calls, fetchImpl } = sequencedFetch(() =>
       mockResponse(JSON.stringify({ message: 'boom' }), {
@@ -1318,6 +1375,421 @@ describe('format negotiation', () => {
       service.getNoteJson(ctx, { type: 'periodic', period: 'daily' }),
     ).rejects.toMatchObject({
       data: { reason: 'periodic_unsupported' },
+    });
+  });
+});
+
+/**
+ * `marked` drops a link reference definition whose label is already defined,
+ * and both markdown-patch engines place headings by summing the raw lengths of
+ * the tokens it keeps, so every heading below a dropped definition sits short
+ * by its length. A heading write is refused before any PATCH when the first
+ * dropped definition starts above the point the engine reads its offsets to:
+ * the heading closing the section (the section's own heading when nothing
+ * closes it), the `within` block, or the heading closing a created section's
+ * ancestor. Issue #175.
+ */
+describe('a heading write below a repeated link definition', () => {
+  const TAIL = '# H\n\nbody\n\n# Next\n\ntail\n';
+  const TOP = `[r]: /a\n[r]: /b\n\n${TAIL}`;
+
+  /** The 2.0 heading tree for `::`-joined `paths`. */
+  const treeOf = (paths: readonly string[]): HeadingTree => {
+    const tree: HeadingTree = {};
+    for (const path of paths) {
+      let node = tree;
+      for (const segment of path.split('::')) node = node[segment] ??= {};
+    }
+    return tree;
+  };
+
+  /** Serve the reads a heading write to `note` makes: the version, the map listing `paths`, the note. */
+  function serveReads(version: string, note: string, paths: readonly string[]): void {
+    servePluginVersion(pool, version);
+    if (version.startsWith('5')) serveMapV2(treeOf(paths));
+    else {
+      pool
+        .intercept({ path: '/vault/N.md', method: 'GET' })
+        .reply(200, { headings: paths, blocks: [], frontmatterFields: [] });
+    }
+    serveNote(note);
+  }
+
+  const refusal = (label: string, line: number, target: string) => ({
+    code: JsonRpcErrorCode.Conflict,
+    message: `Line ${line} of N.md defines the link label [${label}] a second time. The Local REST API's markdown parser drops a repeated definition and misplaces every heading below it, so this write to section '${target}' would land outside that section.`,
+    data: { path: 'N.md', reason: 'repeated_link_definition', label, line },
+  });
+
+  describe('refuses before any PATCH', () => {
+    const SHAPES = {
+      'a definition repeated at the top': [TOP, 'r', 2],
+      'a repeat inside the section': [
+        '# H\n\n[r]: /a\n[r]: /b\n\nbody\n\n# Next\n\ntail\n',
+        'r',
+        4,
+      ],
+      'a label a list item defined first': [`- [r]: /a\n\n[r]: /b\n\n${TAIL}`, 'r', 3],
+      'a label a blockquote defined first': [`> [r]: /a\n\n[r]: /b\n\n${TAIL}`, 'r', 3],
+      'a repeated footnote-style label': [
+        `text[^1]\n\n[^1]: first\n[^1]: second\n\n${TAIL}`,
+        '^1',
+        4,
+      ],
+      'a label repeated in another letter case': [`[A]: /x\n[a]: /y\n\n${TAIL}`, 'a', 2],
+      'a label repeated with other whitespace': [`[a  b]: /x\n[a b]: /y\n\n${TAIL}`, 'a b', 2],
+      // Narrowing: a prepend reads only the section's start, but the guard judges the whole section.
+      'a repeat inside the section, for a prepend': [
+        '[r]: /a\n\n# H\n\nbody\n\n[r]: /b\n\n# Next\n',
+        'r',
+        7,
+      ],
+    } as const;
+
+    it.each([
+      ['a definition repeated at the top', '5.2.0', 'append'],
+      ['a definition repeated at the top', '5.2.0', 'prepend'],
+      ['a definition repeated at the top', '5.2.0', 'replace'],
+      ['a definition repeated at the top', '4.2.0', 'append'],
+      ['a definition repeated at the top', '4.2.0', 'prepend'],
+      ['a definition repeated at the top', '4.2.0', 'replace'],
+      ['a repeat inside the section', '5.2.0', 'append'],
+      ['a repeat inside the section', '4.2.0', 'replace'],
+      ['a label a list item defined first', '5.2.0', 'append'],
+      ['a label a list item defined first', '4.2.0', 'prepend'],
+      ['a label a blockquote defined first', '5.2.0', 'replace'],
+      ['a label a blockquote defined first', '4.2.0', 'append'],
+      ['a repeated footnote-style label', '5.2.0', 'append'],
+      ['a repeated footnote-style label', '4.2.0', 'replace'],
+      ['a label repeated in another letter case', '5.2.0', 'prepend'],
+      ['a label repeated in another letter case', '4.2.0', 'append'],
+      ['a label repeated with other whitespace', '5.2.0', 'append'],
+      ['a label repeated with other whitespace', '4.2.0', 'prepend'],
+      ['a repeat inside the section, for a prepend', '5.2.0', 'prepend'],
+      ['a repeat inside the section, for a prepend', '4.2.0', 'prepend'],
+    ] as const)('%s, on plugin %s, for an %s', async (shape, version, operation) => {
+      const [note, label, line] = SHAPES[shape];
+      serveReads(version, note, ['H', 'Next']);
+      const patches = capturePatches();
+
+      const err = await rejectionOf(service.patchNote(ctx, NOTE, 'X', heading('H', { operation })));
+
+      expect(err).toMatchObject(refusal(label, line, 'H'));
+      expect(err.literals).toEqual([`[${label}]`]);
+      expect(patches).toHaveLength(0);
+    });
+
+    it.each([
+      ['append', '- c'],
+      ['prepend', '- z'],
+    ] as const)(
+      'for a list item %sed `within` the section’s list, on plugin v5.x',
+      async (operation, content) => {
+        serveReads('5.2.0', '[r]: /a\n[r]: /b\n\n# H\n\n- a\n- b\n\n# Next\n', ['H', 'Next']);
+        const patches = capturePatches();
+
+        const err = await rejectionOf(
+          service.patchNote(ctx, NOTE, content, heading('H', { operation })),
+        );
+
+        expect(err).toMatchObject(refusal('r', 2, 'H'));
+        expect(patches).toHaveLength(0);
+      },
+    );
+
+    it('for table rows under a heading, which plugin v5.x takes in the 1.x format', async () => {
+      servePluginVersion(pool, '5.2.0');
+      pool
+        .intercept({ path: '/vault/N.md', method: 'GET' })
+        .reply(200, { headings: ['H', 'Next'], blocks: [], frontmatterFields: [] });
+      serveNote('[r]: /a\n[r]: /b\n\n# H\n| a |\n| - |\n| 1 |\n# Next\n');
+      const patches = capturePatches();
+
+      const err = await rejectionOf(
+        service.patchNote(ctx, NOTE, '[["2"]]', heading('H', { contentType: 'json' })),
+      );
+
+      expect(err).toMatchObject(refusal('r', 2, 'H'));
+      expect(patches).toHaveLength(0);
+    });
+
+    it.each(['5.2.0', '4.2.0'])(
+      'for a section created under an ancestor whose section holds the repeat, on plugin %s',
+      async (version) => {
+        serveReads(version, '# A\n\n[r]: /a\n[r]: /b\n\nbody\n\n# B\n', ['A', 'B']);
+        const patches = capturePatches();
+
+        const err = await rejectionOf(
+          service.patchNote(ctx, NOTE, 'X', heading('A::New', { createTargetIfMissing: true })),
+        );
+
+        expect(err).toMatchObject(refusal('r', 4, 'A::New'));
+        expect(patches).toHaveLength(0);
+      },
+    );
+
+    it('names an expanded leaf by the path it resolved to', async () => {
+      serveReads('5.2.0', `[r]: /a\n[r]: /b\n\n# T\n## H\nbody\n# Next\n`, ['T', 'T::H', 'Next']);
+
+      await expect(service.patchNote(ctx, NOTE, 'X', heading('H'))).rejects.toMatchObject(
+        refusal('r', 2, 'T::H'),
+      );
+    });
+
+    it('counts lines in the note’s own bytes, frontmatter and CRLF endings included', async () => {
+      serveReads('5.2.0', '---\r\ntitle: x\r\n---\r\n[r]: /a\r\n[r]: /b\r\n\r\n# H\r\nbody\r\n', [
+        'H',
+      ]);
+
+      await expect(
+        service.patchNote(ctx, NOTE, 'X', heading('H', { operation: 'prepend' })),
+      ).rejects.toMatchObject(refusal('r', 5, 'H'));
+    });
+  });
+
+  describe('leaves alone', () => {
+    it.each([
+      ['5.2.0', 'append'],
+      ['4.2.0', 'append'],
+      ['5.2.0', 'replace'],
+    ] as const)(
+      'a section that ends above the first repeat, on plugin %s, for an %s',
+      async (version, operation) => {
+        serveReads(version, '# H\n\nbody\n\n# Next\n\n[r]: /a\n[r]: /b\n\ntail\n', ['H', 'Next']);
+        const patches = capturePatches();
+
+        await expect(service.patchNote(ctx, NOTE, 'X', heading('H', { operation }))).resolves.toBe(
+          'H',
+        );
+        expect(patches).toHaveLength(1);
+      },
+    );
+
+    it.each([
+      ['5.2.0', 'append'],
+      ['5.2.0', 'prepend'],
+      ['5.2.0', 'replace'],
+      ['4.2.0', 'append'],
+      ['4.2.0', 'prepend'],
+      ['4.2.0', 'replace'],
+    ] as const)(
+      'repeats at the bottom of the last section, on plugin %s, for a %s',
+      async (version, operation) => {
+        serveReads(version, '# H\n\nbody\n\n[r]: /a\n[r]: /b\n', ['H']);
+        const patches = capturePatches();
+
+        await expect(service.patchNote(ctx, NOTE, 'X', heading('H', { operation }))).resolves.toBe(
+          'H',
+        );
+        expect(patches).toHaveLength(1);
+      },
+    );
+
+    it.each(['5.2.0', '4.2.0'])(
+      'a missing top-level heading created at the end of the note, on plugin %s',
+      async (version) => {
+        serveReads(version, TOP, ['H', 'Next']);
+        const patches = capturePatches();
+
+        await expect(
+          service.patchNote(ctx, NOTE, 'X', heading('Fresh', { createTargetIfMissing: true })),
+        ).resolves.toBe('Fresh');
+        expect(patches).toHaveLength(1);
+      },
+    );
+
+    it.each(['5.2.0', '4.2.0'])(
+      'a section created under an ancestor that runs to the end of the note, on plugin %s',
+      async (version) => {
+        serveReads(version, '[r]: /a\n[r]: /b\n\n# A\n\nbody\n', ['A']);
+        const patches = capturePatches();
+
+        await expect(
+          service.patchNote(ctx, NOTE, 'X', heading('A::New', { createTargetIfMissing: true })),
+        ).resolves.toBe('A::New');
+        expect(patches).toHaveLength(1);
+      },
+    );
+
+    it('a missing heading the write will not create, reading no note, so the plugin reports it', async () => {
+      servePluginVersion(pool, '5.2.0');
+      serveMapV2({ H: {}, Next: {} });
+      // No note read intercepted: one would surface "No mock intercept".
+      pool.intercept({ path: '/vault/N.md', method: 'PATCH' }).reply(404, {
+        message: 'Not Found\ncould not resolve heading target ["Nope"]',
+        errorCode: 40400,
+      });
+
+      await expect(service.patchNote(ctx, NOTE, 'X', heading('Nope'))).rejects.toMatchObject({
+        data: { reason: 'section_target_missing' },
+      });
+    });
+
+    it.each([
+      ['5.2.0', 'block', 'p1'],
+      ['5.2.0', 'frontmatter', 'title'],
+      ['4.2.0', 'block', 'p1'],
+      ['4.2.0', 'frontmatter', 'title'],
+    ] as const)(
+      'a write to a %s target on plugin %s, reading no note',
+      async (version, targetType, target) => {
+        servePluginVersion(pool, version);
+        // No note read intercepted: one would surface "No mock intercept".
+        const patches = capturePatches();
+
+        await service.patchNote(ctx, NOTE, 'X', {
+          operation: 'append',
+          targetType: targetType as 'block',
+          target,
+          contentType: 'markdown',
+        });
+        expect(patches).toHaveLength(1);
+      },
+    );
+
+    it.each(['5.2.0', '4.2.0'])(
+      'a note without a repeated definition, on plugin %s',
+      async (version) => {
+        serveReads(version, `[r]: /a\n[s]: /b\n\n${TAIL}`, ['H', 'Next']);
+        const patches = capturePatches();
+
+        await expect(service.patchNote(ctx, NOTE, 'X', heading('H'))).resolves.toBe('H');
+        expect(patches).toHaveLength(1);
+      },
+    );
+
+    it.each([
+      ['append', '- c', { within: -1, content: '\n- c' }],
+      ['prepend', '- z', { within: 0, content: '- z\n' }],
+    ] as const)(
+      'a list item %sed `within` a list above the repeat',
+      async (operation, content, shape) => {
+        serveReads('5.2.0', '[r]: /a\n\n# H\n\n- a\n- b\n\n[r]: /b\n\n# Next\n', ['H', 'Next']);
+        const patches = capturePatches();
+
+        await service.patchNote(ctx, NOTE, content, heading('H', { operation }));
+
+        expect(instructionOf(patches[0] as DispatchOpts)).toMatchObject({
+          scope: 'content',
+          ...shape,
+        });
+      },
+    );
+  });
+
+  /**
+   * The check's note read goes through the same request path as the PATCH it
+   * guards: a failure fails the write with the reason the PATCH would have
+   * failed with. A GET retries a 5xx, a timeout, and an unreachable plugin, where
+   * the PATCH makes one attempt.
+   */
+  describe('a failed note read', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    type Failure = (signal: AbortSignal | undefined) => Promise<MockResponse>;
+    const status =
+      (code: number, message: string): Failure =>
+      async () =>
+        mockResponse(JSON.stringify({ message, errorCode: code * 100 }), {
+          status: code,
+          headers: { 'content-type': 'application/json' },
+        });
+    const FAILURES: ReadonlyArray<readonly [string, Failure]> = [
+      ['404', status(404, 'Not Found')],
+      ['403', status(403, 'Forbidden')],
+      ['400', status(400, 'Bad Request')],
+      ['405', status(405, 'Method Not Allowed')],
+      ['429', status(429, 'Too Many Requests')],
+      ['500', status(500, 'Internal Server Error')],
+      ['503', status(503, 'Service Unavailable')],
+      [
+        'an unreachable plugin',
+        async () => {
+          throw nodeFetchRejection('ECONNREFUSED', 'connect ECONNREFUSED 127.0.0.1:27123');
+        },
+      ],
+      [
+        'a connection dropped mid-body',
+        async () =>
+          mockResponse(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('{"content":"'));
+              },
+              pull(controller) {
+                controller.error(
+                  new TypeError('terminated', {
+                    cause: Object.assign(new Error('other side closed'), {
+                      name: 'SocketError',
+                      code: 'UND_ERR_SOCKET',
+                    }),
+                  }),
+                );
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+      ],
+      [
+        'no response headers before the request timeout',
+        (signal) =>
+          new Promise((_, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+      ],
+    ];
+
+    /** A plugin v5.x that serves the map and the note and answers 200 to a PATCH, except where `fails`. */
+    async function writeFailing(fails: 'note' | 'patch', failure: Failure) {
+      const seen: string[] = [];
+      const ok = (body: unknown) =>
+        mockResponse(JSON.stringify(body), {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            'content-disposition': 'attachment; filename="N.md"',
+          },
+        });
+      const fetchImpl: ObsidianFetch = async (url, init) => {
+        const accept = (init.headers as Record<string, string>).Accept ?? '';
+        const kind =
+          new URL(url).pathname === '/'
+            ? 'version'
+            : init.method === 'PATCH'
+              ? 'patch'
+              : accept === MAP_ACCEPT
+                ? 'map'
+                : 'note';
+        seen.push(kind);
+        if (kind === fails) return failure(init.signal);
+        if (kind === 'version')
+          return ok({ status: 'OK', service: 's', versions: { self: '5.2.0' } });
+        if (kind === 'map') return ok(documentMapV2({ H: {}, Next: {} }));
+        if (kind === 'note') return ok(noteJson('N.md', TAIL));
+        return mockResponse('', { status: 200 });
+      };
+      vi.useFakeTimers();
+      const svc = new ObsidianService(makeTestConfig(), fetchImpl);
+      const settled = svc.patchNote(createMockContext(), NOTE, 'X', heading('H')).then(
+        () => expect.unreachable('expected a rejection'),
+        (e: unknown) => e as { code: number; data: Record<string, unknown>; message: string },
+      );
+      await vi.runAllTimersAsync();
+      return { err: await settled, seen };
+    }
+
+    it.each(FAILURES)('fails with the reason a PATCH failing with %s has', async (_l, failure) => {
+      const patch = await writeFailing('patch', failure);
+      const read = await writeFailing('note', failure);
+
+      expect(read.seen).not.toContain('patch');
+      expect(read.err.code).toBe(patch.err.code);
+      expect(read.err.data.reason).toBe(patch.err.data.reason);
+      expect(read.err.data.status).toBe(patch.err.data.status);
+      // A retried read may add "(failed after N attempts)"; the PATCH's message leads it.
+      expect(read.err.message).toContain(patch.err.message);
     });
   });
 });

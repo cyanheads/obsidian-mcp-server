@@ -82,6 +82,9 @@ describe('obsidian_patch_note', () => {
     pool
       .intercept({ path: '/vault/Note.md', method: 'GET' })
       .reply(200, documentMapV2({ Sandbox: { 'Section A': {} } }));
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, noteJson('Note.md', '# Sandbox\n## Section A\nOld.\n'));
 
     let seenTarget: unknown;
     pool.intercept({ path: '/vault/Note.md', method: 'PATCH' }).reply((opts) => {
@@ -231,6 +234,44 @@ describe('obsidian_patch_note', () => {
     expect(text).toContain("Heading 'Root::Dup' occurs 2 times in Note.md");
     expect(text).toContain('obsidian_replace_in_note');
     expect(text).toContain('reason ambiguous_section');
+  });
+
+  it('refuses a heading write below a repeated link definition, on both surfaces, before any PATCH', async () => {
+    const pool = harness.current().pool;
+    pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(60));
+    servePluginVersion(pool, '5.2.0');
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, documentMapV2({ H: {}, Next: {} }));
+    pool
+      .intercept({ path: '/vault/Note.md', method: 'GET' })
+      .reply(200, noteJson('Note.md', '[r_1]: /a\n[r_1]: /b\n\n# H\n\nbody\n\n# Next\n'));
+    // No PATCH intercept — a write here would surface "No mock intercept".
+
+    const res = await runToolContract(obsidianPatchNote, {
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'H' },
+      operation: 'append',
+      content: 'x',
+    });
+
+    expect(res.isError).toBe(true);
+    const { error } = res.structuredContent as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(error.code).toBe(JsonRpcErrorCode.Conflict);
+    expect(error.data).toMatchObject({
+      reason: 'repeated_link_definition',
+      path: 'Note.md',
+      label: 'r_1',
+      line: 2,
+      recovery: { hint: expect.stringContaining('obsidian_replace_in_note') },
+    });
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    // The label is one the caller copies into obsidian_replace_in_note, so it renders unescaped.
+    expect(text).toContain('defines the link label `[r_1]` a second time');
+    expect(text).toContain('obsidian_replace_in_note');
+    expect(text).toContain('reason repeated_link_definition');
   });
 
   it('throws note_missing (NotFound) from the pre-PATCH HEAD, before any PATCH', async () => {

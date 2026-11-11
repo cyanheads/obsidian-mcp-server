@@ -140,7 +140,7 @@ export const obsidianOpenInUi = tool('obsidian_open_in_ui', {
             ...(suggestions.length > 0 ? { suggestions } : {}),
             recovery: { hint: hintParts.join(' ') },
           },
-          { cause: err },
+          { cause: err, literals: suggestions },
         );
       }
     }

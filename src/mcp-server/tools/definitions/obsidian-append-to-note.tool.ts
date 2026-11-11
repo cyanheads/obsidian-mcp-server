@@ -16,7 +16,7 @@ import { withCaseVariantNamed } from './_shared/suggest-paths.js';
 
 export const obsidianAppendToNote = tool('obsidian_append_to_note', {
   description:
-    'Append content to a note. **Without `section`: appends to the end of the file, or creates the file if it does not exist (your content becomes the full file).** When an existing file does not end in a line break, one is inserted before your content. On a case-insensitive filesystem, a path that differs from an existing note only in letter case fails with `case_variant_exists` (`existingPath` names the note when the folder listing shows exactly one case match). With `section`: appends to the end of that heading/block/frontmatter (on Local REST API v5.0 and later, content appended to a heading is separated from the section’s existing content by a blank line, except a list item appended to a section that ends in a list and has no sub-headings, which continues that list) — use `obsidian_get_note` with `format: "document-map"` to discover available targets. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
+    'Append content to a note. **Without `section`: appends to the end of the file, or creates the file if it does not exist (your content becomes the full file).** When an existing file does not end in a line break, one is inserted before your content. On a case-insensitive filesystem, a path that differs from an existing note only in letter case fails with `case_variant_exists` (`existingPath` names the note when the folder listing shows exactly one case match). With `section`: appends to the end of that heading/block/frontmatter (on Local REST API v5.0 and later, content appended to a heading is separated from the section’s existing content by a blank line, except a list item appended to a section that ends in a list and has no sub-headings, which continues that list) — use `obsidian_get_note` with `format: "document-map"` to discover available targets. Name a heading by its full `Parent::Child` path as the document map lists it, or by a bare leaf name matched at any depth. A leaf shared by several headings is rejected with `ambiguous_section`, unless one of them has no parent heading, in which case the write targets that one; a full path that occurs more than once in the note is rejected with `ambiguous_section` too. A heading append is rejected with `repeated_link_definition` when a link reference definition that repeats an earlier label sits above where its section ends (for the last section, above its heading), which makes the plugin misplace the headings below it. For block-reference targets, content is concatenated adjacent to the block line without inserting a separator — include a leading newline in `content` if you want one. Set `createTargetIfMissing` to bring the target section into existence rather than failing when it does not exist.',
   annotations: { destructiveHint: true },
   input: z.object({
     target: TargetSchema.describe('Where the note lives.'),
@@ -147,6 +147,14 @@ export const obsidianAppendToNote = tool('obsidian_append_to_note', {
       when: 'On Local REST API v5.0 and later, content appended to a heading carries a heading at or above that section’s own level, which would have to sit outside the section.',
       recovery:
         'Append the heading at the parent section or at the end of the note (no `section`), or write it one level below the target section or deeper.',
+    },
+    {
+      reason: 'repeated_link_definition',
+      thrownBy: 'service',
+      code: JsonRpcErrorCode.Conflict,
+      when: 'A link reference definition that repeats a label defined earlier in the note sits above where the target heading’s section ends (for the last section, above its heading); the Local REST API’s markdown parser drops it and misplaces every heading below it, so the append would land outside the section.',
+      recovery:
+        'Use obsidian_replace_in_note to place the content directly, or to remove or rename the repeated definition at `line`, then retry the section append.',
     },
     {
       reason: 'patch_rejected',

@@ -77,7 +77,7 @@ function recordingService(overrides: Partial<ServerConfig> = {}): {
 /** Drive every `#fetch` call site the service owns. */
 async function exerciseEveryCallSite(service: ObsidianService, ctx: Context): Promise<void> {
   await service.listTags(ctx); // #request
-  await service.tryGetSize(ctx, { type: 'path', path: 'N.md' }); // HEAD, bypasses #request
+  await service.tryGetSize(ctx, { type: 'path', path: 'N.md' }); // #request, HEAD, single attempt
   await service.probeOmnisearch(); // startup probe
   await service.searchOmnisearch(ctx, 'q'); // Omnisearch query
 }

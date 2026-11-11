@@ -11,8 +11,11 @@
  *
  * Every rejection is shaped from one recorded on Bun 1.4.0 and Node 26.5.0:
  * a closed port, an unresolvable host, a socket reset on accept, and a socket
- * closed with no bytes. Calls are counted through the real `#request` and
- * `withRetry`, so an attempt count here is the attempt count on the wire.
+ * closed with no bytes. A connection dropped after the headers, mid-body, is
+ * shaped from Bun 1.4.4 and Node 26.13.0; the body is read inside the attempt,
+ * so it is classified and retried the same way. Calls are counted through the
+ * real `#request` and `withRetry`, so an attempt count here is the attempt
+ * count on the wire.
  *
  * @module tests/services/obsidian-service-unreachable.test
  */
@@ -30,6 +33,7 @@ import {
 } from '@/services/obsidian/obsidian-service.js';
 import {
   bunFetchRejection,
+  type MockResponse,
   makeTestConfig,
   mockResponse,
   nodeFetchRejection,
@@ -313,6 +317,123 @@ describe('ObsidianService connection failure (issue #136)', () => {
       await expect(call(serviceOver(fetchImpl), ctx)).rejects.toBe(rejection);
       expect(calls).toHaveLength(1);
     }
+  });
+});
+
+/** How each runtime rejects a body read when the socket closes after the headers, mid-body. */
+const DROPPED_MID_BODY = [
+  [
+    'Bun',
+    () =>
+      bunFetchRejection(
+        'ECONNRESET',
+        'ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()',
+      ),
+  ],
+  [
+    'Node',
+    () =>
+      new TypeError('terminated', {
+        cause: Object.assign(new Error('other side closed'), {
+          name: 'SocketError',
+          code: 'UND_ERR_SOCKET',
+        }),
+      }),
+  ],
+] as const;
+
+/** A 200 whose body sends a fragment, then fails with `rejection` once the next chunk is read. */
+function droppedMidBody(rejection: Error): () => MockResponse {
+  return () =>
+    mockResponse(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"tags":[{"name":"a'));
+        },
+        pull(controller) {
+          controller.error(rejection);
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+}
+
+const DROPPED_MESSAGE =
+  'The Obsidian Local REST API closed the connection before its response finished.';
+
+describe('a connection dropped mid-body', () => {
+  it.each(DROPPED_MID_BODY)(
+    'on %s, a GET spends the full retry budget, then throws obsidian_unreachable',
+    async (_runtime, reject) => {
+      const { calls, fetchImpl } = sequencedFetch(droppedMidBody(reject()));
+
+      const err = await rejectionOf(serviceOver(fetchImpl).listTags(createMockContext()));
+
+      expect(calls).toHaveLength(FULL_BUDGET);
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.message).toBe(`${DROPPED_MESSAGE} (failed after ${FULL_BUDGET} attempts)`);
+      expect(err.data).toEqual({
+        reason: 'obsidian_unreachable',
+        recovery: {
+          hint: 'Obsidian may have quit, or reloaded the Local REST API plugin, while answering. Confirm it is running with the plugin enabled; a write it was answering may already have applied, so read the note before repeating one.',
+        },
+        retryAttempts: FULL_BUDGET,
+        operation: 'obsidian.GET /tags/',
+      });
+    },
+  );
+
+  it.each(DROPPED_MID_BODY)(
+    'on %s, a POST throws typed on its first attempt',
+    async (_r, reject) => {
+      const rejection = reject();
+      const { calls, fetchImpl } = sequencedFetch(droppedMidBody(rejection));
+
+      const err = await rejectionOf(serviceOver(fetchImpl).searchText(createMockContext(), 'q'));
+
+      expect(calls).toHaveLength(1);
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.message).toBe(DROPPED_MESSAGE);
+      expect(err.data).toMatchObject({ reason: 'obsidian_unreachable' });
+      expect(err.cause).toBe(rejection);
+    },
+  );
+
+  it('builds the same message and data from the Bun and the Node shape, with no runtime text', async () => {
+    const [bun, node] = await Promise.all(
+      DROPPED_MID_BODY.map(([, reject]) =>
+        rejectionOf(
+          serviceOver(sequencedFetch(droppedMidBody(reject())).fetchImpl).listTags(
+            createMockContext(),
+          ),
+        ),
+      ),
+    );
+
+    expect({ message: bun?.message, data: bun?.data }).toEqual({
+      message: node?.message,
+      data: node?.data,
+    });
+    for (const err of [bun, node]) {
+      const wire = wireOf(err as McpError);
+      expect(wire).not.toContain(HOST);
+      expect(wire).not.toMatch(/ECONN|UND_ERR|terminated|socket|other side closed|verbose/i);
+    }
+  });
+
+  it('recovers when a later attempt reads its body whole', async () => {
+    const { calls, fetchImpl } = sequencedFetch(droppedMidBody(DROPPED_MID_BODY[1][1]()), () =>
+      mockResponse('{"tags":[{"name":"a","count":1}]}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    await expect(serviceOver(fetchImpl).listTags(createMockContext())).resolves.toEqual([
+      { name: 'a', count: 1 },
+    ]);
+    expect(calls).toHaveLength(2);
   });
 });
 

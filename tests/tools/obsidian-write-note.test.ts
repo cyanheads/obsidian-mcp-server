@@ -533,21 +533,18 @@ describe('obsidian_write_note (section, plugin v5.x)', () => {
     res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
 
   /**
-   * HEAD before the write, the version report, the 2.0 map, and — for content
-   * carrying a heading — the note the section's level is read from.
+   * HEAD before the write, the version report, the 2.0 map, and the note's one
+   * read, which the write checks for repeated link definitions and reads the
+   * section's level from.
    */
-  function serveReads(note?: string) {
+  function serveReads(note = '# Top\n## Section A\nold\n') {
     const pool = harness.current().pool;
     pool.intercept({ path: '/vault/Note.md', method: 'HEAD' }).reply(200, '', cl(300));
     servePluginVersion(pool, '5.2.0');
     pool
       .intercept({ path: '/vault/Note.md', method: 'GET' })
       .reply(200, documentMapV2({ Top: { 'Section A': {} } }));
-    if (note !== undefined) {
-      pool
-        .intercept({ path: '/vault/Note.md', method: 'GET' })
-        .reply(200, noteJson('Note.md', note));
-    }
+    pool.intercept({ path: '/vault/Note.md', method: 'GET' }).reply(200, noteJson('Note.md', note));
     return pool;
   }
 
@@ -630,6 +627,34 @@ describe('obsidian_write_note (section, plugin v5.x)', () => {
     const text = textOf(res);
     expect(text).toContain("Heading '## Different Heading' in the content is level 2");
     expect(text).toContain('heading_outside_section');
+  });
+
+  it('refuses a section replace below a repeated link definition, on both surfaces, without writing', async () => {
+    serveReads('> [r_1]: /a\n\n[r_1]: /b\n\n# Top\n## Section A\nold\n');
+    // No PATCH intercept — a write here would surface "No mock intercept".
+
+    const res = await runToolContract(obsidianWriteNote, {
+      target: { type: 'path', path: 'Note.md' },
+      section: { type: 'heading', target: 'Top::Section A' },
+      content: 'new body',
+    });
+
+    expect(res.isError).toBe(true);
+    const { error } = res.structuredContent as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(error.code).toBe(JsonRpcErrorCode.Conflict);
+    expect(error.data).toMatchObject({
+      reason: 'repeated_link_definition',
+      path: 'Note.md',
+      label: 'r_1',
+      line: 3,
+      recovery: { hint: expect.stringContaining('obsidian_replace_in_note') },
+    });
+    const text = textOf(res);
+    expect(text).toContain('defines the link label `[r_1]` a second time');
+    expect(text).toContain("this write to section 'Top::Section A'");
+    expect(text).toContain('reason repeated_link_definition');
   });
 });
 

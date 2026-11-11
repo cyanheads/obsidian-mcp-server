@@ -13,6 +13,7 @@
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
 import { getDefaults, Lexer, type Token, Tokenizer, type Tokens } from 'marked';
 import { splice } from './frontmatter-ops.js';
+import type { Within } from './patch-instruction.js';
 import type { NoteJson, SectionTarget } from './types.js';
 
 /** Delimiter joining a heading path, matching upstream's PATCH `Target-Delimiter`. */
@@ -103,7 +104,7 @@ const PLUGIN_FRONTMATTER =
  */
 export function scanHeadings(content: string): Heading[] {
   const { normalized, at } = pluginBody(content);
-  return [...topLevelTokens(normalized)].flatMap((top) => {
+  return lexBody(normalized).tokens.flatMap((top) => {
     const heading = headingOf(normalized, top);
     return heading ? [{ ...heading, start: at(heading.start), end: at(heading.end) }] : [];
   });
@@ -162,24 +163,54 @@ export interface SectionBody {
  */
 export function sectionBody(content: string, path: string): SectionBody | undefined {
   const { normalized, at } = pluginBody(content);
-  const tokens = [...topLevelTokens(normalized)];
-  const headings = tokens.flatMap((top, index) => {
-    const heading = headingOf(normalized, top);
-    return heading ? [{ ...heading, index }] : [];
-  });
-  const h = headingPaths(headings).indexOf(path);
+  const { tokens } = lexBody(normalized);
+  const { headings, paths } = indexHeadings(normalized, tokens);
+  const h = paths.indexOf(path);
   const heading = headings[h];
   if (!heading) return;
   const next = headings[h + 1];
-  const closing = headings.find((other, i) => i > h && other.level <= heading.level);
   return {
-    blocks: tokens
-      .slice(heading.index + 1, next?.index)
-      .filter(({ token }) => token.type !== 'space')
-      .map(({ token }) => token.type),
-    content: content.slice(at(heading.end), at(closing?.start ?? normalized.length)),
+    blocks: directBody(tokens, heading, next).map(({ token }) => token.type),
+    content: content.slice(at(heading.end), at(closingOf(headings, h)?.start ?? normalized.length)),
     subsections: next !== undefined && next.level > heading.level,
   };
+}
+
+/** A heading found in a body's top-level tokens, with its token's index there and `raw` text. */
+interface IndexedHeading extends Heading {
+  index: number;
+  raw: string;
+}
+
+/** The headings among `tokens` (lexed from `normalized`), and the full path of each. */
+function indexHeadings(
+  normalized: string,
+  tokens: readonly TopLevelToken[],
+): { headings: IndexedHeading[]; paths: string[] } {
+  const headings = tokens.flatMap((top, index) => {
+    const heading = headingOf(normalized, top);
+    return heading ? [{ ...heading, index, raw: top.token.raw }] : [];
+  });
+  return { headings, paths: headingPaths(headings) };
+}
+
+/** The heading closing the section of `headings[h]`: the next one at its level or shallower. */
+function closingOf(headings: readonly Heading[], h: number): Heading | undefined {
+  const heading = headings[h];
+  return heading && headings.find((other, i) => i > h && other.level <= heading.level);
+}
+
+/**
+ * The top-level blocks of `heading`'s direct body, up to `next` (the heading
+ * after it, of any level): the blocks 2.0 assigns the section and a `within`
+ * index counts. A `space` token is not a block.
+ */
+function directBody(
+  tokens: readonly TopLevelToken[],
+  heading: IndexedHeading,
+  next: IndexedHeading | undefined,
+): TopLevelToken[] {
+  return tokens.slice(heading.index + 1, next?.index).filter(({ token }) => token.type !== 'space');
 }
 
 /**
@@ -196,12 +227,10 @@ export function sectionBody(content: string, path: string): SectionBody | undefi
  * The 1.x engine lexes the frontmatter-stripped body with its line endings
  * normalized, then applies the token offsets to the note's own bytes unmapped;
  * these offsets are computed the same way, so on a CRLF note they drift as the
- * engine's do. They also sum the kept tokens alone, as the engine does, so
- * after a definition `marked` drops (a repeated label) they fall short by its
- * length as the engine's do. A label first defined inside a list item, or in
- * a blockquote the scan leaves unlexed, is the exception: the scan keeps the
- * later definition the engine drops, so the span there stays on the note's
- * headings.
+ * engine's do. The engine's offsets sum only the tokens `marked` keeps, so
+ * below a definition it drops they fall short of these; they agree wherever a
+ * write goes out, since a write whose span such a definition shifts is
+ * refused first (`droppedDefinitionInReach`).
  */
 export function v1HeadingSpan(
   content: string,
@@ -209,16 +238,11 @@ export function v1HeadingSpan(
 ): { end: number; start: number } | undefined {
   const bodyStart = PLUGIN_FRONTMATTER.exec(content)?.[0].length ?? 0;
   const { normalized } = normalizeLineEndings(content.slice(bodyStart));
-  let kept = 0;
-  const headings = [...topLevelTokens(normalized)].flatMap(({ token }) => {
-    const heading = headingOf(normalized, { offset: kept, token });
-    kept += token.raw.length;
-    return heading ? [{ ...heading, raw: token.raw }] : [];
-  });
-  const h = headingPaths(headings).indexOf(path);
+  const { headings, paths } = indexHeadings(normalized, lexBody(normalized).tokens);
+  const h = paths.indexOf(path);
   const heading = headings[h];
   if (!heading) return;
-  const closing = headings.find((other, i) => i > h && other.level <= heading.level);
+  const closing = closingOf(headings, h);
   return {
     start: bodyStart + heading.start + heading.raw.trimEnd().length + 1,
     end: closing ? bodyStart + closing.start : content.length,
@@ -227,9 +251,218 @@ export function v1HeadingSpan(
 
 /** The `marked` token type of each top-level block in `markdown`, in order. */
 export function blockKinds(markdown: string): string[] {
-  return [...topLevelTokens(normalizeLineEndings(markdown).normalized)].flatMap(({ token }) =>
+  return lexBody(normalizeLineEndings(markdown).normalized).tokens.flatMap(({ token }) =>
     token.type === 'space' ? [] : [token.type],
   );
+}
+
+/** A link reference definition the plugin's `marked` drops, as a refused write names it. */
+export interface DroppedDefinition {
+  /** The label as the definition writes it, between its brackets. */
+  label: string;
+  /** 1-based line of `content` the definition starts on, counting `\r\n`, `\r`, and `\n` breaks. */
+  line: number;
+}
+
+/** A heading write, as `droppedDefinitionInReach` judges it. */
+interface HeadingWrite {
+  /** Whether the write creates the heading when the note lacks it (`createTargetIfMissing`). */
+  create: boolean;
+  /** The heading's full `::`-joined path. */
+  path: string;
+  /** The direct-body block a 2.0 `within` write addresses; absent for a plain write. */
+  within?: Within | undefined;
+}
+
+/**
+ * The first top-level link reference definition the plugin's `marked` drops
+ * — one repeating a label already defined, compared as `marked` compares
+ * them: case-folded, whitespace runs collapsed — above the point a heading
+ * write to full path `path` reads its offsets to, or `undefined` when none
+ * does. Both markdown-patch engines place headings by summing the raw lengths
+ * of the tokens `marked` keeps, so every offset below a dropped definition
+ * falls short by its length; a write that reads one lands outside its
+ * section. The point is, for:
+ *
+ * - a heading the note has (its first occurrence): the heading closing its
+ *   section, or the heading itself when the section runs to the end of the
+ *   note, whose end the engines take from the note's length;
+ * - a 2.0 `within` write: the start of the direct-body block it addresses;
+ * - a heading the note lacks, with `create`: the heading closing the section
+ *   of its deepest existing ancestor, where the engines insert it — none
+ *   when that section runs to the end of the note or no ancestor exists, since
+ *   the engines then insert at the note's end. A path through a repeated
+ *   heading resolves to a different ancestor in each engine (2.0 walks each
+ *   heading's first occurrence, 1.x takes the last occurrence of the longest
+ *   path the note has), so the point is the farther of their two;
+ * - a heading the note lacks, without `create`: none, since no write goes in.
+ *
+ * Exact for the range each write reads: a prepend places by the section's
+ * start and an append by its end, but each one's duplicate check and
+ * empty-section test read the whole section, so both are judged by it.
+ */
+export function droppedDefinitionInReach(
+  content: string,
+  write: HeadingWrite,
+): DroppedDefinition | undefined {
+  if (!repeatsLabel(content)) return;
+  const { normalized, at } = pluginBody(content);
+  const scan = lexBody(normalized);
+  const reach = writeReach(normalized, scan.tokens, write);
+  const dropped = reach === undefined ? undefined : firstDropBefore(scan, reach);
+  if (!dropped) return;
+  const line = (content.slice(0, at(dropped.offset)).match(/\r\n?|\n/g)?.length ?? 0) + 1;
+  return { label: definitionLabel(dropped.raw), line };
+}
+
+/**
+ * Whether two `[label]:` anywhere in `content` share a coarse key. A
+ * definition `marked` drops repeats one defined before it, so a note where
+ * none share a key has none, and needs no lex.
+ */
+function repeatsLabel(content: string): boolean {
+  const keys = new Set<string>();
+  for (const label of containerLabels(content)) {
+    const key = labelKey(label);
+    if (keys.has(key)) return true;
+    keys.add(key);
+  }
+  return false;
+}
+
+/** The offset in the body a heading write reads its offsets up to, as `droppedDefinitionInReach` lists them. */
+function writeReach(
+  normalized: string,
+  tokens: readonly TopLevelToken[],
+  write: HeadingWrite,
+): number | undefined {
+  const { headings, paths } = indexHeadings(normalized, tokens);
+  const h = paths.indexOf(write.path);
+  const heading = headings[h];
+  if (heading) {
+    const body = write.within === undefined ? [] : directBody(tokens, heading, headings[h + 1]);
+    const block = write.within === 0 ? body[0] : body.at(-1);
+    return block?.offset ?? (closingOf(headings, h) ?? heading).start;
+  }
+  if (!write.create) return;
+  const ends = [
+    firstOccurrenceAncestor(headings, write.path),
+    lastOccurrenceAncestor(paths, write.path),
+  ]
+    .map((ancestor) => (ancestor === undefined ? undefined : closingOf(headings, ancestor)?.start))
+    .filter((end) => end !== undefined);
+  return ends.length > 0 ? Math.max(...ends) : undefined;
+}
+
+/**
+ * The heading markdown-patch 2.0 creates the missing heading at `path` under:
+ * `path` walked from the top a segment at a time, each step taking the first
+ * child of that text of the heading reached so far, until a segment names
+ * none. Headings nest at most six deep, so the walk ends within seven steps
+ * whatever the length of `path`.
+ */
+function firstOccurrenceAncestor(headings: readonly Heading[], path: string): number | undefined {
+  const parents = headingParents(headings);
+  let reached = -1;
+  for (const segment of path.split(HEADING_DELIMITER)) {
+    const child = headings.findIndex((h, i) => parents[i] === reached && h.text === segment);
+    if (child === -1) break;
+    reached = child;
+  }
+  return reached === -1 ? undefined : reached;
+}
+
+/**
+ * The heading markdown-patch 1.x creates the missing heading at `path` under:
+ * the longest heading path that `path` extends by whole segments, at its last
+ * occurrence — the one the 1.x map keys that path to. Each path is compared
+ * once, so the search is linear in the paths' length and in `path`'s.
+ */
+function lastOccurrenceAncestor(paths: readonly string[], path: string): number | undefined {
+  let found: number | undefined;
+  let length = -1;
+  paths.forEach((candidate, i) => {
+    if (candidate.length >= length && path.startsWith(`${candidate}${HEADING_DELIMITER}`)) {
+      found = i;
+      length = candidate.length;
+    }
+  });
+  return found;
+}
+
+/**
+ * The first definition stock `marked` drops in the body `scan` lexed that
+ * starts before `reach`. Two kinds: each one the scan dropped — it registers a
+ * subset of the labels `marked` does, so `marked` drops it too — and each
+ * `def` block the scan kept whose label a list or blockquote above it may
+ * define first. The scan lexes neither container (see `HeadingScanTokenizer`),
+ * so it never registers that first label; `marked` does, and drops the later
+ * definition. A container's labels are read from its raw text, which also
+ * finds a `[x]:` that `marked` reads as no definition — mid-line, in a fence,
+ * after a task checkbox — and keys compare coarsely (`labelKey`), so this
+ * finds every definition `marked` drops and some it keeps.
+ */
+function firstDropBefore(scan: BodyScan, reach: number): DroppedSpan | undefined {
+  const [scanned] = scan.dropped;
+  const limit = Math.min(reach, scanned?.offset ?? reach);
+  const defined = new Set<string>();
+  for (const { offset, token } of scan.tokens) {
+    if (offset >= limit) break;
+    if (token.type === 'list' || token.type === 'blockquote') {
+      for (const label of containerLabels(token.raw)) defined.add(labelKey(label));
+    } else if (token.type === 'def' && defined.has(labelKey(definitionLabel(token.raw)))) {
+      return { offset, raw: token.raw };
+    }
+  }
+  return scanned && scanned.offset < reach ? scanned : undefined;
+}
+
+/**
+ * A label as `marked` tags it (`toLowerCase()`, whitespace runs collapsed),
+ * coarsened: whitespace and `>` removed and `ς` read as `σ`. A multi-line
+ * label inside a list item or blockquote carries the container's prefixes
+ * (indentation, `>`) in the raw text, and none in the tag `marked` gives it,
+ * so equal tags always give equal keys; a few unequal ones (`a>b`, `ab`) do too.
+ */
+function labelKey(label: string): string {
+  return label.toLowerCase().replaceAll('ς', 'σ').replace(/[\s>]/g, '');
+}
+
+/** The label a definition's `raw` opens with, between its brackets as written. */
+function definitionLabel(raw: string): string {
+  const open = raw.indexOf('[');
+  return raw.slice(open + 1, bracketAt(raw, open + 1));
+}
+
+/**
+ * The offset of the first `[` or `]` at or after `from` in `text` that no
+ * backslash escapes, reading each `\` and the character after it as a pair,
+ * or `text.length`.
+ */
+function bracketAt(text: string, from: number): number {
+  let i = from;
+  while (i < text.length && text[i] !== '[' && text[i] !== ']') i += text[i] === '\\' ? 2 : 1;
+  return Math.min(i, text.length);
+}
+
+/**
+ * Every `[label]:` in `text` whose label holds no unescaped bracket, in one
+ * pass: at each unescaped `[`, the label runs to the next unescaped bracket,
+ * and the scan resumes at it when it is a `[`, past it otherwise. Nothing is
+ * read twice, which is sound because a definition's opening `[` is never
+ * escaped and never inside such a run.
+ */
+function* containerLabels(text: string): Generator<string> {
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === '\\') i += 2;
+    else if (text[i] !== '[') i++;
+    else {
+      const end = bracketAt(text, i + 1);
+      if (text[end] === ']' && text[end + 1] === ':') yield text.slice(i + 1, end);
+      i = text[end] === '[' ? end : end + 1;
+    }
+  }
 }
 
 /** A top-level block token and its offset in the text it was lexed from. */
@@ -238,33 +471,47 @@ interface TopLevelToken {
   token: Token;
 }
 
+/** A top-level link reference definition `marked` reads and drops, and its offset in the text lexed. */
+interface DroppedSpan {
+  offset: number;
+  raw: string;
+}
+
+/** One lex of a body: the top-level tokens `marked` keeps, and the definitions the scan saw it drop. */
+interface BodyScan {
+  /** In order, each a definition whose label the lex had already registered. */
+  dropped: DroppedSpan[];
+  tokens: TopLevelToken[];
+}
+
 /**
  * The top-level block tokens `marked` reads in `markdown` (line endings
  * already `\n`), each with its offset — the running sum of the `raw` lengths
- * before it. Those lengths cover the input except where `marked` drops a
- * definition, so each dropped definition's length joins the sum where the
- * definition stood.
+ * before it — and the definitions the scan dropped. Those lengths cover the
+ * input except where `marked` drops a definition, so each dropped
+ * definition's length joins the sum where the definition stood.
  */
-function* topLevelTokens(markdown: string): Generator<TopLevelToken> {
+function lexBody(markdown: string): BodyScan {
   const tokenizer = new HeadingScanTokenizer();
   const lexer = new Lexer({ ...getDefaults(), tokenizer });
   const { rules } = tokenizer;
   tokenizer.rules = { ...rules, block: { ...rules.block, paragraph: PARAGRAPH } };
-  const tokens = lexer.blockTokens(markdown);
-  const { droppedDefinitions } = tokenizer;
+  const lexed = lexer.blockTokens(markdown);
+  const dropped = tokenizer.droppedDefinitions.map(({ raw, remaining }) => ({
+    offset: markdown.length - remaining,
+    raw,
+  }));
+  const tokens: TopLevelToken[] = [];
   let offset = 0;
-  let dropped = 0;
-  for (const token of tokens) {
-    for (
-      let gap = droppedDefinitions[dropped];
-      gap && markdown.length - gap.remaining === offset;
-      gap = droppedDefinitions[++dropped]
-    ) {
-      offset += gap.length;
+  let next = 0;
+  for (const token of lexed) {
+    for (let gap = dropped[next]; gap?.offset === offset; gap = dropped[++next]) {
+      offset += gap.raw.length;
     }
-    yield { offset, token };
+    tokens.push({ offset, token });
     offset += token.raw.length;
   }
+  return { dropped, tokens };
 }
 
 /**
@@ -331,16 +578,16 @@ class HeadingScanTokenizer extends Tokenizer {
   /**
    * Each top-level definition `marked` drops, in order: the length of the
    * source left when it was read — its position counted from the end — and
-   * its own length.
+   * its text.
    */
-  readonly droppedDefinitions: Array<{ length: number; remaining: number }> = [];
+  readonly droppedDefinitions: Array<{ raw: string; remaining: number }> = [];
   /** Stock blockquote calls open on the stack; only within one does a nested lex run. */
   #quoteDepth = 0;
 
   override def(src: string): Tokens.Def | undefined {
     const token = super.def(src);
     if (token && this.#quoteDepth === 0 && this.lexer.tokens.links[token.tag]) {
-      this.droppedDefinitions.push({ length: token.raw.length, remaining: src.length });
+      this.droppedDefinitions.push({ raw: token.raw, remaining: src.length });
     }
     return token;
   }
@@ -456,21 +703,34 @@ function trimTrailingLineFeeds(text: string): string {
 
 /**
  * Build the full `Parent::Child` path of every heading, in document order. A
- * heading's parent is the nearest preceding heading strictly shallower than it,
- * and its path is the parent's path plus its own text — the serialization the
- * document map emits, so a path built here is a locator the write path resolves
- * as an exact map entry. Untitled headings contribute an empty segment
- * (`::Request body`, `Top::::Child`), and a top-level untitled heading's own
- * path is `""`, which the map omits.
+ * heading's path is its parent's path (`headingParents`) plus its own text —
+ * the serialization the document map emits, so a path built here is a locator
+ * the write path resolves as an exact map entry. Untitled headings contribute
+ * an empty segment (`::Request body`, `Top::::Child`), and a top-level
+ * untitled heading's own path is `""`, which the map omits.
  */
 function headingPaths(headings: ReadonlyArray<Pick<Heading, 'level' | 'text'>>): string[] {
-  const stack: Array<{ level: number; path: string }> = [];
-  return headings.map(({ level, text }) => {
-    while ((stack.at(-1)?.level ?? 0) >= level) stack.pop();
-    const parent = stack.at(-1);
-    const path = parent ? `${parent.path}${HEADING_DELIMITER}${text}` : text;
-    stack.push({ level, path });
-    return path;
+  const parents = headingParents(headings);
+  const paths: string[] = [];
+  headings.forEach(({ text }, i) => {
+    const parent = paths[parents[i] ?? -1];
+    paths.push(parent === undefined ? text : `${parent}${HEADING_DELIMITER}${text}`);
+  });
+  return paths;
+}
+
+/**
+ * The index of each heading's parent in `headings` — the nearest preceding
+ * heading strictly shallower than it, as the document map nests them — or -1
+ * for a heading with none.
+ */
+function headingParents(headings: ReadonlyArray<Pick<Heading, 'level'>>): number[] {
+  const open: Array<{ index: number; level: number }> = [];
+  return headings.map(({ level }, index) => {
+    while ((open.at(-1)?.level ?? 0) >= level) open.pop();
+    const parent = open.at(-1)?.index ?? -1;
+    open.push({ index, level });
+    return parent;
   });
 }
 
@@ -496,12 +756,45 @@ export function sectionLevel(content: string, path: string, create: boolean): nu
   const paths = headingPaths(headings);
   const own = headings[paths.indexOf(path)];
   if (own || !create) return own?.level;
-  const segments = path.split(HEADING_DELIMITER);
-  for (let depth = segments.length - 1; depth >= 1; depth--) {
-    const found = headings[paths.indexOf(segments.slice(0, depth).join(HEADING_DELIMITER))];
-    if (found) return found.level + segments.length - depth;
+  const ancestor = deepestAncestor(paths, path);
+  if (ancestor === undefined) return cutsOf(path).length + 1;
+  return (headings[ancestor.index] as Heading).level + ancestor.missing;
+}
+
+/**
+ * The deepest proper ancestor of heading path `path` that `paths` holds — a
+ * prefix ending where `path.split(HEADING_DELIMITER)` cuts it — as the index
+ * of its first occurrence and the count of `path`'s segments below it, or
+ * `undefined` when `paths` holds none. Each of `paths` is compared at most
+ * once, at the one cut its length matches, so the search is linear in their
+ * length and in `path`'s.
+ */
+export function deepestAncestor(
+  paths: readonly string[],
+  path: string,
+): { index: number; missing: number } | undefined {
+  const byLength = new Map<number, number[]>();
+  paths.forEach((p, index) => {
+    const same = byLength.get(p.length);
+    if (same) same.push(index);
+    else byLength.set(p.length, [index]);
+  });
+  const cuts = cutsOf(path);
+  for (let k = cuts.length - 1; k >= 0; k--) {
+    const index = byLength.get(cuts[k] as number)?.find((i) => path.startsWith(paths[i] as string));
+    if (index !== undefined) return { index, missing: cuts.length - k };
   }
-  return segments.length;
+  return;
+}
+
+/** The offsets at which `path.split(HEADING_DELIMITER)` cuts `path`, in order. */
+function cutsOf(path: string): number[] {
+  const cuts: number[] = [];
+  for (let at = path.indexOf(HEADING_DELIMITER); at !== -1; ) {
+    cuts.push(at);
+    at = path.indexOf(HEADING_DELIMITER, at + HEADING_DELIMITER.length);
+  }
+  return cuts;
 }
 
 /**
@@ -556,7 +849,7 @@ const ATX_OPENING = /^([ \t]{0,3})(#+)/;
 export function atxHeadingMarkers(markdown: string): AtxHeadingFragment {
   const { normalized } = normalizeLineEndings(markdown);
   const markers: AtxHeadingMarker[] = [];
-  for (const { token, offset } of topLevelTokens(normalized)) {
+  for (const { token, offset } of lexBody(normalized).tokens) {
     const opening = token.type === 'heading' ? ATX_OPENING.exec(token.raw) : null;
     if (!opening) continue;
     const [, indent = '', hashes = ''] = opening;

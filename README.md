@@ -32,7 +32,7 @@ Your Obsidian vault, through the Local REST API plugin. Read, search, and write 
 | `obsidian_get_note` | Read a note as raw content, full structured form, document map, or a single section |
 | `obsidian_list_notes` | List notes and folders under a vault path, recursively, with extension and name filters |
 | `obsidian_list_tags` | List vault tags with usage counts, most-used first |
-| `obsidian_search_notes` | Search by text, JSONLogic, or BM25-ranked Omnisearch when that plugin is reachable |
+| `obsidian_search_notes` | Search by text, JSONLogic, or BM25-ranked Omnisearch when that plugin is reachable and reads are unscoped |
 | `obsidian_write_note` | Create a note, replace one section, or overwrite a whole file with `overwrite: true` |
 | `obsidian_append_to_note` | Append to a note (creating it if missing) or to one heading, block, or frontmatter field |
 | `obsidian_patch_note` | Append, prepend, or replace against one heading, block reference, or frontmatter field |
@@ -53,6 +53,8 @@ Your Obsidian vault, through the Local REST API plugin. Read, search, and write 
 | `obsidian://status` | Plugin reachability, auth status, versions, and registered API extensions |
 
 Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidian_list_tags`); `obsidian://status` has no tool equivalent.
+
+The [`obsidian-guide`](./skills/obsidian-guide/SKILL.md) skill, loaded by plugin installs and served over MCP as `skill://obsidian-guide/SKILL.md`, carries the gates and multi-call workflows no single tool describes: pinning `active` and `periodic` targets, round-tripping heading sections, paging a search before editing its hits, exact tag matching, and repeating a write after a timeout or a dropped connection.
 
 ## Capability reference
 
@@ -84,7 +86,7 @@ Note and tag data are also reachable through tools (`obsidian_get_note`, `obsidi
 
 - `mode: "text"` requires every space-separated token of `query` as a case-insensitive substring of the filename or body (quotes are literal), shaped by `contextLength` (default 100), `pathPrefix`, and `maxMatchesPerHit` (default 10); `mode: "jsonlogic"` evaluates a `logic` tree over `path`, `content`, `frontmatter.<key>`, `tags`, and `stat` (plus `links`, `backlinks`, and `unresolvedLinks` on plugin versions that provide them, and not under `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS`), with `glob` / `regexp` taking `[PATTERN, VALUE]`
 - `result.mode` discriminates the payload; every mode reports `totalCount` and pages via `nextCursor`, and a text hit clipped to `maxMatchesPerHit` carries `truncated` and `totalMatches`
-- `mode: "omnisearch"` (BM25 ranking, quoted phrases, `-exclusion`, `path:` / `ext:` filters) is offered only when the Omnisearch plugin answered at startup. It keeps its top 50 hits; `path:`, `ext:`, and plain terms apply before that cap, quoted phrases and `-exclusion` after it. `truncated: true` marks a result the cap may have cut, with `truncatedReason` `cap_reached`, `filtered_after_cap`, or `read_scope`; under `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS` it is always `true`, and a hit's membership and `score` still depend on the whole vault
+- `mode: "omnisearch"` (BM25 ranking, typo tolerance, PDF/OCR via Text Extractor, quoted phrases, `-exclusion`, `path:` / `ext:` filters) is offered only when the Omnisearch plugin answered at startup and neither `OBSIDIAN_READ_PATHS` nor `OBSIDIAN_DENY_PATHS` is set. It keeps its top 50 hits; `path:`, `ext:`, and plain terms apply before that cap, quoted phrases and `-exclusion` after it. `truncated: true` marks a result the cap may have cut, with `truncatedReason` `cap_reached` or `filtered_after_cap`. Omnisearch locates `matches` for its first 10 hits only, and a note it adds because it embeds a hit has `score` 0
 
 ---
 
@@ -195,7 +197,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 Obsidian-specific:
 
 - Typed client for the [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin; section writes speak markdown-patch 2.0 to plugin v5.0 and later and 1.x to v4.x, chosen from the reported plugin version
-- Heading targets take a full `Parent::Child` path or a bare leaf name; writes reject an ambiguous one with `ambiguous_section` and its `candidates`, unless exactly one match is a top-level heading. On plugin v5.0 and later, content added to a heading is set off by a blank line (a list item continues an adjacent list), and a heading inside it must sit below the section's level (`heading_outside_section`)
+- Heading targets take a full `Parent::Child` path or a bare leaf name; writes reject an ambiguous one with `ambiguous_section` and its `candidates`, unless exactly one match is a top-level heading. On plugin v5.0 and later, content added to a heading is set off by a blank line (a list item continues an adjacent list), and a heading inside it must sit below the section's level (`heading_outside_section`). A heading write is refused with `repeated_link_definition` when a link reference definition that repeats an earlier label sits above where its section ends (for the last section, above its heading), since the plugin's parser drops it and misplaces every heading below it
 - Folder-scoped read/write permissions, a deny list that withholds paths from both, a read-only switch, and an opt-in command-palette pair (see [Path policy](#path-policy)); server-level `instructions` on `initialize` report the active policy
 - `obsidian_get_note` and `obsidian_open_in_ui` retry a case-mismatched path against the real filename, disclosed as `requestedPath` plus a `notice`, and add `Did you mean` suggestions to a miss; writes and deletes match the exact path
 - Regex inputs are capped (`nameRegex` at 256 chars, `useRegex` at 1024) and rejected with `regex_unsafe` when they nest quantifiers
@@ -248,14 +250,14 @@ Generate the key in Obsidian under **Settings → Community Plugins → Local RE
 | `OBSIDIAN_API_KEY` | **Required.** Bearer token for the Local REST API plugin. | — |
 | `OBSIDIAN_BASE_URL` | Local REST API base URL; `https://127.0.0.1:27124` is the always-on HTTPS port. A trailing slash is stripped. When nothing answers, calls fail with `obsidian_unreachable`. | `http://127.0.0.1:27123` |
 | `OBSIDIAN_VERIFY_SSL` | Verify the plugin's TLS certificate. Off by default for its self-signed cert; the relaxation applies only to an `https:` `OBSIDIAN_BASE_URL`. With `true`, an untrusted cert fails calls with `certificate_rejected`. | `false` |
-| `OBSIDIAN_REQUEST_TIMEOUT_MS` | Per-request timeout in milliseconds. | `30000` |
+| `OBSIDIAN_REQUEST_TIMEOUT_MS` | Milliseconds (at most 2147483647) one request attempt, headers and body, may take. `GET`, `PUT`, and `DELETE` requests retry a timed-out attempt; all the requests of one tool call share a 45 s budget (or this value, when longer), so at the default a stalled Obsidian fails the call with `obsidian_timeout` before a typical MCP client's 60 s request timeout. | `30000` |
 | `OBSIDIAN_ENABLE_COMMANDS` | Enable `obsidian_list_commands` and `obsidian_execute_command`. Commands are opaque and can be destructive. | `false` |
 | `OBSIDIAN_READ_PATHS` | Comma-separated folder allowlist for reads. See [Path policy](#path-policy). | unset (full vault) |
 | `OBSIDIAN_WRITE_PATHS` | Comma-separated folder allowlist for writes. See [Path policy](#path-policy). | unset (the read scope, or the full vault without one) |
 | `OBSIDIAN_DENY_PATHS` | Comma-separated paths withheld from reads and writes alike, overriding both allowlists. See [Path policy](#path-policy). | unset (nothing denied) |
 | `OBSIDIAN_READ_ONLY` | Deny every write and disable the command-palette pair. | `false` |
 | `OBSIDIAN_DELETE_ELICITATION` | Ask the user to confirm each `obsidian_delete_note` call through an elicitation form before deleting. Needs a client that renders elicitation, and a stateful session over HTTP (not required when `OBSIDIAN_READ_ONLY=true` disables the tool). Off, the delete runs on the first call. | `false` |
-| `OBSIDIAN_OMNISEARCH_URL` | [Omnisearch](https://github.com/scambier/obsidian-omnisearch) HTTP server URL. Unset derives from the `OBSIDIAN_BASE_URL` host on port `51361`. Probed once at startup; the `omnisearch` search mode appears only if it answers. | derived |
+| `OBSIDIAN_OMNISEARCH_URL` | [Omnisearch](https://github.com/scambier/obsidian-omnisearch) HTTP server URL. Unset derives from the `OBSIDIAN_BASE_URL` host on port `51361`. Probed once at startup; the `omnisearch` search mode appears only if it answers. Under `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS` it is never probed or called and the mode is withheld (see [Path policy](#path-policy)). | derived |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateful`, `stateless`, or `auto`. With `OBSIDIAN_DELETE_ELICITATION=true` and `OBSIDIAN_READ_ONLY` off, the server requires a stateful session, because the confirmation needs one on 2025-era clients, so `stateless` fails startup over HTTP. No effect on stdio. | `stateful` |
@@ -286,7 +288,8 @@ Four optional env vars limit which vault paths the tools can touch. Unset, reads
   - JSONLogic: the server evaluates the tree over the readable notes, so it never reads a note outside the scope. Notes carry no `links`, `backlinks`, or `unresolvedLinks`, since Obsidian resolves a link across the whole vault: a tree naming one by a fixed `var`, `missing`, or `missing_some` key fails with `link_fields_unavailable`, and a computed key reads `null`. Match link text in `content` instead. A tree that names `content` reads each readable note with one request per note, at most 32 in flight across the server.
   - Evaluation is bounded (1,000 levels of nesting, a work budget per note and per search, 10 s of evaluation, 45 s for the whole search); a tree past a bound fails with `logic_too_costly`. A readable note nested too deep for the evaluator (about 3,500 levels under Node) fails the search with `note_too_deep`.
   - Text: the server never calls the plugin's text search. It asks the plugin which readable notes may hold every token, reads each candidate note, and applies Obsidian's search rule itself, so hits and context windows match the unscoped search. Past 45 s it fails with `text_search_too_costly`, and `context_length_too_large` fails where the plugin's response for the readable matches alone would pass its size ceiling.
-  - Omnisearch ranks the whole vault before the scope filters it (see `obsidian_search_notes`).
+  - Paging: a scoped text or JSONLogic search reads the notes on its first page only. Its later pages come from the hits that page kept, for 5 minutes past the last page read and within 32 Mi characters across searches, so they show the vault as the first page found it; a cursor whose hits are gone, or sent with a different `query`, `contextLength`, `maxMatchesPerHit`, or tree, searches again.
+  - Omnisearch: the `omnisearch` mode is withheld and the plugin is never called. Omnisearch ranks and selects its results over the whole vault, so they depend on notes outside the scope. Ranking, typo tolerance, and PDF/OCR coverage are not available under a scope.
 - Tag listings (`obsidian_list_tags`, `obsidian://tags`) under `OBSIDIAN_READ_PATHS` or `OBSIDIAN_DENY_PATHS` cover readable notes only, counting notes rather than occurrences. Write paths and read-only alone leave them vault-wide.
 - The server `instructions` state the effective scope: readable is the read paths plus the write paths, and writable is the write paths, or the read scope when only reads are restricted. With a deny list set, each scope reads "…, except paths the operator withholds", naming none of them, and an empty scope reads `none`. The startup log prints the configured lists, the deny list included.
 
@@ -294,7 +297,7 @@ Four optional env vars limit which vault paths the tools can touch. Unset, reads
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 
 - **Clone and install:**
 
@@ -344,6 +347,7 @@ If the port is reachable from other machines, set `MCP_AUTH_MODE=jwt` (with `MCP
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`) and shared schemas and helpers. |
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). |
 | `src/mcp-server/prompts` | Prompt definitions (none registered). |
+| `skills/` | The `obsidian-guide` skill published to agents that install the server. |
 | `tests/` | Vitest tests for tools, resources, services, and config. |
 | `docs/` | Local REST API OpenAPI spec and the generated `tree.md`. |
 | `changelog/` | Per-version release notes; `CHANGELOG.md` is the regenerated rollup. |

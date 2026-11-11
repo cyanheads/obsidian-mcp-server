@@ -95,7 +95,7 @@ export async function withCaseFallback<T>(
           reason: 'ambiguous_path',
           matches: probe.caseMatches,
         },
-        { cause: err },
+        { cause: err, literals: probe.caseMatches },
       );
     }
     if (probe.extInsensitive.length === 0) throw err;
@@ -103,7 +103,7 @@ export async function withCaseFallback<T>(
     throw notFound(
       didYouMean(err.message, suggestions),
       { ...(err.data ?? {}), suggestions },
-      { cause: err },
+      { cause: err, literals: suggestions },
     );
   }
 }
@@ -185,25 +185,28 @@ export async function findCaseVariants(
 }
 
 /**
- * Message and error data for a `case_variant_exists` refusal. `existingPath`
- * is set only when exactly one variant is listed — never picked from several,
- * and never inferred when none is: a file Obsidian does not index (a dot-file)
- * refuses a write the same way and never appears in a listing.
+ * Message, error data, and `literals` for a `case_variant_exists` refusal.
+ * `existingPath` is set only when exactly one variant is listed — never picked
+ * from several, and never inferred when none is: a file Obsidian does not
+ * index (a dot-file) refuses a write the same way and never appears in a
+ * listing. It is the path the caller sends back, so it is the one literal.
  */
 export function caseVariantError(
   path: string,
   variants: readonly string[],
-): { message: string; data: { path: string; existingPath?: string } } {
+): { data: { path: string; existingPath?: string }; literals: string[]; message: string } {
   const existingPath = variants.length === 1 ? variants[0] : undefined;
   if (existingPath === undefined) {
     return {
       message: `'${path}' collides with a file already on disk: one whose name differs only in letter case, or one Obsidian does not index.`,
       data: { path },
+      literals: [],
     };
   }
   return {
     message: `Note '${existingPath}' already exists, and this vault's filesystem treats '${path}' as the same file.`,
     data: { path, existingPath },
+    literals: [existingPath],
   };
 }
 
@@ -224,8 +227,8 @@ export async function withCaseVariantNamed<T>(
   } catch (err) {
     if (!(err instanceof McpError) || err.data?.reason !== 'case_variant_exists') throw err;
     const { variants } = await findCaseVariants(ctx, svc, path);
-    const { message, data } = caseVariantError(path, variants);
-    throw conflict(message, { ...data, reason: 'case_variant_exists' }, { cause: err });
+    const { message, data, literals } = caseVariantError(path, variants);
+    throw conflict(message, { ...data, reason: 'case_variant_exists' }, { cause: err, literals });
   }
 }
 

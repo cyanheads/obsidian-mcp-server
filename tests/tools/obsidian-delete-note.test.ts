@@ -756,6 +756,23 @@ describe('obsidian_delete_note on a case-folding filesystem', () => {
     expect(vault.deleted).toEqual([REAL]);
   });
 
+  it('renders the near match as code on the text surface, where escaping would alter the copy', async () => {
+    installVault({ '_inbox/mcp_delcase.md': NOTE_BODY }, { caseFolding: true });
+
+    const res = await runToolContract(defaultDeleteNote, {
+      target: { type: 'path', path: '_inbox/MCP_DelCase.md' },
+    });
+
+    expect(res.isError).toBe(true);
+    expect((res.structuredContent as { error: unknown }).error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: 'Not found: _inbox/MCP_DelCase.md. Did you mean: "_inbox/mcp_delcase.md"?',
+      data: { reason: 'note_missing', suggestions: ['_inbox/mcp_delcase.md'] },
+    });
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('Did you mean: "`_inbox/mcp_delcase.md`"?');
+  });
+
   it('a wrong-case path carries the recovery hint on the wire', async () => {
     installVault({ [REAL]: NOTE_BODY }, { caseFolding: true });
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
  * @fileoverview obsidian-mcp-server entry point. Initializes the Obsidian
- * Local REST API service at module load so the Omnisearch probe can run
+ * Local REST API service at module load so Omnisearch availability is decided
  * before tools are constructed — `obsidian_search_notes` is built via a
- * factory that takes Omnisearch reachability as input, so the `omnisearch`
- * mode appears in the tool schema only when the plugin is actually reachable.
+ * factory that takes it as input, so the `omnisearch` mode appears in the tool
+ * schema only with reads unscoped and the plugin actually reachable.
  * @module index
  */
 
@@ -18,6 +18,8 @@ import {
   buildDeleteNoteTool,
   buildSearchNotesTool,
   commandToolDefinitions,
+  type OmnisearchAvailability,
+  omnisearchAvailability,
   readToolDefinitions,
   writeToolDefinitions,
 } from '@/mcp-server/tools/definitions/index.js';
@@ -28,16 +30,17 @@ const config = getServerConfig();
 const policy = new PathPolicy(config);
 
 /**
- * Init the service at module load (rather than inside `setup()`) so the
- * Omnisearch probe can run before tool construction. `setup()` runs after
- * tools are passed into `createApp()`, which is too late to influence the
+ * Init the service at module load (rather than inside `setup()`) so
+ * Omnisearch availability — the probe, or `withheld` under a read scope with
+ * no probe — is known before tool construction. `setup()` runs after tools
+ * are passed into `createApp()`, which is too late to influence the
  * search-notes schema.
  */
 initObsidianService(config);
 const obsidian = getObsidianService();
-const omnisearchReachable = await obsidian.probeOmnisearch();
+const omnisearch = await omnisearchAvailability(obsidian);
 
-const searchNotesTool = buildSearchNotesTool({ omnisearchReachable });
+const searchNotesTool = buildSearchNotesTool({ omnisearch });
 
 const writeToolSet = [
   ...writeToolDefinitions,
@@ -84,10 +87,12 @@ const { services } = await createApp({
   prompts: allPromptDefinitions,
   instructions: buildInstructions({
     enableCommands: config.enableCommands,
-    omnisearchReachable,
+    omnisearch,
     policy,
     readOnly: config.readOnly,
   }),
+  /** Root `skills/`, served as `skill://<name>/SKILL.md` to clients without the plugin. */
+  skills: 'skills',
   /**
    * With `OBSIDIAN_DELETE_ELICITATION=true` (and writes allowed),
    * `obsidian_delete_note` confirms through `ctx.requestInput`, which a
@@ -116,7 +121,9 @@ const { services } = await createApp({
  * are readable; a write needs read access), so the LLM (or operator) can
  * self-correct without scrolling the log. The deny list (`denyPaths`, present
  * when set) appears only here: the agent-facing surfaces say paths are
- * withheld without naming them.
+ * withheld without naming them. `omnisearch` is the startup
+ * `omnisearchAvailability`; under a read scope it is `withheld` and the
+ * plugin was never probed.
  */
 const bannerCtx = requestContextService.createRequestContext({
   operation: 'startup',
@@ -125,14 +132,19 @@ const bannerCtx = requestContextService.createRequestContext({
     enableCommands: config.enableCommands && !config.readOnly,
     deleteElicitation: deleteGateActive,
     omnisearchUrl: obsidian.omnisearchUrl,
-    omnisearchReachable,
+    omnisearch,
   },
 });
 services.logger.info('Path policy', bannerCtx);
 services.logger.info(
-  omnisearchReachable
-    ? `Omnisearch reachable at ${obsidian.omnisearchUrl} — \`omnisearch\` mode enabled on \`obsidian_search_notes\`.`
-    : `Omnisearch not reachable at ${obsidian.omnisearchUrl} — \`omnisearch\` mode omitted from \`obsidian_search_notes\`. Set OBSIDIAN_OMNISEARCH_URL or enable the Omnisearch plugin's HTTP server to use it.`,
+  (
+    {
+      offered: `Omnisearch reachable at ${obsidian.omnisearchUrl} — \`omnisearch\` mode enabled on \`obsidian_search_notes\`.`,
+      unreachable: `Omnisearch not reachable at ${obsidian.omnisearchUrl} — \`omnisearch\` mode omitted from \`obsidian_search_notes\`. Set OBSIDIAN_OMNISEARCH_URL or enable the Omnisearch plugin's HTTP server to use it.`,
+      withheld:
+        'Omnisearch not probed — `omnisearch` mode withheld from `obsidian_search_notes` because OBSIDIAN_READ_PATHS or OBSIDIAN_DENY_PATHS scopes reads. Omnisearch ranks and selects its results over the whole vault, so they depend on notes outside the scope; `text` and `jsonlogic` modes search the readable notes alone.',
+    } satisfies Record<OmnisearchAvailability, string>
+  )[omnisearch],
   bannerCtx,
 );
 if (policy.readOnlyShadowsWritePaths) {

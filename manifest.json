@@ -69,7 +69,7 @@
     },
     "OBSIDIAN_REQUEST_TIMEOUT_MS": {
       "title": "Request Timeout (ms)",
-      "description": "Per-request timeout in milliseconds. Default: 30000.",
+      "description": "Milliseconds one request attempt may take before it fails with obsidian_timeout; GET, PUT, and DELETE retry it, and all the requests of one tool call share a 45 s budget, or this value when it is longer. Default: 30000.",
       "type": "string",
       "required": false,
       "default": ""
@@ -118,7 +118,7 @@
     },
     "OBSIDIAN_OMNISEARCH_URL": {
       "title": "Omnisearch URL",
-      "description": "Override URL for the Omnisearch plugin HTTP server (port 51361 by default). Set only if the plugin is not on the default port.",
+      "description": "Override URL for the Omnisearch plugin HTTP server (port 51361 by default). Set only if the plugin is not on the default port. Under read or deny paths it is never called and the omnisearch search mode is withheld.",
       "type": "string",
       "required": false,
       "default": ""

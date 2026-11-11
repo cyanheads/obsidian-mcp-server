@@ -9,6 +9,8 @@ import { describe, expect, it } from 'vitest';
 import {
   atxHeadingMarkers,
   blockKinds,
+  type DroppedDefinition,
+  droppedDefinitionInReach,
   extractSection,
   listHeadingPaths,
   scanHeadings,
@@ -1538,9 +1540,11 @@ describe('lazily continued blockquotes / past the depth bound', () => {
  * `marked` drops a link reference definition whose label is already defined
  * but still consumes its text, so the raw lengths of the tokens it keeps no
  * longer cover the note. Every heading after the duplicate is located in the
- * note's own bytes regardless, by each reader and `sectionBody`. The 1.x
- * write span alone mirrors the engine, which sums the kept tokens and so
- * splices short of the heading by each dropped definition.
+ * note's own bytes regardless, by each reader, `sectionBody`, and the 1.x
+ * write span. The engine sums the kept tokens and so splices short of each
+ * heading after a dropped definition; the service refuses every write that
+ * would read such an offset (`droppedDefinitionInReach`), so the 1.x span
+ * agrees with the engine's wherever a write goes out.
  */
 describe('duplicate link reference definitions', () => {
   const tail = '# H\n\nbody\n\n# Next\n\ntail\n';
@@ -1582,29 +1586,41 @@ describe('duplicate link reference definitions', () => {
    * The engine's span counts the kept tokens alone: for the top-level
    * duplicate, `# H` at 17 and `# Next` at 28 fall 9 characters short (the
    * dropped `[r]: /b\n\n`), so it splices from 8 + `# H`.length + 1 = 12 to 19.
+   * The 1.x span stays on the note's own headings.
    */
-  it('spans a 1.x write where the engine splices, short by the dropped definition', () => {
-    expect(v1HeadingSpan(TOP_LEVEL, 'H')).toEqual({ start: 12, end: 19 });
-    expect(extractSection(note(TOP_LEVEL), { type: 'heading', target: 'H' }).value).toBe(
-      '# H\n\nbody',
+  it('spans a 1.x write on the note’s own headings, where the engine falls short', () => {
+    expect(engineSpan(TOP_LEVEL, 'H')).toEqual({ start: 12, end: 19 });
+    expect(v1HeadingSpan(TOP_LEVEL, 'H')).toEqual({ start: 21, end: 28 });
+  });
+
+  it.each(NOTES)('spans a 1.x write on the note’s own headings after %s', (_label, md) => {
+    const h = md.indexOf('# H');
+    const next = md.indexOf('# Next');
+    expect(v1HeadingSpan(md, 'H')).toEqual({ start: h + 4, end: next });
+    expect(v1HeadingSpan(md, 'Next')).toEqual({ start: next + 7, end: md.length });
+  });
+
+  it.each<[string, string, string[]]>([
+    [
+      'a repeat inside the last section',
+      '# H\n\nbody\n\n# Next\n\n[r]: /a\n[r]: /b\n\n## Sub\nx\n',
+      ['H', 'Next'],
+    ],
+    [
+      'a label a list item defines first',
+      '# A\nx\n# B\n\n- [r]: /a\n\n[r]: /b\n\n## C\ny\n',
+      ['A', 'B'],
+    ],
+    ['a repeat at the top', `${TOP_LEVEL}## Sub\nx\n`, []],
+  ])('spans a 1.x write as the engine does wherever one goes out, after %s', (_l, md, sent) => {
+    const paths = listHeadingPaths(md);
+    expect(paths.filter((path) => !droppedDefinitionInReach(md, { path, create: false }))).toEqual(
+      sent,
     );
-  });
-
-  it.each(DROPPED)('spans a 1.x write as the engine does after %s', (_label, md) => {
-    expect(v1HeadingSpan(md, 'H')).toEqual(engineSpan(md, 'H'));
-    expect(v1HeadingSpan(md, 'Next')).toEqual(engineSpan(md, 'Next'));
-  });
-
-  /**
-   * List items go unlexed, so a label an item defines first is never
-   * registered: the scan keeps the later top-level definition the engine
-   * drops, and the 1.x span there stays on the note's own headings.
-   */
-  it('spans a 1.x write on the note’s own headings when a list item defines the label', () => {
-    const h = ITEM_FIRST.indexOf('# H');
-    const next = ITEM_FIRST.indexOf('# Next');
-    expect(engineSpan(ITEM_FIRST, 'H')).toEqual({ start: h + 4 - 9, end: next - 9 });
-    expect(v1HeadingSpan(ITEM_FIRST, 'H')).toEqual({ start: h + 4, end: next });
+    for (const path of sent) expect(v1HeadingSpan(md, path)).toEqual(engineSpan(md, path));
+    for (const path of paths.filter((p) => !sent.includes(p))) {
+      expect(v1HeadingSpan(md, path)).not.toEqual(engineSpan(md, path));
+    }
   });
 
   it.each(NOTES)('stops a block walk-back at the heading line after %s', (_label, md) => {
@@ -1638,6 +1654,263 @@ describe('duplicate link reference definitions', () => {
     expect(stockKinds(md)).toEqual(['list', 'heading']);
     expect(blockKinds(md)).toEqual(['list', 'def', 'heading']);
   });
+
+  /**
+   * A heading write is refused when the first top-level definition stock
+   * `marked` drops starts before the end of the write's reach: the heading
+   * closing the target's section, or the target heading itself when nothing
+   * closes it; the addressed block for a `within` write; and for a write that
+   * creates the heading, the heading closing its deepest existing ancestor's
+   * section. The refusal names the dropped definition's label as that
+   * definition writes it, and the line it starts on.
+   */
+  describe('droppedDefinitionInReach', () => {
+    it.each<[string, string, DroppedDefinition]>([
+      ['a top-level duplicate', TOP_LEVEL, { label: 'r', line: 2 }],
+      [
+        'a footnote-style duplicate',
+        `text[^1]\n\n[^1]: first\n[^1]: second\n\n${tail}`,
+        { label: '^1', line: 4 },
+      ],
+      ['a case-folded duplicate', `[A]: /x\n[a]: /y\n\n${tail}`, { label: 'a', line: 2 }],
+      [
+        'a whitespace-folded duplicate',
+        `[a  b]: /x\n[a b]: /y\n\n${tail}`,
+        { label: 'a b', line: 2 },
+      ],
+      [
+        'a first definition inside a lazily continued quote',
+        `> [r]: /a\nlazy\n\n[r]: /b\n\n${tail}`,
+        { label: 'r', line: 4 },
+      ],
+      ['a first definition inside a list item', ITEM_FIRST, { label: 'r', line: 3 }],
+    ])('refuses a write to the section below %s, naming the repeat', (_label, md, expected) => {
+      expect(droppedDefinitionInReach(md, { path: 'H', create: false })).toEqual(expected);
+    });
+
+    it.each<[string, string, string, DroppedDefinition | undefined]>([
+      ['a repeat above the target heading', TOP_LEVEL, 'H', { label: 'r', line: 2 }],
+      [
+        'a repeat inside a section a later heading closes',
+        '# H\n\n[r]: /a\n[r]: /b\n\nbody\n\n# Next\n\ntail\n',
+        'H',
+        { label: 'r', line: 4 },
+      ],
+      [
+        'a repeat under a sub-heading, above the heading closing the section',
+        '# H\n## S\n\n[r]: /a\n[r]: /b\n\n# Next\n',
+        'H',
+        { label: 'r', line: 5 },
+      ],
+      [
+        'a repeat below the heading closing the section',
+        '# H\n\nbody\n\n# Next\n\n[r]: /a\n[r]: /b\n\ntail\n',
+        'H',
+        undefined,
+      ],
+      [
+        'a repeat inside the section after the one the target closes',
+        '# H\n\nbody\n\n# Next\n\n[r]: /a\n[r]: /b\n\n# Last\n\ntail\n',
+        'H',
+        undefined,
+      ],
+      [
+        'a repeat above a section nothing closes',
+        '[r]: /a\n[r]: /b\n\n# H\n\nbody\n',
+        'H',
+        { label: 'r', line: 2 },
+      ],
+      [
+        'a repeat inside a section nothing closes',
+        '# H\n\nbody\n\n[r]: /a\n[r]: /b\n',
+        'H',
+        undefined,
+      ],
+      ['a repeat, for a heading the note lacks', TOP_LEVEL, 'Nope', undefined],
+      ['no repeat', tail, 'H', undefined],
+    ])('judges a plain write against %s', (_label, md, path, expected) => {
+      expect(droppedDefinitionInReach(md, { path, create: false })).toEqual(expected);
+    });
+
+    /**
+     * A container's labels are read from its raw text and keys compare
+     * coarsely, so each top-level definition below — which stock `marked`
+     * keeps, since the `[r]:` before it is not a definition or the labels
+     * differ — is refused as a repeat: a `[r]:` mid-line in a list item,
+     * after a task checkbox, or in a fence inside an item, and a label equal
+     * to an item's once `>` is removed. The refusal never misses a
+     * definition stock `marked` drops at the cost of these.
+     */
+    it.each<[string, string, DroppedDefinition]>([
+      [
+        'a `[r]:` mid-line in a list item',
+        `- see [r]: x\n\n[r]: /b\n\n${tail}`,
+        { label: 'r', line: 3 },
+      ],
+      [
+        'a `[r]:` after a task checkbox',
+        `- [ ] [r]: /a\n\n[r]: /b\n\n${tail}`,
+        { label: 'r', line: 3 },
+      ],
+      [
+        'a `[r]:` in a fence inside a list item',
+        `- item\n\n  ~~~\n  [r]: /a\n  ~~~\n\n[r]: /b\n\n${tail}`,
+        { label: 'r', line: 7 },
+      ],
+      [
+        'a label equal to an item’s once `>` is removed',
+        `- [a>b]: /x\n\n[ab]: /y\n\n${tail}`,
+        { label: 'ab', line: 3 },
+      ],
+    ])('refuses a write below a definition stock marked keeps after %s', (_label, md, expected) => {
+      expect(stockKinds(md)).toEqual([
+        'list',
+        'def',
+        'heading',
+        'paragraph',
+        'heading',
+        'paragraph',
+      ]);
+      expect(droppedDefinitionInReach(md, { path: 'H', create: false })).toEqual(expected);
+    });
+
+    /**
+     * A `within` write reads only the block it addresses: the repeat between
+     * the section's two lists sits before the last one, which an append
+     * addresses, and after the first, which a prepend addresses.
+     */
+    it.each<[string, 0 | -1 | undefined, DroppedDefinition | undefined]>([
+      ['`within: -1`', -1, { label: 'r', line: 6 }],
+      ['`within: 0`', 0, undefined],
+      ['a plain', undefined, { label: 'r', line: 6 }],
+    ])('judges %s write by the span it reads', (_label, within, expected) => {
+      const md = '# H\n\n- a\n\n[r]: /a\n[r]: /b\n\n- c\n\n# Next\n';
+      expect(sectionBody(md, 'H')?.blocks).toEqual(['list', 'def', 'list']);
+      expect(droppedDefinitionInReach(md, { path: 'H', create: false, within })).toEqual(expected);
+    });
+
+    /**
+     * A heading the note lacks is created where its deepest existing
+     * ancestor's section ends: at the heading closing that section, or at the
+     * end of the note, which no definition shifts, when nothing closes it or
+     * no ancestor exists. Without `create`, nothing is written.
+     */
+    it.each<[string, string, string, DroppedDefinition | undefined]>([
+      [
+        'under an ancestor a later heading closes',
+        '# A\n\n[r]: /a\n[r]: /b\n\nbody\n\n# B\n',
+        'A::New',
+        { label: 'r', line: 4 },
+      ],
+      [
+        'two levels under that ancestor',
+        '# A\n\n[r]: /a\n[r]: /b\n\nbody\n\n# B\n',
+        'A::X::New',
+        { label: 'r', line: 4 },
+      ],
+      [
+        'under the deepest existing ancestor, closed above the repeat',
+        '# A\n## S\ns\n## T\n[r]: /a\n[r]: /b\n\nt\n# B\n',
+        'A::S::New',
+        undefined,
+      ],
+      [
+        'under an ancestor that runs to the end of the note',
+        '[r]: /a\n[r]: /b\n\n# A\n\nbody\n',
+        'A::New',
+        undefined,
+      ],
+      ['with no existing ancestor', TOP_LEVEL, 'Fresh', undefined],
+      [
+        'under a repeated heading, whose first occurrence 2.0 descends through',
+        '[r]: /a\n\n# H\n\n[r]: /b\n\n# H\n\n## Sub\n',
+        'H::Sub::New',
+        { label: 'r', line: 5 },
+      ],
+      [
+        'under a repeated heading, whose last occurrence 1.x reads',
+        '# H\n\nfirst\n\n# H\n\n[r]: /a\n[r]: /b\n\n# Z\n',
+        'H::New',
+        { label: 'r', line: 8 },
+      ],
+      [
+        'under a repeated heading closed above the repeat at its first occurrence and open to the end at its last',
+        '# H\n\nfirst\n\n# H\n\n[r]: /a\n[r]: /b\n',
+        'H::New',
+        undefined,
+      ],
+    ])('judges a write that creates a heading %s', (_label, md, path, expected) => {
+      expect(droppedDefinitionInReach(md, { path, create: true })).toEqual(expected);
+      expect(droppedDefinitionInReach(md, { path, create: false })).toBeUndefined();
+    });
+
+    it.each<[string, string, number, string[]]>([
+      [
+        'repeats it at the top level',
+        `[a\\]b]: /x\n[a\\]b]: /y\n\n${tail}`,
+        2,
+        ['def', 'heading', 'paragraph', 'heading', 'paragraph'],
+      ],
+      [
+        'defines it first in a list item',
+        `- [a\\]b]: /x\n\n[a\\]b]: /y\n\n${tail}`,
+        3,
+        ['list', 'heading', 'paragraph', 'heading', 'paragraph'],
+      ],
+    ])('names a label holding an escaped bracket when a note %s', (_label, md, line, kinds) => {
+      expect(stockKinds(md)).toEqual(kinds);
+      expect(droppedDefinitionInReach(md, { path: 'H', create: false })).toEqual({
+        label: 'a\\]b',
+        line,
+      });
+    });
+
+    /**
+     * A label broken across lines inside a container carries the container's
+     * prefixes (indentation, `>`) in its raw text and none in the tag stock
+     * `marked` gives it, which equals the top-level definition's.
+     */
+    it.each<[string, string, string]>([
+      ['a list item', `- [a\n  b]: /x\n\n[a b]: /y\n\n${tail}`, 'list'],
+      ['a blockquote', `> [a\n> b]: /x\n\n[a b]: /y\n\n${tail}`, 'blockquote'],
+    ])('finds the repeat of a label %s defines across two lines', (_label, md, container) => {
+      expect(stockKinds(md)).toEqual([container, 'heading', 'paragraph', 'heading', 'paragraph']);
+      expect(droppedDefinitionInReach(md, { path: 'H', create: false })).toEqual({
+        label: 'a b',
+        line: 4,
+      });
+    });
+
+    it.each<[string, string, DroppedDefinition]>([
+      [
+        'three definitions of one label',
+        `[r]: /a\n[R]: /b\n[r]: /c\n\n${tail}`,
+        { label: 'R', line: 2 },
+      ],
+      [
+        'a repeat a list item defines first, above one the lex drops',
+        `- [s]: /a\n\n[s]: /b\n\n[r]: /a\n[r]: /b\n\n${tail}`,
+        { label: 's', line: 3 },
+      ],
+      [
+        'a repeat the lex drops, above one a list item defines first',
+        `[r]: /a\n[r]: /b\n\n- [s]: /a\n\n[s]: /b\n\n${tail}`,
+        { label: 'r', line: 2 },
+      ],
+    ])('names the first dropped definition of %s', (_label, md, expected) => {
+      expect(droppedDefinitionInReach(md, { path: 'H', create: false })).toEqual(expected);
+    });
+
+    it.each([
+      ['CRLF', '[r]: /a\r\n\r\n[r]: /b\r\n\r\n# H\r\nbody\r\n# Next\r\n'],
+      ['lone CR', '[r]: /a\r\r[r]: /b\r\r# H\rbody\r# Next\r'],
+    ])('counts %s breaks in the line it names', (_label, md) => {
+      expect(droppedDefinitionInReach(md, { path: 'H', create: false })).toEqual({
+        label: 'r',
+        line: 3,
+      });
+    });
+  });
 });
 
 /**
@@ -1670,4 +1943,58 @@ describe('sectionBody and blockKinds / cost', () => {
       from,
     );
   });
+});
+
+/** `line(i)` for i = 0, 1, … joined until the text reaches `size` characters. */
+function lines(size: number, line: (i: number) => string): string {
+  let text = '';
+  for (let i = 0; text.length < size; i++) text += line(i);
+  return text;
+}
+
+/**
+ * The refusal check lexes the note once and reads each list and blockquote
+ * above the write's reach once, so its cost grows linearly with the note:
+ * each shape — one long line ending in a break, line breaks throughout, the
+ * bracket runs the label scanner reads, and definitions by the thousand —
+ * stays inside the CPU budget at every size of its span and grows well short
+ * of quadratically across it. The third element is where a shape's span
+ * starts below the size at which Bun's regex engine changes speed on it, so
+ * a span stays inside one tier. Those spans run from 150 to 9,600.
+ */
+describe('droppedDefinitionInReach / cost', () => {
+  it.each<[string, (size: number) => string, number?]>([
+    ['one long line ending in a break', (n) => `${'§1 x'.repeat(n / 4)}\ny`, 150],
+    ['line breaks throughout', (n) => '  \r\n'.repeat(n / 4)],
+    ['a list item of `[\\[` repeats', (n) => '- [\\['.repeat(n / 5)],
+    ['a list item opening a run of escaped openers', (n) => `- [${'\\['.repeat(n / 2)}`, 150],
+    ['a blockquote opening a run of escaped openers', (n) => `> [${'\\['.repeat(n / 2)}`, 150],
+    ['a list item of unclosed openers', (n) => `- ${'['.repeat(n)}`],
+    ['a blockquote line of `[a` repeats', (n) => '> [a'.repeat(n / 4), 150],
+    ['repeated definitions of one label', (n) => '[r]: /a\n'.repeat(n / 8)],
+    ['distinct top-level definitions', (n) => lines(n, (i) => `[d${i}]: /x\n`)],
+    ['list items defining distinct labels', (n) => lines(n, (i) => `- [l${i}]: /x\n`)],
+  ])('judges a write below %s in linear time, inside the budget', async (_label, build, from) => {
+    // The repeat below `Z` is outside the write's reach, but it makes every note lex in full.
+    await expectLinearCost(
+      (size) => `# A\n${build(size)}\n# Z\n\n[r]: /a\n[r]: /b\n`,
+      (md) => droppedDefinitionInReach(md, { path: 'Z', create: false }),
+      from,
+    );
+  });
+
+  /** The path a write creates is the caller's, and its segments are unbounded in number. */
+  it.each([
+    ['under an existing ancestor', 'A'],
+    ['with no existing ancestor', 'Q'],
+  ])(
+    'judges a write creating a heading of many segments %s in linear time',
+    async (_label, root) => {
+      const md = '# A\n\n[r]: /a\n[r]: /b\n\n# Z\n';
+      await expectLinearCost(
+        (size) => `${root}${'::x'.repeat(size / 3)}`,
+        (path) => droppedDefinitionInReach(md, { path, create: true }),
+      );
+    },
+  );
 });

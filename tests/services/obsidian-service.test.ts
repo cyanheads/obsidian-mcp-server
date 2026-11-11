@@ -365,16 +365,22 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
 
   /**
    * Answer the reads a heading write makes on plugin v5.x before its PATCH:
-   * the version report and the markdown-patch 2.0 document map. Any other
-   * read fails the test.
+   * the version report, the markdown-patch 2.0 document map, and — for a
+   * write to a heading the note has — one read of `note`, which the write
+   * checks for repeated link definitions. Any other read fails the test.
    */
-  function serveMap(headings: HeadingTree): void {
+  function serveMap(headings: HeadingTree, note?: string): void {
     servePluginVersion(pool, '5.2.0');
     pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
       const headers = lowerCased(opts.headers);
       expect(headers.accept).toBe('application/vnd.olrapi.document-map+json');
       expect(headers['markdown-patch-version']).toBe('2');
       return { statusCode: 200, data: documentMapV2(headings) };
+    });
+    if (note === undefined) return;
+    pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
+      expect(lowerCased(opts.headers).accept).toBe('application/vnd.olrapi.note+json');
+      return { statusCode: 200, data: noteJson('N.md', note) };
     });
   }
 
@@ -388,7 +394,7 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
     });
 
   it('expands a uniquely-matching bare leaf to its full Parent::Child path', async () => {
-    serveMap({ Top: { Child: {}, Sibling: {} } });
+    serveMap({ Top: { Child: {}, Sibling: {} } }, '# Top\n## Child\n## Sibling\n');
     const patched = capturePatchTarget();
 
     await expect(patch('Sibling')).resolves.toBe('Top::Sibling');
@@ -396,7 +402,7 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
   });
 
   it('prefers an exact map entry over expanding it as a leaf', async () => {
-    serveMap({ Top: {}, Other: { Top: {} } });
+    serveMap({ Top: {}, Other: { Top: {} } }, '# Top\n# Other\n## Top\n');
     const patched = capturePatchTarget();
 
     await expect(patch('Top')).resolves.toBe('Top');
@@ -427,25 +433,31 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
   });
 
   it('sends a locator that already carries the delimiter unexpanded', async () => {
-    serveMap({ Top: { Child: {} }, Child: {} });
+    serveMap({ Top: { Child: {} }, Child: {} }, '# Top\n## Child\n# Child\n');
     const patched = capturePatchTarget();
 
     await expect(patch('Top::Child')).resolves.toBe('Top::Child');
     expect(patched.seen()).toBe('Top::Child');
   });
 
-  it('expands a leaf and counts its repeats from a single read', async () => {
-    let reads = 0;
+  it('expands a leaf and counts its repeats from a single map read, reading the note once', async () => {
+    const reads = { map: 0, note: 0 };
     servePluginVersion(pool, '5.2.0');
-    pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply(() => {
-      reads++;
-      return { statusCode: 200, data: documentMapV2({ Top: { Child: {} } }) };
-    });
+    for (let i = 0; i < 2; i++) {
+      pool.intercept({ path: '/vault/N.md', method: 'GET' }).reply((opts) => {
+        if (lowerCased(opts.headers).accept === 'application/vnd.olrapi.note+json') {
+          reads.note++;
+          return { statusCode: 200, data: noteJson('N.md', '# Top\n## Child\n') };
+        }
+        reads.map++;
+        return { statusCode: 200, data: documentMapV2({ Top: { Child: {} } }) };
+      });
+    }
     const patched = capturePatchTarget();
 
     await expect(patch('Child')).resolves.toBe('Top::Child');
     expect(patched.seen()).toBe('Top::Child');
-    expect(reads).toBe(1);
+    expect(reads).toEqual({ map: 1, note: 1 });
   });
 
   /**
@@ -492,9 +504,8 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
    */
   describe('a heading path that repeats in the note', () => {
     it('writes a full path that occurs once', async () => {
-      // # Root / ## Dup / ## Other
-      // No note read is served: the 2.0 map alone decides, so a body scan would fail the test.
-      serveMap({ Root: { Dup: {}, Other: {} } });
+      // The 2.0 map alone counts the repeats; the note's single read checks its link definitions.
+      serveMap({ Root: { Dup: {}, Other: {} } }, '# Root\n## Dup\n## Other\n');
       const patched = capturePatchTarget();
 
       await expect(patch('Root::Dup')).resolves.toBe('Root::Dup');
@@ -502,8 +513,7 @@ describe('ObsidianService.patchNote heading-leaf resolution', () => {
     });
 
     it('writes a root-level exact map entry whose leaf also sits under a parent', async () => {
-      // # X / ## Dup / # Dup
-      serveMap({ X: { Dup: {} }, Dup: {} });
+      serveMap({ X: { Dup: {} }, Dup: {} }, '# X\n## Dup\n# Dup\n');
       const patched = capturePatchTarget();
 
       await expect(patch('Dup')).resolves.toBe('Dup');

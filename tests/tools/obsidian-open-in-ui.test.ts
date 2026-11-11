@@ -149,6 +149,27 @@ describe('obsidian_open_in_ui', () => {
     });
   });
 
+  it('renders a `did you mean` path as code on the text surface, where escaping would alter the copy', async () => {
+    const { pool } = harness.current();
+    pool.intercept({ path: '/vault/_inbox/Draft', method: 'GET' }).reply(404, { message: 'gone' });
+    pool.intercept({ path: '/vault/_inbox/', method: 'GET' }).reply(200, { files: ['Draft.md'] });
+
+    const res = await runToolContract(obsidianOpenInUi, { path: '_inbox/Draft' });
+
+    expect(res.isError).toBe(true);
+    expect((res.structuredContent as { error: unknown }).error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: "Cannot open '_inbox/Draft' — file does not exist.",
+      data: {
+        reason: 'note_missing',
+        suggestions: ['_inbox/Draft.md'],
+        recovery: { hint: expect.stringContaining('Did you mean: "_inbox/Draft.md"?') },
+      },
+    });
+    const text = res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('Did you mean: "`_inbox/Draft.md`"?');
+  });
+
   it('reports createdIfMissing=false for a file that already existed, with failIfMissing=false', async () => {
     let probed = false;
     harness

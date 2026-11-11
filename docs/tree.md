@@ -1,6 +1,6 @@
 # obsidian-mcp-server - Directory Structure
 
-Generated on: 2026-10-31 03:22:23
+Generated on: 2026-11-11 08:20:34
 
 ```text
 obsidian-mcp-server/
@@ -144,6 +144,9 @@ obsidian-mcp-server/
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
+├── skills/
+│   └── obsidian-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -212,7 +215,9 @@ obsidian-mcp-server/
 │   │       ├── surrogate.json
 │   │       └── three-word.json
 │   ├── integration/
-│   │   └── delete-note-confirmation.test.ts
+│   │   ├── delete-note-confirmation.test.ts
+│   │   ├── omnisearch-read-scope.test.ts
+│   │   └── published-skills.test.ts
 │   ├── resources/
 │   │   ├── obsidian-status.test.ts
 │   │   ├── obsidian-tags.test.ts
@@ -225,6 +230,7 @@ obsidian-mcp-server/
 │   │   ├── obsidian-service-error-containment.test.ts
 │   │   ├── obsidian-service-patch-format.test.ts
 │   │   ├── obsidian-service-path-policy.test.ts
+│   │   ├── obsidian-service-timeout.test.ts
 │   │   ├── obsidian-service-tls.test.ts
 │   │   ├── obsidian-service-unreachable.test.ts
 │   │   ├── obsidian-service.test.ts
@@ -251,6 +257,7 @@ obsidian-mcp-server/
 │   │   ├── path-error-contracts.test.ts
 │   │   ├── periodic-error-contracts.test.ts
 │   │   └── suggest-paths.test.ts
+│   ├── helpers.test.ts
 │   ├── helpers.ts
 │   └── instructions.test.ts
 ├── .dockerignore

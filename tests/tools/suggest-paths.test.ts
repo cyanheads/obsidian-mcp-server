@@ -5,7 +5,7 @@
  */
 
 import { forbidden, JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import {
   didYouMean,
@@ -13,6 +13,9 @@ import {
   findSimilarPaths,
   withCaseFallback,
 } from '@/mcp-server/tools/definitions/_shared/suggest-paths.js';
+import { obsidianAppendToNote } from '@/mcp-server/tools/definitions/obsidian-append-to-note.tool.js';
+import { obsidianGetNote } from '@/mcp-server/tools/definitions/obsidian-get-note.tool.js';
+import { obsidianWriteNote } from '@/mcp-server/tools/definitions/obsidian-write-note.tool.js';
 import type { NoteTarget } from '@/services/obsidian/types.js';
 import { expectLinearCost, rejectionOf, setupHarness } from '../helpers.js';
 
@@ -258,6 +261,105 @@ describe('withCaseFallback', () => {
         throw orig;
       }),
     ).rejects.toBe(orig);
+  });
+});
+
+/**
+ * A path an error names for the caller to send back renders as a code span in
+ * the text surface, where escaping would put a backslash into the copy
+ * (`\_inbox`); `structuredContent.error` carries it as before.
+ */
+describe('a path the caller copies back, on the text surface', () => {
+  const textOf = (res: Awaited<ReturnType<typeof runToolContract>>) =>
+    res.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+  const errorOf = (res: Awaited<ReturnType<typeof runToolContract>>) =>
+    (res.structuredContent as { error: { code: number; data: object; message: string } }).error;
+
+  it('renders a "did you mean" suggestion as code', async () => {
+    const { pool } = harness.current();
+    pool
+      .intercept({ path: '/vault/_inbox/Draft', method: 'GET' })
+      .reply(404, { message: 'absent' });
+    pool.intercept({ path: '/vault/_inbox/', method: 'GET' }).reply(200, { files: ['Draft.md'] });
+
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'full',
+      target: { type: 'path', path: '_inbox/Draft' },
+    });
+
+    expect(errorOf(res)).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: 'Not found: _inbox/Draft. Did you mean: "_inbox/Draft.md"?',
+      data: { reason: 'note_missing', path: '_inbox/Draft', suggestions: ['_inbox/Draft.md'] },
+    });
+    expect(textOf(res)).toContain('Did you mean: "`_inbox/Draft.md`"?');
+    expect(textOf(res)).not.toContain('\\_inbox/Draft.md');
+  });
+
+  it('renders the case matches of an ambiguous path as code', async () => {
+    const { pool } = harness.current();
+    pool
+      .intercept({ path: '/vault/_inbox/draft.md', method: 'GET' })
+      .reply(404, { message: 'absent' });
+    pool
+      .intercept({ path: '/vault/_inbox/', method: 'GET' })
+      .reply(200, { files: ['Draft.md', 'DRAFT.md'] });
+
+    const res = await runToolContract(obsidianGetNote, {
+      format: 'full',
+      target: { type: 'path', path: '_inbox/draft.md' },
+    });
+
+    expect(errorOf(res)).toMatchObject({
+      code: JsonRpcErrorCode.Conflict,
+      message: `Ambiguous case-insensitive matches for '_inbox/draft.md': "_inbox/Draft.md", "_inbox/DRAFT.md".`,
+      data: { reason: 'ambiguous_path', matches: ['_inbox/Draft.md', '_inbox/DRAFT.md'] },
+    });
+    expect(textOf(res)).toContain('"`_inbox/Draft.md`", "`_inbox/DRAFT.md`"');
+  });
+
+  it('renders the existing note a refused whole-file append collided with as code', async () => {
+    const { pool } = harness.current();
+    pool
+      .intercept({ path: '/vault/_inbox/Case.md', method: 'HEAD' })
+      .reply(200, '', { headers: { 'content-length': '7' } });
+    pool.intercept({ path: '/vault/_inbox/Case.md', method: 'POST' }).reply(500, {
+      message: 'Internal Server Error\nFile already exists.',
+      errorCode: 50000,
+    });
+    pool.intercept({ path: '/vault/_inbox/', method: 'GET' }).reply(200, { files: ['case.md'] });
+
+    const res = await runToolContract(obsidianAppendToNote, {
+      target: { type: 'path', path: '_inbox/Case.md' },
+      content: 'y',
+    });
+
+    expect(errorOf(res)).toMatchObject({
+      code: JsonRpcErrorCode.Conflict,
+      message: `Note '_inbox/case.md' already exists, and this vault's filesystem treats '_inbox/Case.md' as the same file.`,
+      data: { reason: 'case_variant_exists', existingPath: '_inbox/case.md' },
+    });
+    expect(textOf(res)).toContain("Note '`_inbox/case.md`' already exists");
+  });
+
+  it('renders the existing note a whole-file write would clobber as code', async () => {
+    const { pool } = harness.current();
+    pool
+      .intercept({ path: '/vault/_inbox/Case.md', method: 'HEAD' })
+      .reply(200, '', { headers: { 'content-length': '7' } });
+    pool.intercept({ path: '/vault/_inbox/', method: 'GET' }).reply(200, { files: ['case.md'] });
+
+    const res = await runToolContract(obsidianWriteNote, {
+      target: { type: 'path', path: '_inbox/Case.md' },
+      content: 'y',
+    });
+
+    expect(errorOf(res)).toMatchObject({
+      code: JsonRpcErrorCode.Conflict,
+      message: `Note '_inbox/case.md' already exists, and this vault's filesystem treats '_inbox/Case.md' as the same file.`,
+      data: { reason: 'case_variant_exists', existingPath: '_inbox/case.md' },
+    });
+    expect(textOf(res)).toContain("Note '`_inbox/case.md`' already exists");
   });
 });
 
